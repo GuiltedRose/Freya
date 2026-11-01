@@ -699,8 +699,9 @@ All are configurable using a JSON file of `DipRules` fields. These are test
 assumptions, not user-approved live limits or estimates of future returns.
 The old replay command defaults to 100 virtual dollars; persistent runs require
 explicit inventory. The current user-reported total bankroll is **$6.50**,
-including reclaimed SOL rent (see `paper_bankroll.json`). This is independent
-of the existing $5,000 live sniping capital threshold.
+including reclaimed SOL rent (see `paper_bankroll.json`). This is a historical
+example, not a current balance. New-launch sniping and its discovery runner have
+been removed; momentum reclaim is the single production strategy.
 
 Buyer-quality gates require >=95% analysis coverage, >=20 independent buyers
 **after clustering**, and <=30% suspected bot buy volume. These are estimates:

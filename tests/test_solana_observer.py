@@ -136,6 +136,9 @@ class PersistenceTests(unittest.TestCase):
         endpoint={'enabled':True,'url':'https://example.invalid','ws_url':'wss://example.invalid',
                   'source_id':'fixture','policy':dict(fixtures.POLICY)}
         config={'endpoints':[endpoint],'markets':[{'mint':fixtures.MINT,'pool':fixtures.POOL}]}
+        from onchain_decode import Decoder
+        config['reviewed_program_versions']={program:[{'from_slot':0,'through_slot':10000,
+            'deployment_slot':0,'idl_hash':spec['hash']}] for program,spec in Decoder().specs.items()}
         path=Path(self.helper.temp.name)/'new.sqlite'
         with self.assertRaises(ValueError):prepare(config,path)
         self.assertFalse(path.exists())

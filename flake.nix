@@ -81,12 +81,16 @@
                 --add-flags "$out/share/crypto-bot/run_onchain_indexer.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-paper \
                 --add-flags "$out/share/crypto-bot/run_paper.py"
+              makeWrapper ${python}/bin/python $out/bin/crypto-bot-live \
+                --add-flags "$out/share/crypto-bot/run_meme_live.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-unified-learning \
                 --add-flags "$out/share/crypto-bot/run_unified_learning.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-network-budget \
                 --add-flags "$out/share/crypto-bot/solana_network_budget.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-observer \
                 --add-flags "$out/share/crypto-bot/solana_observer.py"
+              makeWrapper ${python}/bin/python $out/bin/crypto-bot-health \
+                --add-flags "$out/share/crypto-bot/runtime_health.py"
             '';
           };
          } // pkgs.lib.optionalAttrs nativeReady {
@@ -115,17 +119,18 @@
         });
       apps = eachSystem (system: {
         default = self.apps.${system}.indexer;
-        indexer = { type = "app"; program = "${self.packages.${system}.default}/bin/crypto-bot-indexer"; };
-        observer = { type = "app"; program = "${self.packages.${system}.default}/bin/crypto-bot-observer"; };
+        indexer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-indexer"; };
+        observer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-observer"; };
         tmux = { type = "app"; program = "${environments.${system}.pkgs.tmux}/bin/tmux"; };
-        paper = { type = "app"; program = "${self.packages.${system}.default}/bin/crypto-bot-paper"; };
+        paper = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-paper"; };
       });
       devShells = eachSystem (system:
         let inherit (environments.${system}) pkgs python;
         in { default = pkgs.mkShell { packages = [ python pkgs.sqlite pkgs.tmux pkgs.zstd pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.nftables pkgs.iproute2 pkgs.iputils pkgs.procps ]; }; }
           // pkgs.lib.optionalAttrs nativeReady {
             native-rpc = pkgs.mkShell {
-              packages = [ (environments.${system}.pythonBase.withPackages (p: [ p.solders p.websockets p.zstandard self.packages.${system}.native-rpc ])) pkgs.rustc pkgs.cargo ];
+              packages = [ (environments.${system}.pythonBase.withPackages (p: [ p.solders p.websockets p.zstandard self.packages.${system}.native-rpc ])) pkgs.rustc pkgs.cargo pkgs.sqlite pkgs.zstd ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.nftables pkgs.iproute2 pkgs.iputils pkgs.procps pkgs.util-linux ];
             };
             native = pkgs.mkShell {
               packages = [ (environments.${system}.pythonBase.withPackages (p: [ p.solders p.websockets p.zstandard (nativePackage system) ])) pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy ];
@@ -142,6 +147,8 @@
           python -m unittest discover -s tests -p test_onchain_stream_candles.py
           python -m unittest discover -s tests -p test_selfhost_observer.py
           python -m unittest discover -s tests -p test_solana_observer.py
+          python -m unittest discover -s tests -p test_pipeline_repair.py
+          python -m unittest discover -s tests -p test_production_pipeline.py
           touch $out
         ''; } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           solana-network-lifecycle = import ./tests/nix/solana-network-lifecycle.nix { inherit pkgs; };
@@ -157,7 +164,7 @@
       nixosModules.default = { config, lib, pkgs, ... }:
         import ./nix/module.nix {
           inherit config lib pkgs;
-          package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          package = self.packages.${pkgs.stdenv.hostPlatform.system}.native-rpc-app;
         };
     };
 }

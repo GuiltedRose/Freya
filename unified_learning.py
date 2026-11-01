@@ -11,7 +11,7 @@ import json
 import math
 import time
 
-from neural_autonomy import MIN_TRAINING, qualification
+from neural_autonomy import MIN_TRAINING, MAX_AGE, qualification
 from neural_network import initialize, fit_balanced, forward
 from shadow_ml_models import (
     fit_svm, calibrate_svm, fit_lstm, predict, MAX_STEPS
@@ -506,9 +506,9 @@ def forecast(store, identifier, observations, position_id):
 
 
 def evaluate_candidate(store, identifier, outcomes, failures=()):
-    """Evaluate prospective confirmed results without changing live policy."""
+    """Qualify prospective confirmed results; never authorizes an order itself."""
     candidate = load_candidate(store, identifier)
-    if not lineage_valid(store, candidate):
+    if not lineage_valid(store, candidate) or not 0 <= time.time()-candidate['created_at'] <= MAX_AGE:
         return {
             "status": "blocked",
             "reason": "Frozen training evidence unavailable",
@@ -559,7 +559,7 @@ def evaluate_candidate(store, identifier, outcomes, failures=()):
     # Existing qualification requires an envelope with an immutable ID.
     result = qualification(candidate, verified, failures)
     result.update({
-        "live_eligible": False,
+        "live_eligible": result.get('status') == 'qualified',
         "promotion_history_unchanged": True,
         "evaluation_scope": "offline_prospective_review",
     })

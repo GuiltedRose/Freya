@@ -48,6 +48,8 @@ def main():
     parser.add_argument('--batch-slots', type=int, default=8)
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
+    from runtime_health import validate_config
+    decoder = validate_config(config)
     endpoints = [local_endpoint(row) for row in config['endpoints'] if row.get('enabled') is True]
     if not endpoints:
         parser.error('No reviewed local node enabled; no observer or validator was started')
@@ -60,7 +62,8 @@ def main():
     engine = CandleEngine(store)
     for market in markets:
         engine.watch(market['mint'], market['pool'])
-    ingester = Ingester(store, [make_rpc(e) for e in endpoints], config.get('reviewed_program_versions'))
+    ingester = Ingester(store, [make_rpc(e) for e in endpoints], config.get('reviewed_program_versions'),
+                        decoder=decoder,oracle=config.get('oracle'))
     try:
         start = None if store.next_slot() is not None else args.start_slot
         results = follow(ingester, start, args.batch_slots) if args.loop else [ingester.step(start, args.batch_slots)]

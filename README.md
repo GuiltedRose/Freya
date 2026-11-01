@@ -7,6 +7,15 @@ research, and a from-scratch neural network with optional live execution.
 The project is experimental. Backtests, modeled paper returns, and small live
 samples do not establish profitability.
 
+For the native/on-chain pipeline repair, operator-only build/test commands,
+activation gates and rollback, see [pipeline recovery](docs/pipeline_recovery.md).
+Pump web collectors remain disabled; paper collection requires a permitted feed
+or an explicitly selected local index.
+
+Momentum reclaim is the single production strategy. New-launch sniping has been
+removed. See [production acceptance](docs/production_acceptance.md) for active model
+decisions, the aggregate test command and manually authorized live service wiring.
+
 ## What it does
 
 | Area | Entry points | Purpose |
@@ -34,26 +43,22 @@ labels. Paper results remain modeled data, separate from confirmed live returns.
 
 Paper training refreshes between scans, including while other paper positions
 are open. Live loads saved weights for inference and retrains only while flat inside its
-one-hour consecutive-loss cooldown. It can bootstrap from the paper `learning.json`;
-without at least 30 training outcomes, active mode blocks new entries. Paper saves its model to
+one-hour consecutive-loss cooldown. Paper saves its model to
 `learning.json` in its state directory; the meme runner rebuilds shared weights
 from the outcome ledgers. Its default paper source is `state/paper_volume/paper.sqlite`.
 
-Paper defaults to `--neural-mode learning`. Live defaults to `--neural-mode active`:
-after 30 eligible outcomes,
-the saved neural weights select among otherwise eligible entries using the 2/3
-score threshold. Live retains its position limit, cooldown, sizing, safety and
+Paper uses active learning decisions. Live uses prospectively qualified neural
+decisions and retains its position limit, cooldown, sizing, safety and
 execution checks; neural scores never bypass them. No live process is started
 by training alone.
 
-Paper defaults to four distinct positions sharing one virtual bankroll, no
-loss cooldown, and exploration of one quarter of below-threshold candidates.
-This keeps gathering genuine modeled outcomes even when the network rejects
-most setups. Paper fills remain hypothetical and cannot establish a live edge.
+Paper defaults to one position and never overrides a neural veto for random
+exploration. Paper fills remain hypothetical and cannot establish a live edge.
 
-For the stricter live policy, use `--neural-mode qualified`: a frozen candidate
-must pass prospective confirmed-live evaluation first. Use `--neural-mode off`
-for live rule-only entries or `--neural-mode shadow` for paper rule-only entries.
+Live uses `--neural-mode qualified`: a frozen candidate must pass prospective
+confirmed-live evaluation before its veto becomes active. Configured unified
+models actively gate entries; missing scores block those entries. All source,
+execution and model qualification checks remain mandatory.
 See the [qualification policy](MEME_TRADER.md#autonomous-neural-qualification)
 and [network review](research/neural_network_review.md).
 
@@ -115,7 +120,7 @@ For Nix development, separate server services and current throughput limits, see
 the [on-chain deployment guide](docs/onchain_deployment.md).
 
 An opt-in [local on-chain indexer](research/onchain_indexer.md) now provides
-durable finalized-block ingestion and paper shadow adapters. Current real
+durable finalized-block ingestion and shared paper/live adapters. Current real
 fixtures expose unresolved event layouts; no complete real market window or new
 NN dataset is approved yet. Existing data-source and trading gates remain closed
 where required evidence is unavailable.

@@ -347,7 +347,7 @@ def train_shared_model(external=(),live=(),paper=()):
     Paper labels stay modeled; they never count as confirmed live performance.
     Sources are namespaced and deduplicated before chronological updates.
     """
-    model=new_weighted_model();seen=set();counts=defaultdict(int)
+    model=new_weighted_model();seen=set();counts=defaultdict(int);quarantined=defaultdict(int)
     rows=[]
     for source,outcomes,pnl_key in (('followed_wallet',external,'net_pnl_quote'),
             ('bot_live',live,'net_pnl_usd'),('bot_paper',paper,'net_pnl_usd')):
@@ -357,7 +357,12 @@ def train_shared_model(external=(),live=(),paper=()):
                 or not isinstance(row.get('entry_context'),dict) or not row['entry_context']
                 or not _finite(row.get(pnl_key))): continue
             from data_policy import require_learning_rights
-            require_learning_rights(row['entry_context'])
+            from data_policy import SourceAccessBlocked
+            try:
+                require_learning_rights(row['entry_context'])
+            except SourceAccessBlocked:
+                quarantined[source]+=1
+                continue
             identity=(source,row.get('run_id'),row.get('wallet'),row.get('exit_signature'))
             if not identity[-1] or identity in seen: continue
             seen.add(identity)
@@ -378,6 +383,7 @@ def train_shared_model(external=(),live=(),paper=()):
     model['weights']=fit_balanced(initialize(len(MODEL_FEATURES)),samples)
     model['class_balance']={'positive_class_mass':2 if model['wins'] else 0,'negative_class_mass':1 if model['losses'] else 0}
     model['source_samples']=dict(counts)
+    model['quarantined_samples']=dict(quarantined)
     model['training_ids']=[identity for _,identity,_,_,_ in sorted(rows)]
     return model
 

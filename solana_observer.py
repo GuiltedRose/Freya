@@ -23,6 +23,8 @@ PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 
 def prepare(config, database, resume=False):
     """Validate configuration before opening sockets or changing a database."""
+    from runtime_health import validate_config
+    decoder=validate_config(config)
     endpoints=[row for row in config.get('endpoints',[]) if row.get('enabled') is True]
     if not endpoints:
         raise ValueError('Explicit reviewed endpoint required; no default network connection')
@@ -78,7 +80,8 @@ def prepare(config, database, resume=False):
             if row['policy'].get('stream_verified') is not True or row.get('network_budget')!=endpoint.get('network_budget'):
                 raise SourceAccessBlocked('Stream backups require reviewed rights and the same network budget')
         endpoint={**endpoint,'stream_sources':[dict(row) for row in endpoints]}
-    return Ingester(store,clients,config.get('reviewed_program_versions')),endpoint,candles
+    return Ingester(store,clients,config.get('reviewed_program_versions'),
+                    decoder=decoder,oracle=config.get('oracle')),endpoint,candles
 
 
 async def observe(config, database, start_slot=None, resume=False, batch=8, interval=5, max_cycles=None):
@@ -180,7 +183,8 @@ def main():
         print('Stopped. Observer checkpoint retained; no trades submitted.')
     except Exception as error:
         # Endpoint paths/query strings can contain credentials; no raw traceback.
-        raise SystemExit('Observer stopped ('+type(error).__name__+'); inspect isolated status/config locally') from None
+        from runtime_health import safe_reason
+        raise SystemExit('Observer stopped ('+type(error).__name__+'): '+safe_reason(error)) from None
 
 
 if __name__ == '__main__':

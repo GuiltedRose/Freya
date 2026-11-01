@@ -1,0 +1,19 @@
+{
+  "rights": {
+    "storage_verified": false,
+    "ml_verified": false,
+    "evaluation_verified": false,
+    "evidence": "REPLACE with reviewed rights for every selected source"
+  },
+  "provenance": {
+    "verified": false,
+    "evidence": "REPLACE with reviewed ledger and decision-time provenance",
+    "entry_timestamp_verified": false,
+    "quote_timestamp_verified": false,
+    "net_outcomes_verified": false
+  },
+  "ledgers": [
+    {"source": "bot_paper", "path": "/var/lib/crypto-bot-paper/paper/paper.sqlite"}
+  ],
+  "candidates": {}
+}

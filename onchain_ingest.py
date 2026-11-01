@@ -87,12 +87,14 @@ class IndexRpc:
 
 
 class Ingester:
-    def __init__(self, store, endpoints, versions=None, decoder=None):
+    def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None):
         if not endpoints:
             raise ValueError('At least one explicitly authorized RPC required')
         self.store, self.endpoints = store, endpoints
         self.decoder = decoder or Decoder(backend=getattr(endpoints[0],'event_backend','python'))
         self.versions = versions or {}
+        self.oracle = oracle
+        self.oracle_last_attempt = 0
         for rpc in endpoints:
             self.store.policy(rpc.source)
 
@@ -140,6 +142,10 @@ class Ingester:
         if type(initial) is not int or initial < 0:
             raise ValueError('Explicit initial finalized start slot required')
         started = time.monotonic()
+        if self.oracle and started-self.oracle_last_attempt >= self.oracle['interval_seconds']:
+            from onchain_oracle import refresh
+            self.oracle_last_attempt = started
+            refresh(self.store, self.endpoints, self.oracle)
         # Failover resumes the durable prefix, never restarts it or evades throttles.
         for index, rpc in enumerate(self.endpoints):
             start = self.store.next_slot()

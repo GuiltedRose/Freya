@@ -24,7 +24,11 @@ def main():
     parser.add_argument('--mint')
     parser.add_argument('--pool')
     args = parser.parse_args()
-    store = EventStore(args.db, retain_blocks=args.retain_blocks)
+    if not (args.status or args.mint):
+        config = json.loads(args.config.read_text())
+        from runtime_health import validate_config
+        decoder = validate_config(config)
+    store = EventStore(args.db, readonly=bool(args.status or args.mint), retain_blocks=args.retain_blocks)
     if args.status or args.mint:
         watermark = store.watermark()
         coverage = store.coverage(watermark-3600, watermark) if watermark is not None else {
@@ -38,7 +42,6 @@ def main():
                 result['market_unavailable'] = str(error)
         print(json.dumps(result, allow_nan=False))
         return
-    config = json.loads(args.config.read_text())
     endpoints = []
     for endpoint in config['endpoints']:
         if endpoint.get('enabled') is not True:
@@ -52,7 +55,8 @@ def main():
             from onchain_oracle import capture_sol, import_sol
             print(json.dumps(import_sol(store, capture_sol(endpoints[0]))))
             return
-        ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'))
+        ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'),
+                            decoder=decoder, oracle=config.get('oracle'))
         start = args.start_slot if store.next_slot() is None else None
         candles=None
         markets=config.get('markets',[])

@@ -7,6 +7,9 @@ def format_report(report,events=()):
     blockers=Counter()
     for event in events:
         action=event.get('action')
+        decision=event.get('model_decision')
+        if decision and not decision.get('allow'):
+            blockers.update([decision.get('reason',decision.get('status','model unavailable'))])
         mint=event.get('mint','')
         short=mint if len(mint)<=14 else mint[:6]+'…'+mint[-4:]
         if action=='paper_buy':
@@ -18,7 +21,7 @@ def format_report(report,events=()):
                 lines.append(f"RESET | virtual bankroll ${event['reset_bankroll_usd']:.2f} · milestone ${event['reference_milestone_usd']:.2f} | funding, not P&L")
             else:
                 lines.append('RESET | virtual balance refilled; completed trades retained for training')
-        elif action in ('reject','watch'):
+        elif action in ('reject','watch','invalid_snapshot'):
             reasons=event.get('reasons') or [event.get('reason')]
             blockers.update(reason for reason in reasons if reason)
     positions=report.get('positions') or ([report['position']] if report.get('position') else [])
@@ -36,6 +39,14 @@ def format_report(report,events=()):
     elif status.get('status') not in (None,'ok','idle'):
         summary+=' | data: '+str(status['status'])
     lines.append(summary)
+    for source,error in list(errors.items())[:3]:
+        lines.append(f"SOURCE {source} | {error.get('reason',error.get('category',error.get('error_type','unavailable')))}")
+    if status.get('open_position_quote_unavailable'):
+        lines.append('EXIT BLOCKED | held-position quote unavailable; position retained')
+    if status.get('learning_error'):
+        lines.append('LEARNING | '+str(status['learning_error']))
+    if training and training.get('quarantined_samples'):
+        lines.append('QUARANTINE | '+str(training['quarantined_samples']))
     if report.get('rolling_performance'):
         from trade_metrics import format_rolling
         lines.append(format_rolling(report['rolling_performance']))

@@ -164,7 +164,10 @@ def live_eligibility(state):
 
 
 def update(paths,state_path):
-    groups=load_groups(paths);closed=baselines(paths,groups)
+    from data_policy import contains_unreviewed_learning_data
+    groups={key:quotes for key,quotes in load_groups(paths).items()
+            if not contains_unreviewed_learning_data(quotes)}
+    closed=baselines(paths,groups)
     path=Path(state_path)
     state,recovered=load_state(path)
     version=new_weighted_model()['version']

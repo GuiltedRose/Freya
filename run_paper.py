@@ -132,14 +132,16 @@ def main():
     parser.add_argument('--balance', type=float, help='Starting virtual USDC; required for a new run/reset')
     parser.add_argument('--native-sol', type=float, help='Optional virtual native SOL; enables execution-cost/reserve ledger')
     parser.add_argument('--sol-price', type=float, help='Initial SOL/USD valuation when using --native-sol')
-    parser.add_argument('--max-positions',type=int,default=4,help='Concurrent paper positions sharing one bankroll (1 through 8; default 4)')
-    parser.add_argument('--neural-mode',choices=['learning','shadow'],default='learning',help='Online neural veto with one-quarter exploration, or shadow-only scoring')
+    parser.add_argument('--max-positions',type=int,default=1,help='Concurrent paper positions sharing one bankroll (default 1)')
+    parser.add_argument('--neural-mode',choices=['learning'],default='learning',help='Active paper neural entry and qualified exit decisions')
     parser.add_argument('--profile',choices=['current','moderate','aggressive','adaptive'],help='Shared entry-tolerance profile; existing runs require reset or a fresh state directory')
     parser.add_argument('--adopt-rules',action='store_true',help='Explicitly adopt profile-mode/drawdown-schedule changes under identical other rules; preserves balances, positions, losses and existing halts')
     parser.add_argument('--rules', type=Path)
     parser.add_argument('--exploratory',action='store_true',help='Paper-only market/chart experiment; unknown safety stays unqualified')
     parser.add_argument('--assume-usd-costs', action='store_true', help='Explicit scenario mode without a native-SOL ledger')
     parser.add_argument('--onchain-db', type=Path, help='Opt-in local finalized index; modeled paper only')
+    parser.add_argument('--unified-db', type=Path, help='Existing reviewed unified model database; active entry vetoes')
+    parser.add_argument('--unified-config', type=Path)
     parser.add_argument('--feed', type=Path, help='Append-only JSONL snapshots; supports recorded or external live collectors')
     parser.add_argument('--mint', action='append', default=[])
     parser.add_argument('--watch-wallet', action='append', default=[], help='Public trader address; candidate discovery only, at most 32')
@@ -153,11 +155,17 @@ def main():
     parser.add_argument('--json',action='store_true',help='Print full JSON reports instead of compact summaries')
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--reclaim-paper-rent',action='store_true',help='Return eligible simulated account rent to virtual SOL; never touches the real wallet')
-    parser.add_argument('--loss-cooldown-seconds',type=int,default=0,help='Paper-only pause after consecutive losses (default 0; use 3600 to match live)')
+    parser.add_argument('--loss-cooldown-seconds',type=int,default=3600,help='Paper pause after consecutive losses; defaults to the live one-hour cooldown')
     parser.add_argument('--no-auto-reset',action='store_true',help='Keep exhausted/drawdown-halted virtual runs stopped instead of archiving and refilling')
     parser.add_argument('--learning-live-db',type=Path,default=Path('state/meme_live/meme_live.sqlite'),help='Read-only confirmed bot outcomes for shared neural training')
     parser.add_argument('--reset', action='store_true', help='Archive current paper run and start fresh; never touches live state')
     args = parser.parse_args()
+    if (args.unified_db is None) != (args.unified_config is None):
+        parser.error('--unified-db and --unified-config must be supplied together')
+    if args.onchain_db and args.feed:
+        parser.error('--onchain-db and --feed are separate source modes')
+    if not (args.feed or args.onchain_db or args.status or args.reset or args.reclaim_paper_rent) and (args.mint or args.discover or args.watch_wallet):
+        parser.error('Pump web sources are disabled; select --onchain-db or a permitted --feed')
     if not 1<=args.max_positions<=8: parser.error('Paper positions must be 1 through 8')
     if not 0<=args.loss_cooldown_seconds<=86400: parser.error('Paper cooldown must be 0 through 86400 seconds')
     if args.reset and args.reclaim_paper_rent:
@@ -188,23 +196,30 @@ def main():
             parser.error('Total equity cannot be below native SOL valuation')
     if args.reset and args.balance is None:
         parser.error('--reset requires --balance')
-    rules = DipRules(**json.loads(args.rules.read_text())) if args.rules else None
+    default_rules=Path(__file__).with_name('meme_live_rules.json')
+    rules = DipRules(**json.loads((args.rules or default_rules).read_text()))
     if args.profile:
         from meme_profiles import selected
         rules=selected(rules or DipRules(entry_style='trend_pullback'),args.profile)
     if args.exploratory:
         rules=replace(rules or DipRules(),evidence_mode='market_only')
+    from production_strategy import validate
+    if not (args.status or args.reclaim_paper_rent):
+        validate(rules)
     exists = (args.state_dir/'paper.sqlite').exists()
     if (not exists or args.reset) and args.native_sol is None and not args.assume_usd_costs:
         parser.error('Supply --native-sol and --sol-price to match inventory, or explicitly choose --assume-usd-costs')
     if args.adopt_rules and (not exists or args.reset or rules is None): parser.error('--adopt-rules requires an existing run and explicit rules without reset')
     session = PaperSession(args.state_dir, None if args.reset and exists else args.balance,
-                           None if args.reset and exists or args.adopt_rules else rules,
+                           None if args.reset and exists or args.adopt_rules or args.status or args.reclaim_paper_rent else rules,
                            None if args.reset and exists else args.native_sol,
                            None if args.reset and exists else args.sol_price)
     narratives = None
     watcher = None
     try:
+        if args.unified_db:
+            from learning_pipeline import DecisionModels
+            session.decision_models=DecisionModels(args.unified_db,args.unified_config)
         if args.adopt_rules: session.adopt_entry_mode(rules)
         if args.reset and exists:
             previous = session.reset(args.balance, rules, args.native_sol, args.sol_price)
@@ -245,8 +260,10 @@ def main():
             narratives = NarrativeStore(args.state_dir/'narratives.sqlite')
         try:
             session.refresh_learning(args.learning_live_db,args.wallet_source_dir/'wallet_watch.sqlite',args.watch_wallet)
-        except (OSError,ValueError,sqlite3.Error):
-            pass
+        except (OSError,ValueError,sqlite3.Error) as error:
+            from runtime_health import safe_reason
+            session.learning_model=None
+            session.publish({'status':'learning_unavailable','learning_error':safe_reason(error)})
         event_cursor=session.db.execute('SELECT COALESCE(MAX(sequence),0) FROM paper_events').fetchone()[0]
         while True:
             reset_event=session.auto_reset_if_exhausted() if not args.no_auto_reset and not args.feed else None
@@ -260,7 +277,9 @@ def main():
             try:
                 session.refresh_learning(args.learning_live_db,args.wallet_source_dir/'wallet_watch.sqlite',args.watch_wallet)
             except (OSError,ValueError,sqlite3.Error) as error:
-                status=dict(status,learning_error=type(error).__name__)
+                from runtime_health import safe_reason
+                session.learning_model=None
+                status=dict(status,learning_error=safe_reason(error))
             if reset_event: status=dict(status,balance_reset=reset_event)
             report = session.publish(status)
             rows=session.db.execute('SELECT sequence,event FROM paper_events WHERE sequence>? ORDER BY sequence',(event_cursor,)).fetchall()

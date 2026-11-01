@@ -21,7 +21,7 @@ class OnchainMarket:
     def candles(self, mint, pool, start, end):
         from onchain_candles import CandleEngine
         cache=CandleEngine(EventStore(self.store.path,readonly=True))
-        if cache.available():
+        if cache.available(mint, pool):
             rows=[cache.read(mint,pool,60,t) for t in range(start,end,60)]
             return [row['bar'] for row in rows if row['status']=='complete' and row.get('bar')]
         bars = {}
@@ -65,7 +65,7 @@ class OnchainMarket:
         errors = []
         from onchain_candles import CandleEngine
         cache=CandleEngine(EventStore(self.store.path,readonly=True))
-        if cache.available():
+        if cache.available(mint, pool):
             buy,sell,cached_sources,errors=cache.rolling(mint,pool,window_end-3600,window_end)
             sources.update(cached_sources)
         else:
@@ -119,7 +119,7 @@ class OnchainMarket:
                 'data_provenance': {'database': str(self.store.path), 'sources': sorted(sources),
                                     'signature': latest['signature'], 'slot': latest['slot'],
                                     'idl_hash': latest['idl_hash'], 'usd_source': conversion_source},
-                'shadow_only': True,
+                'order_authorization': False,
                 'candle_history': {'mint': mint, 'pool': pool, 'source_url': SOURCE,
                                    'interval_seconds': 60, 'measure': 'price_usd',
                                    'retrieved_at': min(now, hourly.get('through_time', stamp)),
@@ -138,7 +138,20 @@ class OnchainSources:
         self.market = OnchainMarket(EventStore(database, readonly=True))
 
     def observation(self, mint, now=None, pool=None):
-        return self.market.observation(mint, now, pool)
+        now=time.time() if now is None else now
+        row=self.market.observation(mint, now, pool)
+        price_time=row['observed_at']
+        watermark=self.market.store.watermark()
+        if not 0 <= now-price_time <= 30:
+            raise ValueError('Latest finalized swap price older than 30 seconds')
+        if watermark is None or not 0 <= now-watermark <= 30:
+            raise ValueError('Finalized index older than 30 seconds')
+        row.update(observed_at=now,price_as_of=price_time,index_as_of=watermark)
+        policies=row['data_rights']['sources']
+        reviewed=bool(policies) and all(p.get('execution_verified') is True and p.get('execution_evidence') for p in policies.values())
+        row['source_qualification']={'passed':bool(reviewed and row['coverage']['complete'] and not row['data_errors']),
+            'reason':'Reviewed execution source, complete finalized coverage and event-time conversions required'}
+        return row
 
     def fetch(self, url):
         from pump_narratives import ROOT, valid_mint
@@ -175,7 +188,17 @@ class OnchainPaperSources(ModeledPumpSources):
         self.market = self.local.market
 
     def market_observation(self, mint, now=None, pool=None):
-        return self.local.observation(mint, now, pool)
+        now = time.time() if now is None else now
+        row = self.local.observation(mint, now, pool)
+        # Collection time drives paper timers; event time still bounds quote validity.
+        price_time = row.get('price_as_of',row['observed_at'])
+        watermark = self.market.store.watermark()
+        if not 0 <= now-price_time <= 30:
+            raise ValueError('Latest finalized swap price older than 30 seconds')
+        if watermark is None or not 0 <= now-watermark <= 30:
+            raise ValueError('Finalized index older than 30 seconds')
+        row.update(observed_at=now, price_as_of=price_time, index_as_of=watermark)
+        return row
 
     def fetch(self, url):
         return self.local.fetch(url)

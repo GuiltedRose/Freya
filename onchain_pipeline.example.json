@@ -1,0 +1,37 @@
+{
+  "schema_directory": "/etc/crypto-bot/schemas",
+  "endpoints": [{
+    "enabled": false,
+    "source_id": "REPLACE-versioned-reviewed-source",
+    "url": "https://REPLACE.invalid",
+    "backend": "rust",
+    "event_backend": "rust",
+    "interval_seconds": 5,
+    "network_budget": {"status_file": "/run/solana-budget-status.json"},
+    "policy": {
+      "storage_verified": false,
+      "stream_verified": false,
+      "ml_verified": false,
+      "evaluation_verified": false,
+      "execution_verified": false,
+      "execution_evidence": "REPLACE only after actual source/receipt validation and operator review",
+      "usd_conversion_verified": false,
+      "oracle_data_rights_verified": false,
+      "oracle_max_confidence_bps": 0,
+      "evidence": "REPLACE with operator review evidence; flags are never inferred"
+    }
+  }],
+  "oracle": {
+    "source_id": "REPLACE-versioned-reviewed-source",
+    "interval_seconds": 20,
+    "feeds": [{
+      "mint": "So11111111111111111111111111111111111111112",
+      "feed_id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+      "shard": 0,
+      "reviewed": false,
+      "evidence": "REPLACE with reviewed feed/mint/USD denomination and rights"
+    }]
+  },
+  "markets": [],
+  "reviewed_program_versions": {}
+}

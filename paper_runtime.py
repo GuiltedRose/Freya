@@ -53,6 +53,7 @@ def decode_state(state):
 
 class PaperSession:
     def __init__(self, directory, balance=None, rules=None, native_sol=None, sol_price_usd=None):
+        self.neural_mode='learning'
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.lock = (self.directory/'paper.lock').open('a')
@@ -143,8 +144,19 @@ class PaperSession:
         # Work on a copy: exceptions and failed commits cannot partially apply a fill.
         candidate = decode_state(json.loads(json.dumps(encode_state(self.trader))))
         try:
-            candidate.neural_exit_model=getattr(self,'learning_model',{}).get('exit_model') if getattr(self,'neural_mode','shadow')=='learning' else None
+            candidate.neural_exit_model=(getattr(self,'learning_model',None) or {}).get('exit_model') if getattr(self,'neural_mode','shadow')=='learning' else None
             event = candidate.on_snapshot(snapshot)
+            model_decision=None
+            if getattr(self,'decision_models',None) and not self.trader.position:
+                try:
+                    model_decision=self.decision_models.entry(snapshot,candidate.rules)
+                except (OSError,ValueError,KeyError,sqlite3.Error) as error:
+                    from runtime_health import safe_reason
+                    model_decision={'allow':False,'status':'model_unavailable','reason':safe_reason(error)}
+                event['model_decision']=model_decision
+                if event.get('action')=='paper_buy' and not model_decision['allow']:
+                    candidate=self.trader
+                    event={'action':'reject','reason':'unified model entry veto','model_decision':model_decision}
             if event.get('action')=='paper_buy':
                 from meme_learning import decision_context
                 from neural_autonomy import learning_decision
@@ -152,14 +164,13 @@ class PaperSession:
                 context=decision_context(snapshot,candidate.rules,signal={'metrics':event.get('signal_metrics',{})},weighted_model=model,notional_usd=event.get('budget_usd'))
                 decision=learning_decision(model,context) if getattr(self,'neural_mode','shadow')=='learning' else {'allow':True,'status':'shadow'}
                 if not decision['allow']:
-                    # Keep an unbiased exploration stream without inventing fills.
-                    explore=int(hashlib.sha256((snapshot['mint']+str(snapshot['observed_at'])).encode()).hexdigest()[:8],16)%4==0
-                    if not explore:
-                        candidate=self.trader
-                        event={'action':'reject','reason':'paper neural entry veto','neural_selection':decision}
-                    else: decision=dict(decision,allow=True,status='paper_exploration')
+                    candidate=self.trader
+                    event={'action':'reject','reason':'paper neural entry veto','neural_selection':decision}
                 if event.get('action')=='paper_buy':
                     context['adaptive_selection']=decision
+                    if model_decision:
+                        context['model_position_id']=model_decision['position_id']
+                        context['model_decision']=model_decision
                     event['entry_context']=context
             if candidate.rules.evidence_mode=='market_only':
                 from meme_dip import entry_screen
@@ -169,9 +180,10 @@ class PaperSession:
             if candidate.position and (snapshot['mint'], snapshot['pool']) == (candidate.position['mint'], candidate.position['pool']):
                 candidate.position['last_price_usd'] = snapshot['price_usd']
                 candidate.position['last_quote_at'] = snapshot['observed_at']
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
             candidate = self.trader
-            event = {'action': 'invalid_snapshot', 'reason': 'malformed, duplicate-time or out-of-order snapshot'}
+            from runtime_health import safe_reason
+            event = {'action': 'invalid_snapshot', 'reason': safe_reason(error), 'error_type':type(error).__name__}
         event['data_kind'] = 'synthetic' if isinstance(snapshot, dict) and snapshot.get('synthetic') is True else 'supplied_observation'
         observed = snapshot.get('observed_at') if isinstance(snapshot, dict) else None
         if not isinstance(observed, (int, float)):
@@ -251,6 +263,7 @@ class PaperSession:
             temporary.write_text(raw);temporary.replace(target)
         self.learning_model=model
         self.learning_summary={'version':model['version'],'samples':model['samples'],
+            'quarantined_samples':model.get('quarantined_samples',{}),
             'wins':model['wins'],'losses':model['losses'],'source_samples':model['source_samples'],
             'class_balance':model.get('class_balance',{}),
             'exit_model':{**{key:model['exit_model'].get(key,0) for key in ('samples','wins','losses','trades')},

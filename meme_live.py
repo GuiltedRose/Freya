@@ -327,6 +327,8 @@ class MemeLiveEngine:
         if snapshot.get('execution',{}).get('model_only'): raise ValueError('Paper execution assumptions cannot authorize live orders')
         side='sell' if position else 'buy'
         if side=='buy':
+            if self.execute and getattr(self,'requires_source_qualification',False) and not snapshot.get('source_qualification',{}).get('passed'):
+                return {'status':'market_source_unqualified','source':snapshot.get('source_qualification')}
             if self.execute:
                 provider=getattr(self,'eligibility_provider',None)
                 eligibility=provider() if provider else {'live_eligible':False,'reason':'Verified promotion history required'}
@@ -460,6 +462,17 @@ class MemeLiveEngine:
         if side=='buy':
             context_record['neural_selection']=neural_decision
             if adaptive_decision: context_record['adaptive_selection']=adaptive_decision
+            if getattr(self,'decision_models',None):
+                try:
+                    model_decision=self.decision_models.entry(snapshot,entry_rules,live=self.execute)
+                except (ValueError,KeyError,OSError,sqlite3.Error) as error:
+                    from runtime_health import safe_reason
+                    model_decision={'allow':False,'status':'model_unavailable','reason':safe_reason(error)}
+                if not model_decision['allow']:
+                    self.store.save('model_entry_veto',model_decision)
+                    return {'status':'model_entry_veto','model_decision':model_decision}
+                context_record['model_position_id']=model_decision['position_id']
+                context_record['model_decision']=model_decision
         intent=dict(id=str(uuid.uuid4()),side=side,mint=snapshot['mint'],pool=snapshot['pool'],kind=snapshot['market_kind'],
             take_profit_usd=profit_target,max_loss_usd=loss_limit,entry_context=context_record,onchain_risk=risk_report,entry_profile=profile_name,input_units=units,minimum=context['min_output'],sol_price_usd=sol_price,bar=bar,reason=reason,
             base_account=str(market['base_user']),quote_account=str(market['quote_user']),simulation=simulated,

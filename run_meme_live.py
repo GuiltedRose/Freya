@@ -209,12 +209,12 @@ def main():
     parser.add_argument('--risk-rpc',help='Optional HTTPS read-only RPC for indexed holder/trade queries; never receives signed transactions')
     parser.add_argument('--reconcile-only',action='store_true',help='Check the original pending transaction once; never scan, sign or submit a new order')
     parser.add_argument('--adopt-rules',action='store_true',help='Explicitly adopt changed rules only when flat with no unresolved orders; preserves P&L and drawdown halt')
-    parser.add_argument('--neural-mode',choices=['active','learning','qualified','off'],default='active',help='Saved-network entry decisions (default); retrains only during loss cooldown; qualified requires prospective evidence')
+    parser.add_argument('--neural-mode',choices=['qualified'],default='qualified',help='Prospectively qualified neural entry veto; all risk gates remain mandatory')
     parser.add_argument('--profile',choices=['current','moderate','aggressive','adaptive'],help='Shared entry-tolerance profile; dollar limits and slippage are unchanged')
     parser.add_argument('--rules',type=Path,default=Path('meme_live_rules.json'))
     parser.add_argument('--state-dir',type=Path)
-    parser.add_argument('--learning-paper-db',type=Path,default=Path('state/paper_volume/paper.sqlite'),help='Closed eligible paper outcomes for shared shadow weights; refunds and synthetic fills excluded')
-    parser.add_argument('--watchlist',type=Path,default=Path('paper_watchlist.json'))
+    parser.add_argument('--learning-paper-db',type=Path,default=Path('state/paper_volume/paper.sqlite'),help='Closed eligible paper outcomes for shared learning; refunds and synthetic fills excluded')
+    parser.add_argument('--watchlist',type=Path,help='Optional explicit saved-wallet source')
     parser.add_argument('--wallet-source-dir',type=Path,default=Path('state/wallet_watch'))
     parser.add_argument('--mint',action='append',default=[])
     parser.add_argument('--evidence-dir',type=Path)
@@ -222,17 +222,23 @@ def main():
     parser.add_argument('--loop',action='store_true')
     parser.add_argument('--json',action='store_true',help='Emit JSON console records instead of readable text; status.json remains JSON either way')
     parser.add_argument('--interval',type=float,default=30,help='Rest between flat-wallet scans (default 30s); open/pending positions rest at most 15s between checks')
-    parser.add_argument('--onchain-db',type=Path,help='Local finalized observations; unsigned mode only until real coverage is qualified')
+    parser.add_argument('--onchain-db',type=Path,help='Local finalized observations; execution requires reviewed source policies and complete current data')
+    parser.add_argument('--unified-db',type=Path,help='Active qualified model database')
+    parser.add_argument('--unified-config',type=Path)
     parser.add_argument('--execute',action='store_true',help='USER CONTROLLED: sign and submit real-money transactions')
     args=parser.parse_args()
-    if args.onchain_db and args.execute:
-        parser.error('On-chain source is shadow-only; live execution remains disabled for this source')
+    if (args.unified_db is None)!=(args.unified_config is None):
+        parser.error('--unified-db and --unified-config must be supplied together')
+    if args.execute and not args.onchain_db and not args.reconcile_only:
+        parser.error('Execution requires --onchain-db; Pump web collectors are disabled')
     if not 10<=args.interval<=3600: parser.error('Interval must be 10 through 3600 seconds')
     if len(args.mint)>5 or any(not valid_mint(mint) for mint in args.mint): parser.error('At most five valid mints')
     from meme_profiles import selected
     base_rules=DipRules(**json.loads(args.rules.read_text()))
     rules=selected(base_rules,args.profile)
-    wallets=load_watchlist(args.watchlist)
+    from production_strategy import validate
+    validate(rules)
+    wallets=load_watchlist(args.watchlist) if args.watchlist else []
     if rules.entry_style not in ('trend_pullback','volume_candles') or min(rules.position_cap(1),*rules.exit_limits(1))<=0:
         parser.error('Live meme profile requires a supported entry policy and explicit dollar limits')
     os.umask(0o077)
@@ -274,6 +280,10 @@ def main():
             risk_assessor=OnchainRisk(risk_rpc)
         engine=MemeLiveEngine(rpc,user,store,rules,orders,signer,risk_assessor=risk_assessor,fixed_profile=args.profile if args.profile!='adaptive' else None)
         engine.neural_mode=args.neural_mode
+        engine.requires_source_qualification=bool(args.onchain_db)
+        if args.unified_db:
+            from learning_pipeline import DecisionModels
+            engine.decision_models=DecisionModels(args.unified_db,args.unified_config)
         def promotion_status():
             from evaluation_state import load
             from exit_evaluation import live_eligibility
@@ -295,7 +305,8 @@ def main():
         if args.reconcile_only:
             publish(engine.recover())
             return
-        try: ensure_worker(args.watchlist,args.wallet_source_dir,args.rpc)
+        try:
+            if args.watchlist:ensure_worker(args.watchlist,args.wallet_source_dir,args.rpc)
         except (OSError,ValueError): pass
         feed=SharedWalletFeed(args.wallet_source_dir)
         if args.onchain_db:

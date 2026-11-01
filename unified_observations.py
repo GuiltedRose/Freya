@@ -4,7 +4,7 @@
 This is not a trading ledger. Original bot and wallet ledgers remain authoritative.
 No source approval is inferred. Missing labels are never fabricated.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 import hashlib
 import json
 import math
@@ -386,11 +386,16 @@ def import_bot_ledger(
     outcomes = (
         paper_outcomes if source == "bot_paper" else live_outcomes
     )(path)[0]
+    archived = set()
+    if source == 'bot_paper':
+        with closing(sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True)) as db:
+            archived = {row[0] for row in db.execute('SELECT id FROM paper_runs WHERE archived IS NOT NULL AND archived!=0')}
     count = 0
 
     for row in outcomes[offset:offset + limit]:
         if (
             row.get("training_eligible", True) is not True
+            or row.get('run_id') in archived
             or _paper_correction(row)
             or row.get("entry_data_kind") == "synthetic"
             or not number(row.get("net_pnl_usd"))
@@ -399,6 +404,10 @@ def import_bot_ledger(
             continue
 
         context = row.get("entry_context") or {}
+        try:
+            require_learning_rights(context)
+        except SourceAccessBlocked:
+            continue
         position = (
             str(row["run_id"]) + ":" + row["mint"] + ":" +
             str(row["entry_at"])
@@ -412,7 +421,7 @@ def import_bot_ledger(
             "source": source,
             "mint": row["mint"],
             "feature_at": row["entry_at"],
-            "known_at": context.get("observed_at", time.time()),
+            "known_at": context.get("observed_at", row["entry_at"]) if provenance.get("entry_timestamp_verified") is True else row["exit_at"],
             "label_known_at": row["exit_at"],
             "features": list(model_features(context).values()),
             "feature_schema": feature_schema(),
@@ -543,7 +552,7 @@ def import_position_quotes(store, paths, rights, provenance):
                 "source": target["source"],
                 "mint": target["mint"],
                 "feature_at": at,
-                "known_at": at if verified_timestamp else time.time(),
+                "known_at": at if verified_timestamp else target["label_known_at"],
                 "label_known_at": target["label_known_at"],
                 "features": list(model_features(context).values()),
                 "feature_schema": feature_schema(),
@@ -553,7 +562,7 @@ def import_position_quotes(store, paths, rights, provenance):
                 ),
                 "fees_usd": target.get("fees_usd"),
                 "rights": rights,
-                "provenance": provenance,
+                "provenance": dict(provenance,ledger_path=str(Path(path).resolve()),outcome_identity=target['identity']),
                 "training_eligible": True,
                 "original_context": context,
                 "label_kind": "completed_position_net",

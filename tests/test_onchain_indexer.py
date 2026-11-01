@@ -459,19 +459,20 @@ class IndexerTests(unittest.TestCase):
         rpc = IndexRpc({'url': 'https://example.invalid', 'source_id': 'fixture'})
         with self.assertRaises(ValueError): rpc.call('sendTransaction', [])
 
-    def test_isolated_paper_shadow_adapter_and_training_quarantine(self):
+    def test_isolated_paper_adapter_and_training_quarantine(self):
         market = self.populated()
+        self.store.commit_range(6,6,[6],[self.decoded(6,3601,[transaction(signature='fresh')])],'fixture')
         from meme_learning import decision_context, update_weighted_model, new_weighted_model
         from meme_dip import DipRules
         from volume_candles import assess_volume_candles
         from paper_runtime import PaperSession
         rules = DipRules(evidence_mode='market_only', entry_style='volume_candles')
         adapter = OnchainPaperSources(self.path)
-        with patch('onchain_market.time.time', return_value=3600), patch('pump_market.time.time', return_value=3600):
-            row = adapter.observation(MINT, now=3600)
+        with patch('onchain_market.time.time', return_value=3601), patch('pump_market.time.time', return_value=3601):
+            row = adapter.observation(MINT, now=3601)
         self.assertTrue(row['execution']['model_only'])
         self.assertEqual(row['execution']['fee_per_side'], .0125)
-        self.assertIn('recent buy volume below threshold', assess_volume_candles(row, 3600, rules)['reasons'])
+        self.assertIn('recent buy volume below threshold', assess_volume_candles(row, 3601, rules)['reasons'])
         context = decision_context(row, rules)
         model = new_weighted_model()
         updated, status = update_weighted_model(model, context, 1)

@@ -9,7 +9,8 @@ in {
     package=lib.mkOption { type=lib.types.package; default=package; };
     configFile=lib.mkOption { type=lib.types.str; description="Reviewed runtime JSON outside the Nix store; credentials never read during evaluation."; };
     stateDirectory=lib.mkOption { type=lib.types.str; default="/var/lib/crypto-bot-observer"; };
-    maxCycles=lib.mkOption { type=lib.types.ints.between 1 10000; default=1; };
+    maxCycles=lib.mkOption { type=lib.types.nullOr (lib.types.ints.between 1 10000); default=1;
+      description="Bounded validation cycles; null explicitly selects continuous collection within the unchanged network session budget."; };
     learning = {
       enable=lib.mkEnableOption "offline bounded SVM/LSTM/RAG worker";
       inputFile=lib.mkOption { type=lib.types.str; default=""; description="Reviewed normalized JSONL; no automatic source rights grant."; };
@@ -28,6 +29,11 @@ in {
     systemd.tmpfiles.rules=["d ${state} 0700 crypto-bot-observer crypto-bot-observer -" "d ${state}/ml 0700 crypto-bot-observer crypto-bot-observer -"];
     systemd.services.crypto-bot-observer={
       description="Bounded Solana observer; manual start, no trading";
+      environment={
+        PYTHONUNBUFFERED="1";
+        PYTHONDONTWRITEBYTECODE="1";
+        CRYPTO_BOT_PROVIDER_LIMITS="${state}/provider_limits.sqlite";
+      };
       serviceConfig={
         User="crypto-bot-observer";
         LoadCredential="observer.json:${cfg.configFile}";
@@ -36,8 +42,10 @@ in {
         MemoryAccounting=true;
       };
       script=''
+        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/observer.json"
         exec ${cfg.package}/bin/crypto-bot-observer --config "$CREDENTIALS_DIRECTORY/observer.json" \
-          --db ${lib.escapeShellArg "${state}/observer.sqlite"} --batch-slots 1 --interval 5 --max-cycles ${toString cfg.maxCycles}
+          --db ${lib.escapeShellArg "${state}/observer.sqlite"} --batch-slots 1 --interval 5 \
+          ${lib.optionalString (cfg.maxCycles != null) "--max-cycles ${toString cfg.maxCycles}"}
       '';
     };
     systemd.services.crypto-bot-unified-learning=lib.mkIf cfg.learning.enable {

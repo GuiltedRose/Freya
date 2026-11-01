@@ -83,14 +83,20 @@ def read_struct(raw, fields, offset, types):
 
 
 class Decoder:
-    def __init__(self, backend='python'):
+    def __init__(self, backend='python', schema_directory=None):
         if backend not in ('python','rust','compare'): raise ValueError('Unknown event backend')
         self.backend=backend
         self.native_schemas={}
         self.specs = {}
+        root = Path(schema_directory) if schema_directory else ROOT
         for name in ('pump', 'pump_amm'):
-            raw = (ROOT / (name + '.json')).read_bytes()
-            manifest = json.loads((ROOT / (name + '.manifest.json')).read_text())
+            raw = (root / (name + '.json')).read_bytes()
+            manifest = json.loads((root / (name + '.manifest.json')).read_text())
+            pinned = json.loads((ROOT / (name + '.manifest.json')).read_text())
+            if manifest['program'] != pinned['program']:
+                raise ValueError('Schema bundle cannot change program identity')
+            if schema_directory and (manifest.get('reviewed') is not True or not manifest.get('evidence')):
+                raise ValueError('External schema requires explicit review evidence')
             if hashlib.sha256(raw).hexdigest() != manifest['sha256']:
                 raise ValueError('Pinned IDL hash mismatch')
             idl = json.loads(raw)

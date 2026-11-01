@@ -48,6 +48,7 @@ def main():
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--input", type=Path)
+    parser.add_argument("--pipeline-config", type=Path, help="Reviewed ledger import and bounded family training")
     parser.add_argument("--status", action="store_true")
     parser.add_argument(
         "--train", choices=("svm", "lstm", "rag", "all")
@@ -65,6 +66,9 @@ def main():
         "models": {},
         "order_authorization": False,
     }
+    if args.pipeline_config:
+        from learning_pipeline import load_config, synchronize
+        report['pipeline'] = synchronize(store,load_config(args.pipeline_config))
 
     if args.train:
         families = (

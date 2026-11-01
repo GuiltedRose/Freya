@@ -27,9 +27,9 @@ def sol_account(shard=0):
         Pubkey.from_string(SPEC['push_program']))[0])
 
 
-def capture_sol(rpc, shard=0):
+def capture_sol(rpc, shard=0, feed=None):
     rpc.validate()
-    address = sol_account(shard)
+    address = feed_account(feed, shard) if feed else sol_account(shard)
     response = rpc.call('getAccountInfo', [address, {'encoding': 'base64', 'commitment': 'finalized'}])
     slot = response['context']['slot']
     block_time = rpc.call('getBlockTime', [slot])
@@ -38,7 +38,7 @@ def capture_sol(rpc, shard=0):
             'retrieved_at': int(time.time())}
 
 
-def decode_sol(snapshot, max_age=60):
+def decode_sol(snapshot, max_age=60, feed=None):
     if snapshot.get('commitment') != 'finalized':
         raise ValueError('Finalized oracle snapshot required')
     slot, block_time = snapshot['response']['context']['slot'], snapshot['block_time']
@@ -46,7 +46,8 @@ def decode_sol(snapshot, max_age=60):
         raise ValueError('Invalid oracle slot/time')
     if block_time > snapshot['retrieved_at']:
         raise ValueError('Oracle context time is in the future')
-    if snapshot['address'] != sol_account(snapshot.get('shard', 0)):
+    expected = feed_account(feed, snapshot.get('shard', 0)) if feed else sol_account(snapshot.get('shard', 0))
+    if snapshot['address'] != expected:
         raise ValueError('Oracle account/feed identity mismatch')
     account = snapshot['response']['value']
     if not account or account['owner'] != SPEC['receiver_program'] or account.get('executable') is not False:
@@ -63,9 +64,9 @@ def decode_sol(snapshot, max_age=60):
         raise ValueError('Wrong oracle discriminator or partial verification')
     if str(Pubkey.from_bytes(raw[8:40])) != snapshot['address']:
         raise ValueError('Oracle write authority does not match feed PDA')
-    feed, price, conf, exponent, published, previous, ema, ema_conf = MESSAGE.unpack_from(raw, 41)
+    feed_id, price, conf, exponent, published, previous, ema, ema_conf = MESSAGE.unpack_from(raw, 41)
     posted_slot = int.from_bytes(raw[41 + MESSAGE.size:41 + MESSAGE.size + 8], 'little')
-    if feed.hex() != SPEC['sol_usd_feed_id']:
+    if feed_id.hex() != (feed['feed_id'] if feed else SPEC['sol_usd_feed_id']):
         raise ValueError('Wrong oracle price feed')
     if not -18 <= exponent <= 18 or price <= 0 or conf > price:
         raise ValueError('Invalid oracle price/confidence')
@@ -74,9 +75,9 @@ def decode_sol(snapshot, max_age=60):
     if posted_slot > slot:
         raise ValueError('Oracle posting occurs after snapshot context')
     usd = Decimal(price) * Decimal(10) ** exponent
-    return {'mint': SOL, 'publish_time': published, 'posted_slot': posted_slot,
+    return {'mint': feed['mint'] if feed else SOL, 'publish_time': published, 'posted_slot': posted_slot,
             'usd': str(usd), 'confidence_bps': str(Decimal(conf) * 10000 / price),
-            'proof': {'method': 'pyth_price_update_v2', 'feed_id': feed.hex(),
+            'proof': {'method': 'pyth_price_update_v2', 'feed_id': feed_id.hex(),
                       'context_slot': slot, 'posted_slot': posted_slot,
                       'block_time': block_time, 'account': snapshot['address'],
                       'raw_sha256': hashlib.sha256(raw).hexdigest(), 'snapshot': snapshot,
@@ -84,15 +85,55 @@ def decode_sol(snapshot, max_age=60):
                       'ema_price': ema, 'ema_confidence': ema_conf}}
 
 
-def import_sol(store, snapshot):
+def import_sol(store, snapshot, feed=None):
     """Explicit reviewed-source import; never upgrades source rights automatically."""
     source = snapshot['source_id']
     policy = store.policy(source)
     limit = policy.get('oracle_max_confidence_bps')
     if policy.get('oracle_data_rights_verified') is not True or type(limit) is not int or not 0 <= limit <= 10000:
         raise ValueError('Reviewed oracle rights and confidence policy required')
-    row = decode_sol(snapshot)
+    row = decode_sol(snapshot, feed=feed)
     if Decimal(row['confidence_bps']) > limit:
         raise ValueError('Oracle confidence exceeds reviewed source policy')
+    with store.connect() as db:
+        previous = db.execute('SELECT usd,proof FROM conversions WHERE mint=? AND time=? AND source=?',
+                              (row['mint'],row['publish_time'],source)).fetchone()
+    if previous:
+        proof = json.loads(previous['proof'])
+        if Decimal(previous['usd']) != Decimal(row['usd']) or proof.get('raw_sha256') != row['proof']['raw_sha256']:
+            raise ValueError('Conflicting oracle evidence for an existing publication')
+        return {k:v for k,v in row.items() if k != 'proof'}
     store.add_conversion(row['mint'], row['publish_time'], row['usd'], source, row['proof'])
     return {k: v for k, v in row.items() if k != 'proof'}
+
+
+def feed_account(feed, shard=0):
+    if type(shard) is not int or not 0 <= shard < 65536:
+        raise ValueError('Invalid oracle shard')
+    identifier = bytes.fromhex(feed['feed_id'])
+    if len(identifier) != 32 or feed.get('reviewed') is not True or not feed.get('evidence'):
+        raise ValueError('Reviewed 32-byte USD feed identity required')
+    Pubkey.from_string(feed['mint'])
+    return str(Pubkey.find_program_address(
+        [shard.to_bytes(2, 'little'), identifier], Pubkey.from_string(SPEC['push_program']))[0])
+
+
+def refresh(store, clients, config):
+    """Use existing paced clients; failures never manufacture conversions or pegs."""
+    from data_policy import SourceAccessBlocked
+    from runtime_health import safe_reason
+    report = {'status':'ok', 'at':int(time.time()), 'feeds':[]}
+    client = next(c for c in clients if c.source == config['source_id'])
+    for feed in config['feeds']:
+        try:
+            row = import_sol(store, capture_sol(client, feed.get('shard',0), feed), feed)
+            report['feeds'].append({'mint':feed['mint'], 'publish_time':row['publish_time']})
+        except SourceAccessBlocked:
+            raise
+        except (ValueError, KeyError, TypeError, ConnectionError, OSError) as error:
+            report['status']='incomplete'
+            report['feeds'].append({'mint':feed['mint'], 'error':safe_reason(error)})
+    with store.connect() as db:
+        from onchain_store import canonical
+        db.execute('INSERT OR REPLACE INTO telemetry VALUES(?,?)', ('oracle',canonical(report)))
+    return report

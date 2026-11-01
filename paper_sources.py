@@ -172,6 +172,9 @@ class PublicSources:
 
 def source_error(error):
     result = {'status': 'unavailable', 'error_type': type(error).__name__}
+    if isinstance(error,ValueError):
+        from runtime_health import safe_reason
+        result['reason']=safe_reason(error)
     if isinstance(error,SourceAccessBlocked):
         result.update(category='source_policy_blocked',retryable=False,reason=str(error))
     elif isinstance(error,ProviderBackoff):

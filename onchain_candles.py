@@ -55,9 +55,12 @@ class CandleEngine:
             db.executemany('INSERT INTO candle_dirty(minute) VALUES(?) ON CONFLICT(minute) DO UPDATE SET revision=revision+1',
                            ((stamp,) for stamp in range(start//60*60, end, 60)))
 
-    def available(self):
+    def available(self, mint=None, pool=None):
         with self.store.connect() as db:
-            return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='candle_cache'").fetchone())
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='candle_cache'").fetchone():
+                return False
+            return mint is None or bool(db.execute(
+                'SELECT 1 FROM candle_markets WHERE mint=? AND pool=?', (mint, pool)).fetchone())
 
     def read(self, mint, pool, period, start, check_dirty=True):
         if period not in PERIODS or start % period:
