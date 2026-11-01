@@ -38,6 +38,8 @@ in {
   options.services.crypto-bot-paper = {
     enable = mkEnableOption "local read-only indexer deployment (no live service)";
     package = mkOption { type = types.package; default = package; };
+    rpcMode = mkOption { type = types.enum [ "remote" "selfhosted" "hybrid" ]; default = "remote";
+      description = "Requires matching reviewed endpoint configuration; never grants source permissions."; };
     stateDirectory = mkOption {
       type = types.str; default = "/var/lib/crypto-bot-paper";
       description = "External persistent state; never put this under /nix/store.";
@@ -49,6 +51,8 @@ in {
     startSlot = mkOption { type = types.nullOr types.ints.unsigned; default = null; };
     batchSlots = mkOption { type = types.ints.between 1 64; default = 8; };
     maxCatchupSlots = mkOption { type = types.ints.between 1 64; default = 64; };
+    capitalConfigFile = mkOption { type = types.str; default = "${cfg.package}/share/crypto-bot/capital_policy.example.json";
+      description = "Explicit conservative Kelly and independent allocation/concurrency tier configuration."; };
     learning = {
       enable = mkEnableOption "bounded offline learning and active qualified model decisions";
       configFile = mkOption { type = types.nullOr types.str; default = null; };
@@ -67,10 +71,29 @@ in {
       initialNativeSol = mkOption { type = types.nullOr types.number; default = null; };
       initialSolPriceUsd = mkOption { type = types.nullOr types.number; default = null; };
       mints = mkOption { type = types.listOf types.str; default = []; };
+      managementConfigFile = mkOption { type = types.nullOr types.str; default = null;
+        description = "Explicit independent paper-only management experiment; changing with open positions blocks entries."; };
+      championFamilies = mkOption { type = types.listOf types.str; default = [];
+        description = "Explicit qualified paper champion families; independent of live model promotion."; };
+    };
+    challengers = {
+      enable = mkEnableOption "manual bounded offline challenger batches; no live authority";
+      configFile = mkOption { type = types.nullOr types.str; default = null; };
+      workers = mkOption { type = types.ints.between 1 8; default = 1; };
+      jobs = mkOption { type = types.ints.between 1 10000; default = 128; };
+      eventBatch = mkOption { type = types.ints.between 1 64; default = 16; };
+      workerRssMb = mkOption { type = types.ints.between 64 1024; default = 256; };
+      memoryMax = mkOption { type = types.str; default = "2G"; };
     };
   };
   config = mkIf cfg.enable {
     assertions = [
+      { assertion = cfg.rpcMode == "remote" || lib.attrByPath [ "services" "crypto-bot-node" "enable" ] false config;
+        message = "Selfhosted/hybrid modes require importing and enabling the reviewed selfhost-rpc module."; }
+      { assertion = !cfg.challengers.enable || (cfg.challengers.configFile != null && lib.hasPrefix "/" cfg.challengers.configFile);
+        message = "Challengers require explicit absolute runtime configuration."; }
+      { assertion = cfg.paper.championFamilies == [] || (cfg.challengers.enable && cfg.paper.managementConfigFile == null);
+        message = "Choose qualified paper champions or a direct experiment configuration, with challenger storage enabled."; }
       { assertion = lib.hasPrefix "/" state && !(lib.hasPrefix "/nix/store/" state);
         message = "crypto-bot stateDirectory must be an external absolute path."; }
       { assertion = lib.hasPrefix "/" cfg.indexerConfigFile && !(lib.hasPrefix "/nix/store/" cfg.indexerConfigFile);
@@ -98,6 +121,7 @@ in {
       "d ${state}/index 0700 crypto-bot-paper crypto-bot-paper -"
       "d ${state}/paper 0700 crypto-bot-paper crypto-bot-paper -"
       "d ${state}/ml 0700 crypto-bot-paper crypto-bot-paper -"
+      "d ${state}/challengers 0700 crypto-bot-paper crypto-bot-paper -"
       "d ${state}/live 0700 crypto-bot-paper crypto-bot-paper -"
       "d ${state}/state 0700 crypto-bot-paper crypto-bot-paper -"
     ];
@@ -105,7 +129,7 @@ in {
       description = "Finalized Solana Pump indexer (read-only RPC)";
       serviceConfig.LoadCredential = [ "indexer.json:${cfg.indexerConfigFile}" ];
       script = ''
-        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/indexer.json"
+        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/indexer.json" --rpc-mode ${escapeShellArg cfg.rpcMode}
         exec ${cfg.package}/bin/crypto-bot-indexer \
           --config "$CREDENTIALS_DIRECTORY/indexer.json" \
           --db ${escapeShellArg index} --loop \
@@ -117,11 +141,16 @@ in {
       description = "Isolated local-index paper trader (no signing)";
       after = common.after ++ [ "crypto-bot-indexer.service" ];
       wants = common.wants ++ [ "crypto-bot-indexer.service" ];
-      serviceConfig.LoadCredential = lib.optional cfg.learning.enable "learning.json:${cfg.learning.configFile}";
+      serviceConfig.LoadCredential = lib.optional cfg.learning.enable "learning.json:${cfg.learning.configFile}"
+        ++ lib.optional (cfg.paper.managementConfigFile != null) "management.json:${cfg.paper.managementConfigFile}";
       script = ''
         exec ${cfg.package}/bin/crypto-bot-paper \
           --state-dir ${escapeShellArg "${state}/paper"} --onchain-db ${escapeShellArg index} \
           --rules ${escapeShellArg cfg.paper.rulesFile} --exploratory \
+          --capital-config ${escapeShellArg cfg.capitalConfigFile} \
+          ${lib.optionalString (cfg.paper.managementConfigFile != null) "--paper-management-config \"$CREDENTIALS_DIRECTORY/management.json\""} \
+          ${lib.optionalString (cfg.paper.championFamilies != []) "--paper-champion-db ${escapeShellArg "${state}/challengers/lab.sqlite"}"} \
+          ${lib.concatMapStringsSep " " (family: "--paper-champion-family ${escapeShellArg family}") cfg.paper.championFamilies} \
           --balance ${escapeShellArg (toString cfg.paper.initialBalanceUsd)} \
           --native-sol ${escapeShellArg (toString cfg.paper.initialNativeSol)} --sol-price ${escapeShellArg (toString cfg.paper.initialSolPriceUsd)} \
           --discover --loop --interval 30 --no-auto-reset \
@@ -130,6 +159,39 @@ in {
           ${lib.concatMapStringsSep " " (mint: "--mint ${escapeShellArg mint}") cfg.paper.mints}
       '';
     });
+    systemd.services.crypto-bot-challengers = mkIf cfg.challengers.enable {
+      description = "Bounded offline paper challenger batches; no live authority";
+      wantedBy = [];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "crypto-bot-paper";
+        Group = "crypto-bot-paper";
+        WorkingDirectory = state;
+        LoadCredential = [ "scenarios.json:${cfg.challengers.configFile}" ];
+        PrivateNetwork = true;
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        UMask = "0077";
+        ReadWritePaths = [ "${state}/challengers" ];
+        MemoryMax = cfg.challengers.memoryMax;
+        MemorySwapMax = 0;
+        CPUQuota = "100%";
+        TasksMax = 32;
+        TimeoutStartSec = 1800;
+        Restart = "no";
+      };
+      script = ''
+        initialization=""
+        if [ ! -e ${escapeShellArg "${state}/challengers/lab.sqlite"} ]; then initialization="--initialize"; fi
+        exec ${cfg.package}/bin/crypto-bot-challengers --db ${escapeShellArg "${state}/challengers/lab.sqlite"} \
+          $initialization --config "$CREDENTIALS_DIRECTORY/scenarios.json" \
+          --paper-db ${escapeShellArg "${state}/paper/paper.sqlite"} --run \
+          --workers ${toString cfg.challengers.workers} --jobs ${toString cfg.challengers.jobs} \
+          --event-batch ${toString cfg.challengers.eventBatch} --rss-limit-mb ${toString cfg.challengers.workerRssMb}
+      '';
+    };
     systemd.services.crypto-bot-unified-paper-learning = mkIf cfg.learning.enable {
       description = "Bounded offline paper/live ledger learning; no order authority";
       serviceConfig = {
@@ -152,6 +214,7 @@ in {
         initialization=""
         if [ ! -e ${escapeShellArg "${state}/ml/unified.sqlite"} ]; then initialization="--initialize"; fi
         exec ${cfg.package}/bin/crypto-bot-unified-learning --db ${escapeShellArg "${state}/ml/unified.sqlite"} \
+          --capital-config ${escapeShellArg cfg.capitalConfigFile} \
           $initialization --pipeline-config "$CREDENTIALS_DIRECTORY/learning.json"
       '';
     };
@@ -166,6 +229,7 @@ in {
         unset SOLANA_PRIVATE_KEY
         export SOLANA_KEYPAIR_PATH="$CREDENTIALS_DIRECTORY/wallet.json"
         exec ${cfg.package}/bin/crypto-bot-live --execute --onchain-db ${escapeShellArg index} \
+          --capital-config ${escapeShellArg cfg.capitalConfigFile} \
           --state-dir ${escapeShellArg "${state}/live"} --rules ${escapeShellArg cfg.paper.rulesFile} \
           --learning-paper-db ${escapeShellArg "${state}/paper/paper.sqlite"} \
           --wallet-source-dir ${escapeShellArg "${state}/wallet_watch"} --neural-mode qualified --loop \

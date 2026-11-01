@@ -142,6 +142,10 @@ def main():
     parser.add_argument('--onchain-db', type=Path, help='Opt-in local finalized index; modeled paper only')
     parser.add_argument('--unified-db', type=Path, help='Existing reviewed unified model database; active entry vetoes')
     parser.add_argument('--unified-config', type=Path)
+    parser.add_argument('--capital-config',type=Path,default=Path(__file__).with_name('capital_policy.example.json'))
+    parser.add_argument('--paper-management-config',type=Path,help='Explicit paper-only management experiment; never read by live trading')
+    parser.add_argument('--paper-champion-db',type=Path)
+    parser.add_argument('--paper-champion-family',action='append',default=[])
     parser.add_argument('--feed', type=Path, help='Append-only JSONL snapshots; supports recorded or external live collectors')
     parser.add_argument('--mint', action='append', default=[])
     parser.add_argument('--watch-wallet', action='append', default=[], help='Public trader address; candidate discovery only, at most 32')
@@ -166,7 +170,7 @@ def main():
         parser.error('--onchain-db and --feed are separate source modes')
     if not (args.feed or args.onchain_db or args.status or args.reset or args.reclaim_paper_rent) and (args.mint or args.discover or args.watch_wallet):
         parser.error('Pump web sources are disabled; select --onchain-db or a permitted --feed')
-    if not 1<=args.max_positions<=8: parser.error('Paper positions must be 1 through 8')
+    if not 1<=args.max_positions<=20: parser.error('Paper positions must be 1 through 20')
     if not 0<=args.loss_cooldown_seconds<=86400: parser.error('Paper cooldown must be 0 through 86400 seconds')
     if args.reset and args.reclaim_paper_rent:
         parser.error('Reset and paper rent reclaim are separate actions')
@@ -217,9 +221,36 @@ def main():
     narratives = None
     watcher = None
     try:
+        if args.paper_champion_db or args.paper_champion_family:
+            try:
+                if not args.paper_champion_db or not args.paper_champion_family or args.paper_management_config:
+                    raise ValueError('Paper champions require database and families without a separate management config')
+                from challenger_registry import champion_settings
+                session.configure_challenger(champion_settings(args.paper_champion_db,args.paper_champion_family,session.trader.rules))
+                session.champion_selection=(args.paper_champion_db,args.paper_champion_family)
+            except (ValueError,OSError,sqlite3.Error) as error:
+                from runtime_health import safe_reason
+                session.capital_error=safe_reason(error)
+        if args.paper_management_config:
+            try:session.configure_challenger(json.loads(args.paper_management_config.read_text()))
+            except (ValueError,OSError) as error:
+                from runtime_health import safe_reason
+                session.capital_error=safe_reason(error)
+        if not (args.status or args.reclaim_paper_rent or args.reset):
+            from capital_policy import CapitalPolicy,load_config,seed
+            from meme_learning import paper_outcomes
+            try:
+                session.capital_policy=CapitalPolicy(session.db,load_config(args.capital_config))
+                seed(session.capital_policy,paper_outcomes(args.state_dir/'paper.sqlite')[0])
+            except (ValueError,OSError,sqlite3.Error) as error:
+                from runtime_health import safe_reason
+                session.capital_error=safe_reason(error)
         if args.unified_db:
             from learning_pipeline import DecisionModels
-            session.decision_models=DecisionModels(args.unified_db,args.unified_config)
+            try:session.decision_models=DecisionModels(args.unified_db,args.unified_config)
+            except (ValueError,OSError,sqlite3.Error) as error:
+                from runtime_health import safe_reason
+                session.capital_error=safe_reason(error)
         if args.adopt_rules: session.adopt_entry_mode(rules)
         if args.reset and exists:
             previous = session.reset(args.balance, rules, args.native_sol, args.sol_price)
@@ -266,9 +297,9 @@ def main():
             session.publish({'status':'learning_unavailable','learning_error':safe_reason(error)})
         event_cursor=session.db.execute('SELECT COALESCE(MAX(sequence),0) FROM paper_events').fetchone()[0]
         while True:
-            reset_event=session.auto_reset_if_exhausted() if not args.no_auto_reset and not args.feed else None
+            reset_event=None  # Capital-managed production runs never refill a bankroll automatically.
             session.configure_loss_cooldown(args.loss_cooldown_seconds)
-            session.configure_positions(args.max_positions)
+            if not getattr(session,'capital_policy',None):session.configure_positions(args.max_positions)
             session.neural_mode=args.neural_mode
             try:
                 status = feed_once(session, args.feed) if args.feed else markets_once(session, sources, args.mint, args.discover, narratives, watcher, args.watch_wallet)

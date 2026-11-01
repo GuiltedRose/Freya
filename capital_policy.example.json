@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "min_samples": 30,
+  "min_wins": 5,
+  "min_losses": 5,
+  "max_age_seconds": 5184000,
+  "confidence_z": 1.96,
+  "bootstrap_samples": 200,
+  "fractional_kelly": 0.25,
+  "max_kelly_fraction": 0.25,
+  "max_portfolio_fraction": 0.25,
+  "allocation_steps": [0.25, 0.5, 0.75, 1.0],
+  "allocation_min": 0,
+  "allocation_max": 3,
+  "allocation_promote_wins": 5,
+  "allocation_demote_losses": 2,
+  "concurrency_steps": [1, 2, 4, 8, 12, 20],
+  "concurrency_min": 0,
+  "concurrency_max": 5,
+  "concurrency_promote_wins": 10,
+  "concurrency_demote_losses": 2
+}

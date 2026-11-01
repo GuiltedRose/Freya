@@ -11,7 +11,7 @@ def mark_bot_risk(store,wallet_equity,drawdown_fraction,open_pnl=0.,has_orders=F
         first=store.db.execute("SELECT body FROM events WHERE kind='portfolio_mark' ORDER BY id LIMIT 1").fetchone()
         capital=json.loads(first[0]).get('equity_usd') if first else wallet_equity
         capital=max(.01,number(capital))
-        total=peak=0.;activity=bool(s['position'] or s['pending'] or realized or has_orders)
+        total=peak=0.;activity=bool(s['position'] or s.get('positions') or s['pending'] or realized or has_orders)
         for kind,raw in store.db.execute("SELECT kind,body FROM events WHERE kind IN ('confirmed_buy','confirmed_sell','transaction_failed') ORDER BY id"):
             activity=True;event=json.loads(raw)
             if kind=='confirmed_sell': total+=event['pnl_usd']

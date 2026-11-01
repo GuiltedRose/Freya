@@ -1,5 +1,10 @@
 # Independent mainnet node: current decision
 
+Update: declarative node infrastructure is now available in
+[self-hosted RPC](selfhost_rpc.md). It remains disabled/unexecuted, with the existing
+120/150 GB transfer policy. The historical capacity assessment below has not been
+overturned by runtime measurements or by adding a Nix module.
+
 Status: **NO-GO on the declared hardware without contrary measured evidence**.
 This is an engineering assessment, not a proof that every experimental client
 must fail. No node, tests, benchmarks or hardware probes were run. No independent

@@ -257,6 +257,9 @@ class PaperDipTrader:
                 *(1-p.get('entry_fee_per_side',self.rules.fee_per_side))-p['exit_fixed_cost']
                 -p['cash_spent']-p.get('entry_native_cost_usd',0)
                 -(execution.get('network_fee_sol',0) if self.native_sol is not None else 0)*(self.sol_price_usd or 0))
+            if event.get('action') in ('paper_partial_sell','paper_scale'):
+                p['last_net_pnl_usd']=p['marked_net_pnl_usd']
+            p['synthetic_seen']=p.get('synthetic_seen',False) or snapshot.get('synthetic') is True
             self.positions.append(p)
         self.position=self.positions[0] if self.positions else None
         return event
@@ -291,6 +294,8 @@ class PaperDipTrader:
                 refundable=execution.get('rent_is_refundable') is True
                 if refundable and rent_key in self.account_rent:
                     entry_rent=0
+                if refundable and self.position and self.position.get('exit_setup_paid'):
+                    exit_rent=0
                 if execution['sell_route_available'] is not True:
                     raise ValueError('Sell route unavailable')
             except (KeyError, TypeError, ValueError):
@@ -314,7 +319,9 @@ class PaperDipTrader:
                 return {'action':'hold','reason':'paper exit quote asset changed; reconcile route'}
             equity = self.equity(position['quantity']*price)
             if r.entry_style!='volume_candles': self.mark_risk(equity)
-            time_exit=position.get('entry_style') in ('trend_pullback','volume_candles') and now-position['opened_at']>=r.max_holding_seconds
+            manager=getattr(self,'paper_management',None)
+            holding=manager.holding_seconds(position,snapshot,r.max_holding_seconds) if manager else r.max_holding_seconds
+            time_exit=position.get('entry_style') in ('trend_pullback','volume_candles') and now-position['opened_at']>=holding
             proceeds=max(0,position['quantity']*price*(1-r.slippage_per_side)*(1-trade_fee)-position['exit_fixed_cost'])
             projected_pnl=proceeds-position['cash_spent']
             if self.native_sol is not None:
@@ -325,9 +332,18 @@ class PaperDipTrader:
             early=decision(getattr(self,'neural_exit_model',None),snapshot,r,projected_pnl,position['cash_spent'])
             loss_limit=position.get('max_loss_usd',0)
             profit_target=position.get('take_profit_usd',0)
+            if manager:profit_target=manager.target(position,snapshot,profit_target)
             stop_hit=projected_pnl<=-loss_limit if loss_limit>0 else price<=position['stop']
             target_hit=projected_pnl>=profit_target if profit_target>0 else price>=position['target']
-            if stop_hit or target_hit or self.halted or time_exit or early:
+            plan=manager.exit_plan(position,snapshot,projected_pnl,bool(stop_hit or self.halted or time_exit or early)) if manager else {}
+            if plan.get('suppress_target'):target_hit=False
+            partial=plan.get('fraction',0)>0 and not (stop_hit or self.halted or time_exit or early)
+            if stop_hit or target_hit or self.halted or time_exit or early or partial:
+                fraction=plan.get('fraction',1.) if partial else 1.
+                allocated_cost=position['cash_spent']*fraction
+                allocated_native=position.get('entry_native_cost_usd',0)*fraction
+                proceeds=max(0,position['quantity']*fraction*price*(1-r.slippage_per_side)*(1-trade_fee)-position['exit_fixed_cost'])
+                position.setdefault('total_cost_usd',position['cash_spent']+position.get('entry_native_cost_usd',0))
                 # Use current quote for gaps, never fill at an unavailable stop.
                 if self.native_sol is not None:
                     if self.native_sol < network+exit_rent:
@@ -335,23 +351,38 @@ class PaperDipTrader:
                     self.native_sol -= network+exit_rent
                     if position.get('rent_is_refundable') and exit_rent:
                         self.account_rent[rent_key]=self.account_rent.get(rent_key,0)+exit_rent
+                        position['exit_setup_paid']=True
                 if quote_mint==SOL_MINT:
                     self.native_sol += proceeds/self.sol_price_usd
                 else:
                     self.cash += proceeds
-                pnl = proceeds-position['cash_spent']
+                pnl = proceeds-allocated_cost
                 if self.native_sol is not None:
-                    pnl -= position['entry_native_cost_usd']+(network+(0 if position.get('rent_is_refundable') else exit_rent))*self.sol_price_usd
-                self.position = None
-                self.armed.pop(key, None)
+                    pnl -= allocated_native+(network+(0 if position.get('rent_is_refundable') else exit_rent))*self.sol_price_usd
+                total_pnl=position.get('realized_parts_pnl',0)+pnl
+                if fraction<1:
+                    position['quantity']*=1-fraction;position['cash_spent']*=1-fraction
+                    position['entry_native_cost_usd']*=1-fraction
+                    position['realized_parts_pnl']=total_pnl;position['partial_stage']=plan['stage']
+                else:
+                    self.position = None
+                    self.armed.pop(key, None)
+                    if manager:manager.closed(self,snapshot)
                 self.strategy_realized_pnl_usd+=pnl
-                self.consecutive_losses=self.consecutive_losses+1 if pnl<0 else 0
-                if self.consecutive_losses>=r.loss_streak_limit:
+                if fraction==1:self.consecutive_losses=self.consecutive_losses+1 if total_pnl<0 else 0
+                if fraction==1 and self.consecutive_losses>=r.loss_streak_limit:
                     self.loss_cooldown_until=now+getattr(self,'paper_loss_cooldown_seconds',r.loss_streak_cooldown_seconds)
-                self.mark_risk(self.equity())
-                return {'action': 'paper_sell', 'mint': mint, 'pnl_usd': pnl, 'cash_usd': self.cash,'native_sol':self.native_sol,
-                        'reason': 'drawdown halt' if self.halted else 'stop' if stop_hit else 'target' if target_hit else 'time limit' if time_exit else early['reason']}
+                self.mark_risk(self.equity(position['quantity']*price) if fraction<1 else self.equity(),0 if fraction==1 else projected_pnl-pnl)
+                return {'action': 'paper_partial_sell' if fraction<1 else 'paper_sell', 'mint': mint, 'pnl_usd': pnl,
+                        'trade_pnl_usd':total_pnl,'sold_fraction':fraction,'cash_usd': self.cash,'native_sol':self.native_sol,
+                        'reason': 'drawdown halt' if self.halted else 'stop' if stop_hit else plan.get('reason','target') if partial else 'target' if target_hit else 'time limit' if time_exit else early['reason'] if early else 'target'}
+            if manager:
+                scaled=manager.scale(self,position,snapshot,projected_pnl)
+                if scaled:return scaled
             return {'action': 'hold', 'reason': 'manage paper position'}
+        manager=getattr(self,'paper_management',None)
+        if manager and not manager.entry_allowed(self,snapshot):return {'action':'watch','reason':'challenger re-entry churn guard'}
+        if getattr(self,'capital_error',None):return {'action':'reject','reason':'capital policy unavailable: '+self.capital_error}
         if self.halted:
             return {'action': 'reject', 'reason': 'paper drawdown halt'}
         if now<self.loss_cooldown_until:
@@ -423,9 +454,26 @@ class PaperDipTrader:
         if quote_mint==SOL_MINT:
             available=min(equity-r.reserve_usd,(self.native_sol-r.native_fee_reserve_sol-network*2-entry_rent-exit_rent)*self.sol_price_usd)
         budget=r.entry_budget(equity,available,fixed_cost=fixed,trade_fee=trade_fee)
+        if manager:budget*=manager.allocation(self,snapshot)
+        sizing=None
+        if getattr(self,'capital_policy',None):
+            book=self.all_positions()
+            if any(not 0<=now-p.get('last_quote_at',0)<=30 for p in book):return {'action':'reject','reason':'portfolio quotes stale'}
+            exposure=sum(max(p['cash_spent'],p['quantity']*p.get('last_price_usd',p['entry_price']))+p.get('capital_reserved_usd',0) for p in book)
+            sizing=self.capital_policy.size(equity,budget,exposure,len(book),
+                overhead_usd=(network*2+entry_rent+exit_rent)*self.sol_price_usd if self.native_sol is not None else fixed*2,
+                ml_fraction=getattr(self,'allocation_fraction',1.),liquidity_limit=snapshot.get('liquidity_usd',0)*r.max_liquidity_allocation_fraction,now=now)
+            budget=sizing['allocation_usd']
+            if budget<=0:return {'action':'reject','reason':'zero capital allocation','sizing':sizing}
         if r.entry_style=='trend_pullback':
             budget=min(budget,snapshot['liquidity_usd']*r.max_liquidity_allocation_fraction)
         profit_target,loss_limit=r.exit_limits(budget)
+        if getattr(self,'capital_policy',None):
+            from execution_liquidity import cap_notional
+            liquidity=cap_notional(budget,snapshot.get('liquidity_usd',0),slippage=r.slippage_per_side,
+                fee_fraction=trade_fee,fixed_cost=fixed)
+            budget=min(budget,liquidity['maximum_usd'])
+            profit_target,loss_limit=r.exit_limits(budget)
         target_gain = profit_target if profit_target>0 else budget*r.stop_fraction*r.target_r
         if r.max_loss_fraction and fixed*2+budget*2*(trade_fee+r.slippage_per_side)>=loss_limit:
             return {"action":"reject","reason":"paper estimated costs exceed loss budget"}
@@ -444,6 +492,7 @@ class PaperDipTrader:
         else:
             self.cash -= budget
         self.position = {'mint': mint, 'pool': pool, 'entry_profile':profile_name,'quantity': quantity, 'entry_price': fill_price,
+                         'capital_reserved_usd':sizing['reserved_overhead_usd'] if sizing else 0,
                          'stop': fill_price*(1-r.stop_fraction), 'target': fill_price*(1+r.stop_fraction*r.target_r),
                          'cash_spent': budget,'entry_fee_per_side':trade_fee,'take_profit_usd':profit_target,'max_loss_usd':loss_limit,'entry_style':r.entry_style,'opened_at':now, 'quote_mint':quote_mint,'exit_fixed_cost': cash_fixed,
                          'rent_is_refundable':self.native_sol is not None and refundable,
@@ -460,7 +509,8 @@ class PaperDipTrader:
         self.armed.pop(key, None)
         if r.entry_style in ('trend_pullback','volume_candles'):
             self.last_entry_bars[key]=signal_bar
-        return {'action': 'paper_buy', 'mint': mint, 'budget_usd': budget,
+        if manager:manager.entered(self,snapshot)
+        return {'action': 'paper_buy', 'mint': mint, 'budget_usd': budget, 'sizing':sizing,
                 'pullback_fraction': 1-reference_price/ath,
                 'signal_metrics':signal_metrics,
                 'entry_style':r.entry_style,'evidence_mode':r.evidence_mode, 'safety_qualified':r.evidence_mode=='strict',

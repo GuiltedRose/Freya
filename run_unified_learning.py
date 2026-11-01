@@ -49,6 +49,8 @@ def main():
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--input", type=Path)
     parser.add_argument("--pipeline-config", type=Path, help="Reviewed ledger import and bounded family training")
+    parser.add_argument('--sizing-evaluation-input',type=Path)
+    parser.add_argument('--capital-config',type=Path,default=Path(__file__).with_name('capital_policy.example.json'))
     parser.add_argument("--status", action="store_true")
     parser.add_argument(
         "--train", choices=("svm", "lstm", "rag", "all")
@@ -68,7 +70,19 @@ def main():
     }
     if args.pipeline_config:
         from learning_pipeline import load_config, synchronize
-        report['pipeline'] = synchronize(store,load_config(args.pipeline_config))
+        from capital_policy import load_config as load_capital_config
+        report['pipeline'] = synchronize(store,load_config(args.pipeline_config),load_capital_config(args.capital_config))
+    if args.sizing_evaluation_input:
+        from capital_policy import load_config as capital_config,canonical
+        from expectancy_validation import compare_sizing
+        from unified_observations import digest
+        payload=load_json(args.sizing_evaluation_input)
+        rows=payload['outcomes']
+        if len(rows)>1024:raise ValueError('Sizing comparison exceeds bounded batch')
+        report['sizing_comparison']=compare_sizing(rows,capital_config(args.capital_config))
+        key=digest([rows,report['sizing_comparison']])
+        with store.connect() as db:
+            db.execute('INSERT OR IGNORE INTO evaluations VALUES(?,?,?)',(key,'capital-policy',canonical(report['sizing_comparison'])))
 
     if args.train:
         families = (
@@ -76,7 +90,8 @@ def main():
             if args.train == "all" else (args.train,)
         )
         for family in families:
-            candidate = build_candidate(store, family)
+            from capital_policy import load_config as load_capital_config
+            candidate = build_candidate(store, family,risk_config=load_capital_config(args.capital_config))
             report["models"][family] = {
                 key: candidate[key]
                 for key in (

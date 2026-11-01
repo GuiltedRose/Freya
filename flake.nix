@@ -1,7 +1,13 @@
 {
   description = "Read-only Solana indexer and isolated paper trading";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/6f06d204d8f2d8761d9da78778745974a3216381";
-  outputs = { self, nixpkgs }:
+  inputs.agave-source = {
+    url = "github:anza-xyz/agave/825efd18292aff6ffcf9daa0f7612f21b3531a72";
+    flake = false;
+  };
+  inputs.rust-overlay.url = "github:oxalica/rust-overlay";
+  inputs.rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+  outputs = { self, nixpkgs, agave-source, rust-overlay }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       eachSystem = nixpkgs.lib.genAttrs systems;
@@ -60,7 +66,7 @@
           else nixpkgs.lib.hasSuffix ".py" rel
             || (nixpkgs.lib.hasPrefix "vendor/" rel && nixpkgs.lib.hasSuffix ".json" rel)
             || (nixpkgs.lib.hasPrefix "tests/fixtures/onchain/" rel && nixpkgs.lib.hasSuffix ".json" rel)
-            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" ];
+            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" ];
       };
     in {
       packages = eachSystem (system:
@@ -75,7 +81,7 @@
             dontBuild = true;
             installPhase = ''
               mkdir -p $out/share/crypto-bot $out/bin
-              cp *.py meme_live_rules.json pump_watch_specs.json assets.json $out/share/crypto-bot/
+              cp *.py meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json $out/share/crypto-bot/
               cp -r vendor $out/share/crypto-bot/
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-indexer \
                 --add-flags "$out/share/crypto-bot/run_onchain_indexer.py"
@@ -91,7 +97,19 @@
                 --add-flags "$out/share/crypto-bot/solana_observer.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-health \
                 --add-flags "$out/share/crypto-bot/runtime_health.py"
+              makeWrapper ${python}/bin/python $out/bin/crypto-bot-challengers \
+                --add-flags "$out/share/crypto-bot/run_challengers.py"
             '';
+          };
+         } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          agave-node = let
+            nodePkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
+            toolchain = nodePkgs.rust-bin.stable."1.97.1".minimal;
+          in import ./nix/agave-package.nix {
+            pkgs = nodePkgs;
+            src = agave-source;
+            version = "4.3.0";
+            rustPlatform = nodePkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
           };
          } // pkgs.lib.optionalAttrs nativeReady {
           native-decoder = nativePackage system;
@@ -149,6 +167,8 @@
           python -m unittest discover -s tests -p test_solana_observer.py
           python -m unittest discover -s tests -p test_pipeline_repair.py
           python -m unittest discover -s tests -p test_production_pipeline.py
+          python -m unittest discover -s tests -p test_dynamic_capital.py
+          python -m unittest discover -s tests -p test_challenger_management.py
           touch $out
         ''; } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           solana-network-lifecycle = import ./tests/nix/solana-network-lifecycle.nix { inherit pkgs; };
@@ -161,6 +181,11 @@
           }) ];
       };
       nixosModules.solana-budget-isolation = import ./nix/solana-network-isolation.nix;
+      lib.mkAgavePackage = args: import ./nix/agave-package.nix args;
+      nixosModules.selfhost-rpc = { config, lib, pkgs, ... }: import ./nix/selfhost-rpc.nix {
+        inherit config lib pkgs;
+        nodePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.agave-node or pkgs.emptyDirectory;
+      };
       nixosModules.default = { config, lib, pkgs, ... }:
         import ./nix/module.nix {
           inherit config lib pkgs;

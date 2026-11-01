@@ -25,7 +25,9 @@ def encode_state(trader):
             'account_rent':[[list(key),value] for key,value in trader.account_rent.items()],
             'last_entry_bars':[[list(key),value] for key,value in trader.last_entry_bars.items()],
             'armed': [[list(key), value] for key, value in trader.armed.items()],
-            'last_seen': [[list(key), value] for key, value in trader.last_seen.items()]}
+            'last_seen': [[list(key), value] for key, value in trader.last_seen.items()],
+            'challenger_history':getattr(trader,'challenger_history',{}),
+            'challenger_config':getattr(trader,'challenger_config',None)}
 
 
 def decode_state(state):
@@ -48,10 +50,27 @@ def decode_state(state):
     trader.last_entry_bars={tuple(key):value for key,value in state.get('last_entry_bars',[])}
     trader.armed = {tuple(key): value for key, value in state['armed']}
     trader.last_seen = {tuple(key): value for key, value in state['last_seen']}
+    trader.challenger_history=state.get('challenger_history',{})
+    trader.challenger_config=state.get('challenger_config')
+    if trader.challenger_config:
+        from paper_challengers import ChallengerConfig,PaperManagement
+        trader.paper_management=PaperManagement(ChallengerConfig(**trader.challenger_config))
     return trader
 
 
 class PaperSession:
+    def configure_challenger(self,settings):
+        from paper_challengers import ChallengerConfig,PaperManagement
+        from dataclasses import asdict
+        normalized=asdict(ChallengerConfig(**settings))
+        current=getattr(self.trader,'challenger_config',None)
+        if current is not None:
+            current=asdict(ChallengerConfig(**current))
+        if current!=normalized and self.trader.all_positions():raise ValueError('Cannot change a management experiment while positions are open')
+        self.trader.challenger_config=normalized
+        self.trader.paper_management=PaperManagement(ChallengerConfig(**normalized))
+        with self.db:self.db.execute('UPDATE paper_runs SET checkpoint=? WHERE id=?',(json.dumps(encode_state(self.trader)),self.run_id))
+
     def __init__(self, directory, balance=None, rules=None, native_sol=None, sol_price_usd=None):
         self.neural_mode='learning'
         self.directory = Path(directory)
@@ -143,21 +162,43 @@ class PaperSession:
             return None
         # Work on a copy: exceptions and failed commits cannot partially apply a fill.
         candidate = decode_state(json.loads(json.dumps(encode_state(self.trader))))
+        candidate.capital_policy=getattr(self,'capital_policy',None)
+        candidate.capital_error=getattr(self,'capital_error',None)
+        if getattr(self,'champion_selection',None):
+            try:
+                from challenger_registry import champion_settings
+                from paper_challengers import ChallengerConfig,PaperManagement
+                settings=asdict(ChallengerConfig(**champion_settings(*self.champion_selection,candidate.rules)))
+                current=asdict(ChallengerConfig(**(candidate.challenger_config or {})))
+                if settings!=current and candidate.all_positions():raise ValueError('Champion changed; keep existing exit policy until positions close')
+                candidate.challenger_config=settings
+                candidate.paper_management=PaperManagement(ChallengerConfig(**settings))
+            except (ValueError,OSError,sqlite3.Error) as error:
+                from runtime_health import safe_reason
+                candidate.capital_error=safe_reason(error)
+        if candidate.capital_policy:candidate.max_positions=candidate.capital_policy.capacity()
         try:
             candidate.neural_exit_model=(getattr(self,'learning_model',None) or {}).get('exit_model') if getattr(self,'neural_mode','shadow')=='learning' else None
             event = candidate.on_snapshot(snapshot)
             model_decision=None
-            if getattr(self,'decision_models',None) and not self.trader.position:
+            if getattr(self,'decision_models',None) and (event.get('action')=='paper_scale' or not any(p['mint']==snapshot['mint'] for p in self.trader.all_positions())):
                 try:
                     model_decision=self.decision_models.entry(snapshot,candidate.rules)
                 except (OSError,ValueError,KeyError,sqlite3.Error) as error:
                     from runtime_health import safe_reason
                     model_decision={'allow':False,'status':'model_unavailable','reason':safe_reason(error)}
                 event['model_decision']=model_decision
-                if event.get('action')=='paper_buy' and not model_decision['allow']:
+                if event.get('action') in ('paper_buy','paper_scale') and model_decision['allow'] and getattr(self,'capital_policy',None) and model_decision.get('allocation_fraction',1)<1:
+                    candidate=decode_state(json.loads(json.dumps(encode_state(self.trader))))
+                    candidate.capital_policy=self.capital_policy
+                    candidate.max_positions=self.capital_policy.capacity()
+                    candidate.allocation_fraction=model_decision['allocation_fraction']
+                    event=candidate.on_snapshot(snapshot)
+                    event['model_decision']=model_decision
+                if event.get('action') in ('paper_buy','paper_scale') and not model_decision['allow']:
                     candidate=self.trader
                     event={'action':'reject','reason':'unified model entry veto','model_decision':model_decision}
-            if event.get('action')=='paper_buy':
+            if event.get('action') in ('paper_buy','paper_scale'):
                 from meme_learning import decision_context
                 from neural_autonomy import learning_decision
                 model=getattr(self,'learning_model',None)
@@ -172,6 +213,9 @@ class PaperSession:
                         context['model_position_id']=model_decision['position_id']
                         context['model_decision']=model_decision
                     event['entry_context']=context
+                    next(p for p in candidate.all_positions() if p['mint']==snapshot['mint'])['capital_entry_context']=context
+                elif event.get('action')=='paper_scale':
+                    event['scale_context']=context
             if candidate.rules.evidence_mode=='market_only':
                 from meme_dip import entry_screen
                 event['evidence_mode']='market_only'
@@ -193,13 +237,22 @@ class PaperSession:
                             (self.run_id, fingerprint, observed, json.dumps(event, allow_nan=False), raw))
             self.db.execute('UPDATE paper_runs SET checkpoint=? WHERE id=?',
                             (json.dumps(encode_state(candidate), allow_nan=False), self.run_id))
+            if event.get('action')=='paper_sell' and getattr(self,'capital_policy',None):
+                held=next(p for p in self.trader.all_positions() if p['mint']==snapshot['mint'])
+                cost=held.get('total_cost_usd',held['cash_spent']+held.get('entry_native_cost_usd',0))
+                sequence=self.db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                row=dict(id=f"paper:{self.run_id}:{sequence}",group_id=held['mint'],exit_at=snapshot['observed_at'],
+                    pnl=event.get('trade_pnl_usd',event['pnl_usd']),net_return=event.get('trade_pnl_usd',event['pnl_usd'])/cost,eligible=True,
+                    cost_usd=cost,
+                    synthetic=held.get('synthetic_seen',False) or snapshot.get('synthetic',False),context=held.get('capital_entry_context',{}))
+                self.capital_policy.record(row)
         self.trader = candidate
         if event.get('action')=='paper_sell':self.record_bankroll_milestone()
         for position in candidate.all_positions():
             if position['mint']==snapshot.get('mint') and 'last_net_pnl_usd' in position:
                 from neural_exits import record
                 record(self.db,f"{self.run_id}:{position['mint']}:{position['opened_at']}",snapshot,candidate.rules,
-                    position['last_net_pnl_usd'],position['cash_spent'])
+                    position['last_net_pnl_usd']+position.get('realized_parts_pnl',0),position.get('total_cost_usd',position['cash_spent']))
         return event
 
     def reclaim_rent(self):
@@ -214,8 +267,8 @@ class PaperSession:
         return event
 
     def configure_positions(self,count):
-        if type(count) is not int or not 1<=count<=8:
-            raise ValueError('Paper position limit must be 1 through 8')
+        if type(count) is not int or not 1<=count<=20:
+            raise ValueError('Paper position limit must be 1 through 20')
         if count<len(self.trader.all_positions()):
             raise ValueError('Cannot reduce paper slots below open positions')
         if count==self.trader.max_positions: return

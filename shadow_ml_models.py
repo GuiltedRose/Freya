@@ -237,5 +237,9 @@ def predict(model, x):
         a, b = model["calibration"]
         return sigmoid(a * margin(model, x) + b)
     if model["family"] == "lstm":
-        return forward_lstm(model, x)[0]
+        probability=forward_lstm(model, x)[0]
+        if model.get('probability_calibration') is not None:
+            a,b=model['probability_calibration']
+            return sigmoid(a*probability+b)
+        return probability
     raise ValueError("Unsupported model family")

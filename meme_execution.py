@@ -230,6 +230,10 @@ class MemeAdapter:
                 raise ValueError('Insufficient real curve quote reserves')
         return result
 
+    def limit_entry(self,amount,snapshot,slippage):
+        from execution_liquidity import cap_native
+        return cap_native(self,snapshot,amount,slippage)
+
     def build(self,side,amount,slippage_bps=50,snapshot=None):
         s=snapshot or self.snapshot(for_entry=side=='buy')
         if time.time()-s['read_at']>10: raise ValueError('Quote expired')

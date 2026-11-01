@@ -98,26 +98,53 @@ def wallet_equity(rpc,user,price,position,sources,rent_accounts=()):
 
 def tick(engine,sources,feed,wallets,mints,discover=True,progress=None):
     if progress: progress({'status':'checking_wallet_and_market'})
-    if engine.store.state['pending']: return engine.recover()
+    if engine.store.state['pending']:
+        try:result=engine.recover()
+        except (OSError,ValueError,ConnectionError) as error:
+            result={'status':'pending_reconciliation_unavailable','error_type':type(error).__name__}
+        if engine.store.state['pending']:
+            # Retain ownership and exposure while ambiguous; never replay an order.
+            result['positions_retained']=len(engine.store.all_positions())
+            monitored=[]
+            for position in engine.store.all_positions():
+                try:
+                    quote=sources.observation(position['mint'],pool=position['pool'])
+                    position['last_observed_price_usd']=quote['price_usd']
+                    position['last_observed_at']=quote.get('price_as_of',quote['observed_at'])
+                    monitored.append({'mint':position['mint'],'price_usd':quote['price_usd'],'submission_blocked':'unresolved wallet order'})
+                except Exception as error:
+                    monitored.append({'mint':position['mint'],'status':'quote_unavailable','error_type':type(error).__name__})
+            result['position_monitoring']=monitored
+            engine.store.save('pending_position_monitor',{'positions':monitored})
+            return result
     engine.store.refresh_learning_model()
     cooldown=engine.loss_streak_cooldown(time.time())
-    if cooldown and not engine.store.state.get('position'):
+    if cooldown and not engine.store.all_positions():
         return {'status':'loss_streak_cooldown','risk':cooldown,'training_samples':engine.store.state.get('learning_model_live',{}).get('samples',0)}
     price=valuation(sources)
-    position=engine.store.state['position']
+    positions=engine.store.all_positions()
     # Resolve a held mint even if its old bonding curve has migrated. The
     # adapter validates actual mint, pool PDA and native SOL quote on chain.
-    if position:
-        row=sources.observation(position['mint'])
-        if row['market_kind']!=position['kind'] or row['pool']!=position['pool']:
-            from meme_execution import MemeAdapter
-            candidate=MemeAdapter(engine.rpc,engine.user,row['mint'],row['pool'],row['market_kind'])
-            candidate.snapshot()
-            position.update(pool=row['pool'],kind=row['market_kind'])
-            engine.store.save('verified_migration',{'mint':row['mint'],'pool':row['pool'],'kind':row['market_kind']})
-        equity=wallet_equity(engine.rpc,engine.user,price,None,sources,engine.store.state.get('rent_accounts',[]))
-        engine.bankroll_valuation=getattr(sources,'_bankroll_valuation',{'complete':True})
-        return engine.prepare(row,price,equity)
+    held_results=[]
+    for position in positions:
+        try:
+            row=sources.observation(position['mint'])
+            engine.store.select_position(position['mint'])
+            if row['market_kind']!=position['kind'] or row['pool']!=position['pool']:
+                from meme_execution import MemeAdapter
+                candidate=MemeAdapter(engine.rpc,engine.user,row['mint'],row['pool'],row['market_kind'])
+                candidate.snapshot()
+                position.update(pool=row['pool'],kind=row['market_kind'])
+                engine.store.save('verified_migration',{'mint':row['mint'],'pool':row['pool'],'kind':row['market_kind']})
+            equity=wallet_equity(engine.rpc,engine.user,price,None,sources,engine.store.state.get('rent_accounts',[]))
+            engine.bankroll_valuation=getattr(sources,'_bankroll_valuation',{'complete':True})
+            held_results.append(engine.prepare(row,price,equity))
+            if engine.store.state['pending']:break
+        except Exception as error:
+            held_results.append({'status':'held_quote_unavailable','mint':position['mint'],'error_type':type(error).__name__})
+    capacity=engine.capital_policy.capacity() if getattr(engine,'capital_policy',None) else 1
+    if held_results and (len(engine.store.all_positions())>=capacity or engine.store.state['pending']):
+        return held_results[0] if len(held_results)==1 else {'status':'portfolio_managed','positions':held_results}
     equity=wallet_equity(engine.rpc,engine.user,price,None,sources,engine.store.state.get('rent_accounts',[]))
     engine.bankroll_valuation=getattr(sources,'_bankroll_valuation',{'complete':True})
     engine.mark(equity)
@@ -174,7 +201,7 @@ def tick(engine,sources,feed,wallets,mints,discover=True,progress=None):
 
 def cycle_rest(state,interval):
     from meme_profiles import response_rest
-    active=state.get('position') or state.get('pending')
+    active=state.get('position') or state.get('positions') or state.get('pending')
     if active: return min(interval,response_rest(active.get('entry_profile'),holding=True))
     recent=state.get('last_entry_regime')
     if recent and 0<=time.time()-recent['observed_at']<=120: return min(interval,response_rest(recent['profile']))
@@ -225,6 +252,7 @@ def main():
     parser.add_argument('--onchain-db',type=Path,help='Local finalized observations; execution requires reviewed source policies and complete current data')
     parser.add_argument('--unified-db',type=Path,help='Active qualified model database')
     parser.add_argument('--unified-config',type=Path)
+    parser.add_argument('--capital-config',type=Path,default=Path(__file__).with_name('capital_policy.example.json'))
     parser.add_argument('--execute',action='store_true',help='USER CONTROLLED: sign and submit real-money transactions')
     args=parser.parse_args()
     if (args.unified_db is None)!=(args.unified_config is None):
@@ -280,10 +308,21 @@ def main():
             risk_assessor=OnchainRisk(risk_rpc)
         engine=MemeLiveEngine(rpc,user,store,rules,orders,signer,risk_assessor=risk_assessor,fixed_profile=args.profile if args.profile!='adaptive' else None)
         engine.neural_mode=args.neural_mode
+        try:
+            from capital_policy import attach_live,seed
+            from meme_learning import live_outcomes
+            policy=attach_live(engine,args.capital_config)
+            seed(policy,live_outcomes(directory/'meme_live.sqlite')[0])
+        except (ValueError,OSError,sqlite3.Error) as error:
+            from runtime_health import safe_reason
+            engine.capital_error=safe_reason(error)
         engine.requires_source_qualification=bool(args.onchain_db)
         if args.unified_db:
             from learning_pipeline import DecisionModels
-            engine.decision_models=DecisionModels(args.unified_db,args.unified_config)
+            try:engine.decision_models=DecisionModels(args.unified_db,args.unified_config)
+            except (ValueError,OSError,sqlite3.Error) as error:
+                from runtime_health import safe_reason
+                engine.capital_error=safe_reason(error)
         def promotion_status():
             from evaluation_state import load
             from exit_evaluation import live_eligibility
@@ -301,7 +340,7 @@ def main():
             from meme_console import format_status
             print(json.dumps(record) if args.json else format_status(record,rules),flush=True)
         publish({'status':'started','strategy_profile':args.profile or 'configured','execution_enabled':args.execute,'position_open':store.state['position'] is not None,
-                 'pending_order':store.state['pending'] is not None})
+                 'positions':store.all_positions(),'pending_order':store.state['pending'] is not None})
         if args.reconcile_only:
             publish(engine.recover())
             return

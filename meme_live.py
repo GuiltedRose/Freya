@@ -73,7 +73,7 @@ class MemeLiveStore:
             normalized=dict(old,rules=asdict(DipRules(**old['rules'])))
             if normalized!=binding:
                 can_adopt=(adopt_rules and old['wallet']==str(user) and old['schema']==binding['schema']
-                           and self.state['position'] is None and self.state['pending'] is None)
+                           and self.state['position'] is None and not self.state.get('positions') and self.state['pending'] is None)
                 orders_path=self.directory/'orders.sqlite'
                 if can_adopt and orders_path.exists():
                     orders=sqlite3.connect('file:'+str(orders_path)+'?mode=ro',uri=True)
@@ -112,7 +112,7 @@ class MemeLiveStore:
             self.refresh_learning_model(record_event='shadow_learning_initialized')
 
     def refresh_learning_model(self,record_event='shadow_learning_refreshed'):
-        if self.state.get('pending') or self.state.get('position'):
+        if self.state.get('pending') or self.all_positions():
             return self.state.get('learning_model_live')
         if self.cooldown_training_only and not loss_cooldown(self.db,DipRules(**self.state['binding']['rules']),time.time()):
             return self.state.get('learning_model_live')
@@ -142,9 +142,26 @@ class MemeLiveStore:
         return self.state['learning_model_live']
 
     def save(self,kind,body):
+        if 'positions' in self.state:
+            owner=self.state.get('position_owner')
+            position=self.state.get('position')
+            if position:self.state['positions'][position['mint']]=position
+            elif owner:self.state['positions'].pop(owner,None)
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO state VALUES(1,?)',(json.dumps(self.state,allow_nan=False),))
             self.db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',(time.time(),kind,json.dumps(body,allow_nan=False)))
+            if kind in ('confirmed_sell','transaction_failed') and body.get('capital_outcome') and getattr(self,'capital_policy',None):
+                self.capital_policy.record(body['capital_outcome'])
+
+    def all_positions(self):
+        book=dict(self.state.get('positions',{}))
+        if self.state.get('position'):book[self.state['position']['mint']]=self.state['position']
+        return list(book.values())
+
+    def select_position(self,mint):
+        if 'positions' not in self.state:return
+        self.state['position']=self.state['positions'].get(mint)
+        self.state['position_owner']=mint
 
     def close(self):
         self.db.close();self.lock.close()
@@ -202,7 +219,9 @@ class MemeLiveEngine:
     def mark(self,equity,open_pnl_usd=0.):
         from meme_bot_risk import mark_bot_risk
         has_orders=bool(self.orders and self.orders.db.execute('SELECT 1 FROM orders LIMIT 1').fetchone())
-        return mark_bot_risk(self.store,equity,self.rules.drawdown_halt,open_pnl_usd,has_orders,
+        current=self.store.state.get('position')
+        other_pnl=sum(p.get('marked_net_pnl_usd',0) for p in self.store.all_positions() if not current or p['mint']!=current['mint'])
+        return mark_bot_risk(self.store,equity,self.rules.drawdown_halt,open_pnl_usd+other_pnl,has_orders,
             self.rules.drawdown_promotion_bankroll_usd,self.rules.promoted_drawdown_halt,
             total_bankroll=equity if self.rules.drawdown_bankroll_basis=='total_for_demotion' else None,
             total_complete=getattr(self,'bankroll_valuation',{}).get('complete',True))
@@ -267,6 +286,9 @@ class MemeLiveEngine:
     def recover(self):
         s=self.store.state;p=s['pending']
         if not p: return {'status':'idle'}
+        self.store.select_position(p['mint'])
+        if p['side']=='sell' and p.get('owner_position_id') and (not s['position'] or p['owner_position_id']!=s['position'].get('position_id',s['position'].get('entry_signature'))):
+            raise ValueError('Pending sell position ownership mismatch; reconciliation required')
         if not self.orders: return {'status':'pending_live_order_requires_execution_journal'}
         # Crash between intent reservation and signed journal insertion has
         # provably never called sendTransaction; clear only that exact case.
@@ -283,18 +305,22 @@ class MemeLiveEngine:
             return {'status':'order_'+status,'signature':row[0]}
         if status=='uncertain': return {'status':'uncertain_order_blocks_replacement','signature':row[0]}
         tx=self.rpc.call('getTransaction',[row[0],{'encoding':'json','commitment':'confirmed','maxSupportedTransactionVersion':0}])
+        if getattr(self.store,'capital_policy',None) and (not tx or type(tx.get('blockTime')) is not int):
+            return {'status':'confirmed_receipt_time_unavailable','signature':row[0]}
         if tx is None: return {'status':'waiting_for_confirmed_receipt','signature':row[0]}
         if tx['transaction']['signatures'][0]!=row[0]: raise ValueError('Receipt signature mismatch')
         if status=='failed':
             fee=tx['meta']['fee']/1e9*p['sol_price_usd']
             s['realized_pnl_usd']-=fee;s['pending']=None
-            self.store.save('transaction_failed',{'id':p['id'],'network_cost_usd':fee})
+            failure=dict(id='failed:'+row[0],group_id=p['mint'],exit_at=tx.get('blockTime') or time.time(),
+                pnl=-fee,net_return=0.,eligible=True,order_failure=True,context={})
+            self.store.save('transaction_failed',{'id':p['id'],'network_cost_usd':fee,'capital_outcome':failure})
             return {'status':'transaction_failed'}
         fill=receipt_fill(tx,self.user,p['mint'],p['base_account'],p['quote_account'])
         if p['side']=='buy':
             if fill['base_delta']<p['minimum'] or fill['net_cash_lamports']>=0:
                 raise ValueError('Confirmed buy violates intent; manual reconciliation required')
-            s['position']=dict(entry_profile=p.get('entry_profile'),mint=p['mint'],pool=p['pool'],kind=p['kind'],units=fill['base_delta'],
+            s['position']=dict(position_id=p['id'],capital_reserved_usd=(p.get('sizing') or {}).get('reserved_overhead_usd',0),entry_profile=p.get('entry_profile'),mint=p['mint'],pool=p['pool'],kind=p['kind'],units=fill['base_delta'],
                 opened_at=tx.get('blockTime') or time.time(),cost_usd=-fill['net_cash_lamports']/1e9*p['sol_price_usd'],
                 base_account=p['base_account'],quote_account=p['quote_account'],entry_signature=row[0],
                 entry_context=p.get('entry_context'),
@@ -306,6 +332,9 @@ class MemeLiveEngine:
                 raise ValueError('Confirmed sell violates intent; manual reconciliation required')
             position=s['position']
             pnl=fill['net_cash_lamports']/1e9*p['sol_price_usd']-position['cost_usd']
+            fill['capital_outcome']=dict(id=row[0],group_id=position['mint'],pnl=pnl,net_return=pnl/position['cost_usd'],
+                cost_usd=position['cost_usd'],exit_at=tx.get('blockTime') or time.time(),eligible=True,context=position.get('entry_context') or {})
+            fill['position_id']=position.get('position_id',position.get('entry_signature'))
             fill['learning_update']={'updated':False,
                 'reason':'shared shadow weights rebuild from eligible labels on the next scan'}
             s['realized_pnl_usd']+=pnl;s['position']=None;fill['pnl_usd']=pnl
@@ -320,12 +349,14 @@ class MemeLiveEngine:
         now=time.time() if now is None else now;positive(sol_price);positive(equity)
         s=self.store.state
         if s['pending']: return self.recover()
+        self.store.select_position(snapshot['mint'])
         position=s['position']
         if position and snapshot['mint']!=position['mint']: return {'status':'open_position_has_priority'}
         if position is None: self.mark(equity)
         if not 0<=now-snapshot['observed_at']<=30: return {'status':'stale_market_observation'}
         if snapshot.get('execution',{}).get('model_only'): raise ValueError('Paper execution assumptions cannot authorize live orders')
         side='sell' if position else 'buy'
+        precomputed_model=None
         if side=='buy':
             if self.execute and getattr(self,'requires_source_qualification',False) and not snapshot.get('source_qualification',{}).get('passed'):
                 return {'status':'market_source_unqualified','source':snapshot.get('source_qualification')}
@@ -382,6 +413,7 @@ class MemeLiveEngine:
             if market['base_balance']<position['units']: return {'status':'wallet_inventory_changed_manual_reconciliation_required'}
             units=position['units'];out=adapter.output('sell',units,market)
             net=(out*(1-self.rules.slippage_per_side))/1e9*sol_price-.00002*sol_price-position['cost_usd']
+            position.update(marked_net_pnl_usd=net,marked_value_usd=max(0,net+position['cost_usd']),last_quote_at=now)
             self.mark(equity,net)
             from neural_exits import record,decision
             if position.get('entry_signature'):
@@ -396,9 +428,31 @@ class MemeLiveEngine:
             # Preserve the explicit dollar reserve and native exit reserve.
             available=(market['native_lamports']+market.get('quote_balance',0)-int(self.rules.native_fee_reserve_sol*1e9)-5040000)/1e9*sol_price-self.rules.reserve_usd
             budget=self.rules.entry_budget(equity,available)
+            if getattr(self,'capital_error',None):return {'status':'capital_policy_unavailable','reason':self.capital_error}
+            sizing=None
+            if getattr(self,'capital_policy',None):
+                if getattr(self,'bankroll_valuation',{}).get('complete',True) is not True:
+                    return {'status':'bankroll_valuation_incomplete','reason':'Capital sizing requires complete shared-wallet valuation'}
+                if getattr(self,'decision_models',None):
+                    try:precomputed_model=self.decision_models.entry(snapshot,entry_rules,live=self.execute)
+                    except (ValueError,OSError,KeyError,sqlite3.Error) as error:
+                        return {'status':'model_entry_veto','reason':type(error).__name__}
+                    if not precomputed_model['allow']:
+                        self.store.save('model_entry_veto',precomputed_model)
+                        return {'status':'model_entry_veto','model_decision':precomputed_model}
+                book=self.store.all_positions()
+                if any(not 0<=now-p.get('last_quote_at',0)<=30 for p in book):return {'status':'portfolio_quotes_stale'}
+                exposure=sum(max(p['cost_usd'],p.get('marked_value_usd',p['cost_usd']))+p.get('capital_reserved_usd',0) for p in book)
+                sizing=self.capital_policy.size(equity,budget,exposure,len(book),
+                    ml_fraction=(precomputed_model or {}).get('allocation_fraction',1.),
+                    overhead_usd=.00506*sol_price,
+                    liquidity_limit=snapshot.get('liquidity_usd',0)*self.rules.max_liquidity_allocation_fraction,now=now)
+                budget=sizing['allocation_usd']
+                if budget<=0:return {'status':'zero_capital_allocation','sizing':sizing}
             if self.rules.entry_style!='volume_candles': budget=min(budget,snapshot['liquidity_usd']*self.rules.max_liquidity_allocation_fraction)
             if budget<=0: return {'status':'insufficient_spendable_SOL_after_reserves'}
             units=int(budget/sol_price*1e9);reason='volume and candle minimums' if self.rules.entry_style=='volume_candles' else 'trend pullback'
+            if hasattr(adapter,'limit_entry'):units=min(units,adapter.limit_entry(units,market,self.rules.slippage_per_side))
             if units<=0: return {'status':'position_rounds_to_zero'}
         if side=='buy' and self.rules.momentum_reclaim_enabled and self.risk_assessor is None:
             return {'status':'onchain_risk_unavailable'}
@@ -419,8 +473,14 @@ class MemeLiveEngine:
             units=min(units,int(max(0,available)/sol_price*1e9))
             if units<=0: return {'status':'inventory_changed_after_reverse_probe'}
         if side=='buy': profit_target,loss_limit=self.rules.exit_limits(units/1e9*sol_price)
+        if side=='buy' and hasattr(adapter,'limit_entry'):
+            units=min(units,adapter.limit_entry(units,market,self.rules.slippage_per_side))
+            if units<=0:return {'status':'exit_liquidity_unavailable'}
+            profit_target,loss_limit=self.rules.exit_limits(units/1e9*sol_price)
         unsigned,context=adapter.build(side,units,snapshot=market)
         simulated=adapter.simulate(unsigned,context,reserve=int(self.rules.native_fee_reserve_sol*1e9))
+        if side=='buy' and sizing and (simulated['fee_lamports']+simulated['rent_lamports'])/1e9*sol_price>sizing['reserved_overhead_usd']:
+            return {'status':'capital_cost_allowance_exceeded','sizing':sizing}
         if side=='sell' and reason in ('profit target','neural early profit exit'):
             net_minimum=(context['min_output']-simulated['fee_lamports']-simulated['rent_lamports']+simulated.get('recoverable_rent_lamports',0))/1e9*sol_price-position['cost_usd']
             required_profit=profit_target if reason=='profit target' else 0.
@@ -464,7 +524,7 @@ class MemeLiveEngine:
             if adaptive_decision: context_record['adaptive_selection']=adaptive_decision
             if getattr(self,'decision_models',None):
                 try:
-                    model_decision=self.decision_models.entry(snapshot,entry_rules,live=self.execute)
+                    model_decision=precomputed_model or self.decision_models.entry(snapshot,entry_rules,live=self.execute)
                 except (ValueError,KeyError,OSError,sqlite3.Error) as error:
                     from runtime_health import safe_reason
                     model_decision={'allow':False,'status':'model_unavailable','reason':safe_reason(error)}
@@ -474,6 +534,8 @@ class MemeLiveEngine:
                 context_record['model_position_id']=model_decision['position_id']
                 context_record['model_decision']=model_decision
         intent=dict(id=str(uuid.uuid4()),side=side,mint=snapshot['mint'],pool=snapshot['pool'],kind=snapshot['market_kind'],
+            owner_position_id=(position.get('position_id',position.get('entry_signature')) if position else None),
+            sizing=sizing if side=='buy' else None,
             take_profit_usd=profit_target,max_loss_usd=loss_limit,entry_context=context_record,onchain_risk=risk_report,entry_profile=profile_name,input_units=units,minimum=context['min_output'],sol_price_usd=sol_price,bar=bar,reason=reason,
             base_account=str(market['base_user']),quote_account=str(market['quote_user']),simulation=simulated,
             message_hash=context['message_hash'],last_valid_block_height=context['last_valid_block_height'])

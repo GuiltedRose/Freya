@@ -16,10 +16,14 @@ def load_config(path):
         raise ValueError('Explicit learning storage permission required')
     if len(config.get('ledgers',[])) > 4 or len(config.get('candidates',{})) > 3:
         raise ValueError('Learning configuration exceeds bounds')
+    if not 0<=config.get('allocation_fraction',1)<=1:raise ValueError('Model allocation fraction must be 0..1')
+    features=config.get('features',{})
+    if not isinstance(features,dict) or set(features)-{'svm_risk_v2','lstm_continuation','lifecycle_context'} or any(type(v) is not bool for v in features.values()):
+        raise ValueError('Unknown or nonboolean independent ML feature flags')
     return config
 
 
-def synchronize(store, config):
+def synchronize(store, config, risk_config=None):
     from meme_learning import paper_outcomes, live_outcomes
     report = {'ledgers':[], 'models':{}, 'order_authorization':False}
     paths = []
@@ -61,7 +65,7 @@ def synchronize(store, config):
             raise ValueError('Ledger reconciliation exceeds bounded worker; explicit offline review required')
         for stored in previous:
             row=json.loads(stored[0])
-            if row.get('provenance',{}).get('outcome_identity',row['identity']) not in active:
+            if row.get('provenance',{}).get('ledger_import_version')!=2 or row.get('provenance',{}).get('outcome_identity',row['identity']) not in active:
                 store.revoke(source,row['identity'],'Source outcome excluded or archived')
         proof = dict(config['provenance'],ledger_path=str(path))
         imported = 0
@@ -72,7 +76,7 @@ def synchronize(store, config):
     if paths:
         report['quotes']=import_position_quotes(store,paths,config['rights'],config['provenance'])
     for family in ('svm','lstm','rag'):
-        candidate = build_candidate(store,family)
+        candidate = build_candidate(store,family,risk_config=risk_config,features_config=config.get('features',{}))
         report['models'][family]={k:candidate[k] for k in ('id','status','reason') if k in candidate}
     return report
 
@@ -110,16 +114,18 @@ class DecisionModels:
                 raise ValueError('Configured model family mismatch')
             if not 0 <= time.time()-candidate['created_at'] <= MAX_AGE:
                 raise ValueError('Configured model is expired or dated in the future')
-            prediction=forecast(self.store,identifier,rows,context_id)
+            prediction=forecast(self.store,identifier,rows,context_id,'live' if live else 'paper')
             if live:
                 outcomes,failures=self.confirmed_outcomes()
                 qualification=evaluate_candidate(self.store,identifier,outcomes,failures)
                 prediction['qualification']=qualification
                 allow=allow and qualification.get('live_eligible') is True
             score=prediction.get('score')
-            allow=allow and number(score) and score>=THRESHOLD
+            allow=allow and ((prediction.get('retrieval') or {}).get('edge_supported') is True if family=='rag'
+                             else number(score) and (score<=1-THRESHOLD if family=='svm' else score>=THRESHOLD))
             predictions[family]=prediction
         return {'allow':bool(allow),'status':'allowed' if allow else 'model_entry_blocked',
+                'allocation_fraction':self.config.get('allocation_fraction',1.) if allow else 0.,
                 'position_id':context_id,'models':predictions,'required_families':['svm','lstm','rag'],
                 'reason':'All configured models must supply eligible scores; live also requires prospective qualification'}
 

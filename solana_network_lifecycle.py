@@ -29,9 +29,19 @@ def ns(*args, **kwargs):
     return run('ip','netns','exec',NS,*args,**kwargs)
 
 
-def host_rules(uplink):
+def host_rules(uplink,peer_ports=None):
     if not uplink or len(uplink)>15 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-' for c in uplink):
         raise ValueError('Invalid uplink interface')
+    dnat=''
+    if peer_ports is not None:
+        start,end=peer_ports['start'],peer_ports['end']
+        if (type(start) is not int or type(end) is not int or not 1024<=start<=end<=65535
+            or end-start>255 or start<=8900 and end>=8899):
+            raise ValueError('Invalid bounded node peer range')
+        dnat=f'''chain prerouting {{ type nat hook prerouting priority dstnat; policy accept;
+ iifname "{uplink}" tcp dport {start}-{end} dnat to {ADDRESS}
+ iifname "{uplink}" udp dport {start}-{end} dnat to {ADDRESS}
+ }}'''
     return f'''table inet solana_boundary {{
  chain input {{ type filter hook input priority -200; policy accept; iifname "{VETH}" drop; }}
  chain output {{ type filter hook output priority -200; policy accept; oifname "{VETH}" drop; }}
@@ -45,6 +55,7 @@ def host_rules(uplink):
  }}
 }}
 table ip solana_nat {{
+ {dnat}
  chain postrouting {{ type nat hook postrouting priority srcnat; policy accept;
   ip saddr {ADDRESS} oifname "{uplink}" masquerade
  }}
@@ -83,7 +94,7 @@ def start(config):
     report=budget.report(time.time())
     if report['optional_collection_suspended'] and not config.get('reserveSession',False):
         raise ValueError('Normal budget reached; optional collection suspended')
-    host=host_rules(config['uplink'])
+    host=host_rules(config['uplink'],config.get('peerPorts'))
     # Refuse unknown existing namespace ownership; cleanup is an explicit stop action.
     if Path('/run/netns/'+NS).exists():
         raise ValueError('Existing namespace requires stopped-service cleanup before restart')

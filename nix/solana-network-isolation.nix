@@ -7,6 +7,7 @@ let
     ledger = cfg.ledgerFile;
     uplink = cfg.uplinkInterface;
     inherit (cfg) sessionBytes uploadKbytes downloadKbytes reserveSession;
+    inherit (cfg) peerPorts;
   });
   support = pkgs.runCommand "solana-network-controller" {} ''
     mkdir -p $out
@@ -25,6 +26,10 @@ in {
     uploadKbytes = mkOption { type = types.ints.between 1 1024; default = 16; };
     downloadKbytes = mkOption { type = types.ints.between 1 1024; default = 16; };
     reserveSession = mkOption { type = types.bool; default = false; description = "Explicit essential recovery session; ledger reserve authorization still required above 120GB."; };
+    peerPorts = mkOption { type = types.nullOr (types.submodule {
+      options.start = mkOption { type = types.port; };
+      options.end = mkOption { type = types.port; };
+    }); default = null; description = "Optional bounded peer ports DNATed to the isolated self-hosted node; RPC ports remain private."; };
   };
   config = lib.mkIf cfg.enable {
     assertions = [
@@ -42,6 +47,10 @@ in {
     networking.firewall.extraForwardRules = ''
       iifname "solana-host" oifname "${cfg.uplinkInterface}" ip saddr 169.254.203.2 accept
       iifname "${cfg.uplinkInterface}" oifname "solana-host" ip daddr 169.254.203.2 ct state established,related accept
+      ${lib.optionalString (cfg.peerPorts != null) ''
+        iifname "${cfg.uplinkInterface}" oifname "solana-host" ip daddr 169.254.203.2 tcp dport ${toString cfg.peerPorts.start}-${toString cfg.peerPorts.end} accept
+        iifname "${cfg.uplinkInterface}" oifname "solana-host" ip daddr 169.254.203.2 udp dport ${toString cfg.peerPorts.start}-${toString cfg.peerPorts.end} accept
+      ''}
     '';
     systemd.tmpfiles.rules = [ "d /var/lib/solana-network 0700 root root -" ];
     systemd.services = {

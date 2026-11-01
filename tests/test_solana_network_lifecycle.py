@@ -5,6 +5,16 @@ from solana_network_lifecycle import host_rules, cleanup, start
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_node_peers_are_opt_in_and_private_rpc_is_not_forwarded(self):
+        self.assertNotIn('dnat to',host_rules('wan0'))
+        rules=host_rules('wan0',{'start':8000,'end':8020})
+        self.assertIn('tcp dport 8000-8020 dnat to 169.254.203.2',rules)
+        self.assertIn('udp dport 8000-8020 dnat to 169.254.203.2',rules)
+        self.assertNotIn('8899',rules)
+        for ports in ({'start':8899,'end':8900},{'start':1,'end':22},
+                      {'start':8000,'end':9000},{'start':8020,'end':8000}):
+            with self.assertRaises(ValueError):host_rules('wan0',ports)
+
     def test_host_guard_cannot_be_injected_and_blocks_host_proxy_paths(self):
         for value in ('eth0; flush ruleset','', 'a'*16):
             with self.assertRaises(ValueError): host_rules(value)

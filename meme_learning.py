@@ -239,6 +239,10 @@ def decision_context(snapshot,rules,scorecard=None,signal=None,risk=None,entry_p
         context['data_rights']=snapshot['data_rights']
         context['data_provenance']=snapshot.get('data_provenance')
     context['recorded_before_order']=True
+    from market_analysis import lifecycle,risk_features,risk_schema
+    context['lifecycle']=lifecycle(snapshot)
+    context['risk_features']=risk_features(snapshot)
+    context['risk_schema']=risk_schema()
     return context
 
 
@@ -246,7 +250,7 @@ def live_outcomes(path):
     db=sqlite3.connect('file:'+str(Path(path).resolve())+'?mode=ro',uri=True)
     try: events=db.execute('SELECT at,kind,body FROM events ORDER BY id').fetchall()
     finally: db.close()
-    result=[];opened=None;reservations={};by_id={};unmatched=0;failures=[]
+    result=[];opened={};reservations={};by_id={};unmatched=0;failures=[]
     for at,kind,raw in events:
         row=json.loads(raw)
         if kind=='reserved':
@@ -255,18 +259,19 @@ def live_outcomes(path):
             intent=by_id.get(row.get('id'),{})
             failures.append({'observed_at':at,'source':'bot_live','mint':intent.get('mint'),'entry_profile':intent.get('entry_profile'),**row})
         elif kind=='confirmed_buy':
-            if opened: unmatched+=1
+            if row['mint'] in opened: unmatched+=1
             intent=reservations.get(('buy',row['mint']),{})
-            opened={'source':'bot_live','mint':row['mint'],'entry_at':at,'entry_signature':row['signature'],
+            cost=(-row['net_cash_lamports']/1e9*intent['sol_price_usd']) if row.get('net_cash_lamports') is not None and intent.get('sol_price_usd') else None
+            opened[row['mint']]={'source':'bot_live','mint':row['mint'],'entry_at':at,'entry_signature':row['signature'],'cost_usd':cost,
                     'entry_profile':intent.get('entry_profile'),'entry_context':intent.get('entry_context'),
                     'entry_fee_lamports':row.get('fee_lamports'),'status':'open'}
         elif kind=='confirmed_sell':
-            if not opened or opened['mint']!=row['mint']: unmatched+=1;continue
-            result.append({**opened,'exit_at':at,'exit_signature':row['signature'],'net_pnl_usd':row['pnl_usd'],
+            if row['mint'] not in opened: unmatched+=1;continue
+            position=opened.pop(row['mint'])
+            result.append({**position,'exit_at':at,'exit_signature':row['signature'],'net_pnl_usd':row['pnl_usd'],
                 'exit_fee_lamports':row.get('fee_lamports'),'exit_reason':reservations.get(('sell',row['mint']),{}).get('reason'),
                 'status':'closed','label_kind':'confirmed_bot_receipt_pnl'})
-            opened=None
-    return result,([opened] if opened else []),failures,unmatched
+    return result,list(opened.values()),failures,unmatched
 
 
 def _paper_correction(event):
@@ -288,6 +293,8 @@ def paper_outcomes(path):
             corrected=any(_paper_correction(json.loads(row[2])) for row in rows)
             for sequence,at,event_raw,snapshot_raw in rows:
                 event=json.loads(event_raw);snapshot=json.loads(snapshot_raw)
+                if snapshot.get('synthetic') is True and snapshot.get('mint') in opened:
+                    opened[snapshot['mint']]['training_eligible']=False
                 if event['action']=='paper_buy':
                     if event['mint'] in opened: unmatched+=1
                     context=dict(event.get('entry_context') or snapshot)
@@ -300,6 +307,7 @@ def paper_outcomes(path):
                         signal_metrics={'pullback_fraction':event.get('pullback_fraction')}
                     context['signal']={'metrics':signal_metrics}
                     opened[event['mint']]={'source':'bot_paper','run_id':run,'mint':event['mint'],'entry_at':at,
+                            'cost_usd':event.get('budget_usd',0)+event.get('entry_native_cost_usd',0),
                             'entry_profile':event.get('entry_profile'),'entry_context':context,
                             'entry_data_kind':event.get('data_kind','supplied_observation'),
                             'training_eligible':not corrected and event.get('data_kind')!='synthetic' and snapshot.get('synthetic') is not True,
@@ -308,9 +316,17 @@ def paper_outcomes(path):
                     if event['mint'] not in opened: unmatched+=1;continue
                     entry=opened.pop(event['mint'])
                     result.append({**entry,'exit_at':at,'exit_signature':f'paper:{run}:{sequence}',
-                                   'net_pnl_usd':event['pnl_usd'],'exit_reason':event.get('reason'),
+                                   'net_pnl_usd':entry.get('partial_pnl_usd',0)+event['pnl_usd'],'exit_reason':event.get('reason'),
                                    'status':'closed','label_kind':'modeled_paper_pnl',
                                    'training_eligible':entry['training_eligible'] and event.get('data_kind')!='synthetic' and snapshot.get('synthetic') is not True})
+                elif event['action']=='paper_partial_sell' and event['mint'] in opened:
+                    entry=opened[event['mint']]
+                    entry['partial_pnl_usd']=entry.get('partial_pnl_usd',0)+event['pnl_usd']
+                    entry['training_eligible']=entry['training_eligible'] and event.get('data_kind')!='synthetic' and snapshot.get('synthetic') is not True
+                elif event['action']=='paper_scale' and event['mint'] in opened:
+                    entry=opened[event['mint']]
+                    entry['cost_usd']+=event['budget_usd']+event.get('entry_native_cost_usd',0)
+                    entry['training_eligible']=entry['training_eligible'] and event.get('data_kind')!='synthetic' and snapshot.get('synthetic') is not True
 
             unclosed.extend(opened.values())
     finally: db.close()

@@ -12,6 +12,16 @@ def safe_reason(error):
     return re.sub(r'https?://\S+|wss?://\S+', '[endpoint]', str(error))[:240]
 
 
+def validate_rpc_mode(config,mode):
+    from urllib.parse import urlsplit
+    enabled=[e for e in config.get('endpoints',[]) if e.get('enabled') is True]
+    local=[e for e in enabled if urlsplit(e.get('url','')).hostname in ('127.0.0.1','::1')]
+    remote=[e for e in enabled if e not in local]
+    if mode not in ('remote','selfhosted','hybrid'):raise ValueError('Unknown RPC mode')
+    if not enabled or (mode=='remote' and local) or (mode=='selfhosted' and remote) or (mode=='hybrid' and not (local and remote)):
+        raise ValueError('Reviewed enabled RPC endpoints do not match selected mode')
+
+
 def validate_config(config):
     from onchain_decode import Decoder
     from onchain_oracle import feed_account
@@ -117,6 +127,7 @@ def health(database, mints=(), now=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path)
+    parser.add_argument('--rpc-mode',choices=('remote','selfhosted','hybrid'))
     parser.add_argument('--db',type=Path)
     parser.add_argument('--mint',action='append',default=[])
     parser.add_argument('--require-ready',action='store_true')
@@ -125,6 +136,7 @@ def main():
     try:
         if args.config:
             config = json.loads(args.config.read_text())
+            if args.rpc_mode:validate_rpc_mode(config,args.rpc_mode)
             validate_config(config)
             report['configuration']='reviewed fields present; runtime admission not proven'
             report['backends']=[{k:e.get(k,'python') for k in ('backend','event_backend')}

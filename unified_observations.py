@@ -279,13 +279,15 @@ class ObservationStore:
         return result
 
     def retrieve(
-        self, features, asof, exclude_group, k=8,
-        allow_ids=None, feature_schema_id=None
+        self, features, asof, exclude_group, k=32,
+        allow_ids=None, feature_schema_id=None, risk_config=None, exclude_mint=None, lifecycle_regime=None
     ):
         from shadow_ml_models import vector
+        from capital_policy import CapitalConfig
+        risk_config=risk_config or CapitalConfig()
         vector(features)
         if (
-            type(k) is not int or not 1 <= k <= 8
+            type(k) is not int or not 1 <= k <= 64
             or not number(asof) or asof < 0
         ):
             raise ValueError("Invalid retrieval arguments")
@@ -327,8 +329,11 @@ class ObservationStore:
                 continue
             if (
                 not eligible(row)
+                or exclude_mint is not None and row['mint']==exclude_mint
                 or row.get("net_pnl_usd") is None
                 or row.get("net_of_costs_verified") is not True
+                or asof-row['feature_at']>risk_config.max_age_seconds
+                or lifecycle_regime is not None and (lifecycle_regime=='unknown' or (row.get('lifecycle') or {}).get('regime')!=lifecycle_regime)
             ):
                 continue
             values = tensor(row)
@@ -343,23 +348,39 @@ class ObservationStore:
                 "group_id": row["group_id"],
                 "distance": distance,
                 "net_pnl_usd": row["net_pnl_usd"],
+                'cost_usd':row.get('cost_usd'),
                 "source": row["source"],
                 "provenance": row["provenance"],
+                "exit_at": row['label_known_at'],
             })
 
-        selected, seen_groups = [], set()
+        selected, seen_groups, seen_positions, seen_ids = [], set(), set(), set()
         for row in sorted(
             neighbors, key=lambda x: (x["distance"], x["identity"])
         ):
-            if row["group_id"] in seen_groups:
+            if row["group_id"] in seen_groups or row['position_id'] in seen_positions or row['identity'] in seen_ids:
                 continue
             seen_groups.add(row["group_id"])
+            seen_positions.add(row['position_id']);seen_ids.add(row['identity'])
             selected.append(row)
             if len(selected) >= k:
                 break
 
+        from capital_policy import evidence_stats
+        stats=evidence_stats([dict(id=r['source']+':'+r['identity'],group_id=r['group_id'],eligible=True,
+            exit_at=r['exit_at'],net_return=r['net_pnl_usd']) for r in selected],config=risk_config,now=asof)
+        normalized=evidence_stats([dict(id=r['source']+':'+r['identity'],group_id=r['group_id'],eligible=True,
+            exit_at=r['exit_at'],net_return=r['net_pnl_usd']/r['cost_usd']) for r in selected
+            if number(r.get('cost_usd')) and r['cost_usd']>0],config=risk_config,now=asof)
         return {
             "neighbors": selected,
+            'net_expectancy_usd':stats['expectancy'],
+            'expectancy_lower_usd':stats.get('expectancy_lower'),
+            'mean_win_usd':stats.get('mean_win'),'mean_loss_usd':stats.get('mean_loss'),
+            'downside_rms_usd':stats.get('downside_rms'),'win_probability_lower':stats.get('win_probability_lower'),
+            'normalized_expectancy':normalized['expectancy'],
+            'normalized_expectancy_lower':normalized.get('expectancy_lower'),
+            'edge_supported':stats.get('expectancy_lower',0)>0 and normalized.get('expectancy_lower',0)>0,
             "score": (
                 sum(r["net_pnl_usd"] > 0 for r in selected) / len(selected)
                 if selected else None
@@ -415,9 +436,9 @@ def import_bot_ledger(
             else str(row.get("entry_signature", row["exit_signature"]))
         )
         record = {
-            "identity": row["exit_signature"],
+            "identity": 'ledger-v2:'+row["exit_signature"],
             "position_id": position,
-            "group_id": position,
+            "group_id": context.get('correlation_group_id',row['mint']) if context.get('correlation_group_verified') is True else row['mint'],
             "source": source,
             "mint": row["mint"],
             "feature_at": row["entry_at"],
@@ -426,15 +447,18 @@ def import_bot_ledger(
             "features": list(model_features(context).values()),
             "feature_schema": feature_schema(),
             "net_pnl_usd": row["net_pnl_usd"],
+            'cost_usd':row.get('cost_usd'),
             "fees_usd": row.get("fees_usd"),
             "net_of_costs_verified": (
                 provenance.get("net_outcomes_verified") is True
             ),
             "label_kind": row.get("label_kind", source),
             "rights": rights,
-            "provenance": provenance,
+            "provenance": dict(provenance,ledger_import_version=2,outcome_identity=row['exit_signature']),
             "training_eligible": True,
             "original_context": context,
+            'risk_features':context.get('risk_features'),'risk_schema':context.get('risk_schema'),
+            'lifecycle':context.get('lifecycle'),
         }
         store.add(record)
         count += 1
@@ -520,6 +544,8 @@ def add_market_context(
         "provenance": provenance,
         "training_eligible": True,
         "original_context": context,
+        'risk_features':context.get('risk_features'),'risk_schema':context.get('risk_schema'),
+        'lifecycle':context.get('lifecycle'),
     })
 
 
@@ -537,7 +563,7 @@ def import_position_quotes(store, paths, rights, provenance):
         target = completed.get(position)
         if target is None:
             continue
-        for at, context, _ in quotes:
+        for index,(at, context, net) in enumerate(quotes):
             if count >= 1024:
                 return {"imported": count, "status": "batch_limit"}
             if at >= target["label_known_at"]:
@@ -545,8 +571,9 @@ def import_position_quotes(store, paths, rights, provenance):
             verified_timestamp = (
                 provenance.get("quote_timestamp_verified") is True
             )
+            future=next((q for q in quotes[index+1:] if 60<=q[0]-at<=180 and q[0]<=target['label_known_at']),None)
             store.add({
-                "identity": "quote:" + digest([path, position, at]),
+                "identity": "quote-v2:" + digest([path, position, at]),
                 "position_id": position,
                 "group_id": target["group_id"],
                 "source": target["source"],
@@ -557,15 +584,21 @@ def import_position_quotes(store, paths, rights, provenance):
                 "features": list(model_features(context).values()),
                 "feature_schema": feature_schema(),
                 "net_pnl_usd": target["net_pnl_usd"],
+                'cost_usd':target.get('cost_usd'),
                 "net_of_costs_verified": (
                     target.get("net_of_costs_verified") is True
                 ),
                 "fees_usd": target.get("fees_usd"),
                 "rights": rights,
-                "provenance": dict(provenance,ledger_path=str(Path(path).resolve()),outcome_identity=target['identity']),
+                "provenance": dict(provenance,ledger_import_version=2,ledger_path=str(Path(path).resolve()),outcome_identity=target.get('provenance',{}).get('outcome_identity',target['identity'])),
                 "training_eligible": True,
                 "original_context": context,
+                'risk_features':context.get('risk_features'),'risk_schema':context.get('risk_schema'),
+                'lifecycle':context.get('lifecycle'),
                 "label_kind": "completed_position_net",
+                'continuation_label':int(future[2]>net) if future and verified_timestamp else None,
+                'continuation_known_at':future[0] if future and verified_timestamp else None,
+                'model_position_id':(target.get('original_context') or {}).get('model_position_id'),
             })
             count += 1
     return {"imported": count, "status": "complete"}

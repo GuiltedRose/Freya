@@ -33,8 +33,12 @@ class ModelDecisionTests(unittest.TestCase):
         with patch('learning_pipeline.load_candidate',side_effect=self.candidate), patch('learning_pipeline.forecast',return_value={'score':.2}):
             self.assertFalse(self.models.entry(self.snapshot,policy())['allow'])
         self.snapshot['observed_at']+=1
-        with patch('learning_pipeline.load_candidate',side_effect=self.candidate), patch('learning_pipeline.forecast',return_value={'score':.9}):
+        with patch('learning_pipeline.load_candidate',side_effect=self.candidate), patch('learning_pipeline.forecast',side_effect=lambda store,identifier,*args: {'score':.1 if identifier=='svm' else .9,'retrieval':{'edge_supported':True}}):
             self.assertTrue(self.models.entry(self.snapshot,policy())['allow'])
+
+    def test_high_scam_probability_vetoes_even_when_other_models_support_entry(self):
+        with patch('learning_pipeline.load_candidate',side_effect=self.candidate), patch('learning_pipeline.forecast',return_value={'score':.9,'retrieval':{'edge_supported':True}}):
+            self.assertFalse(self.models.entry(self.snapshot,policy())['allow'])
 
     def test_high_scores_do_not_bypass_live_qualification(self):
         with patch('learning_pipeline.load_candidate',side_effect=self.candidate), patch('learning_pipeline.forecast',return_value={'score':.9}), patch('unified_learning.evaluate_candidate',return_value={'status':'collecting','live_eligible':False}) as qualification:

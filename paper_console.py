@@ -14,7 +14,7 @@ def format_report(report,events=()):
         short=mint if len(mint)<=14 else mint[:6]+'…'+mint[-4:]
         if action=='paper_buy':
             lines.append(f"BUY {short} | ${event.get('budget_usd',0):.2f}")
-        elif action=='paper_sell':
+        elif action in ('paper_sell','paper_partial_sell'):
             lines.append(f"SELL {short} | net ${event['pnl_usd']:+.2f} | {event.get('reason','exit')}")
         elif action=='paper_balance_reset':
             if 'reset_bankroll_usd' in event:

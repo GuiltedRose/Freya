@@ -15,6 +15,10 @@ or an explicitly selected local index.
 Momentum reclaim is the single production strategy. New-launch sniping has been
 removed. See [production acceptance](docs/production_acceptance.md) for active model
 decisions, the aggregate test command and manually authorized live service wiring.
+See [retrieval and Kelly](docs/retrieval_kelly.md) for net-expectancy validation,
+hard allocation ceilings and independently earned concurrency tiers.
+The [self-hosted RPC module](docs/selfhost_rpc.md) places a non-voting node inside
+the existing capped network environment; it remains unbuilt and manually activated.
 
 ## What it does
 
@@ -282,3 +286,8 @@ commands are documented there. No performance measurements are available yet.
 The [experimental Rust RPC transport](docs/rust_rpc_engine.md) is explicitly
 selectable; Python remains the default. Native event decoding/storage is unfinished,
 and all new transport/packaging code requires monolith validation.
+
+## Paper challenger operation
+
+Independent management experiments, bounded replay, evidence requirements and
+operator-only validation/rollback commands: [challenger operations](docs/challenger_operations.md).

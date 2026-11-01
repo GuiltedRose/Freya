@@ -1,0 +1,17 @@
+{
+  "rules_file": "bundled",
+  "initial": {"balance": 10, "native_sol": 0.1, "sol_price_usd": 100},
+  "capital": {},
+  "start_at": 1793491200,
+  "training_cutoff": 1793491199,
+  "scenarios": [
+    {"id": "target-v1", "family": "target", "challengers": {"adaptive_target": true}},
+    {"id": "partials-v1", "family": "partials", "challengers": {"partial_profits": true}},
+    {"id": "trailing-v1", "family": "trailing", "challengers": {"trailing_exit": true}},
+    {"id": "holding-v1", "family": "holding", "challengers": {"adaptive_holding": true}},
+    {"id": "scaling-v1", "family": "scaling", "challengers": {"scaling": true}},
+    {"id": "reentry-v1", "family": "reentry", "challengers": {"reentry": true}},
+    {"id": "allocation-v1", "family": "allocation", "challengers": {"portfolio_allocation": true}}
+  ],
+  "grids": []
+}
