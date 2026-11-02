@@ -15,7 +15,7 @@ let
     cp ${../solana_network_budget.py} $out/solana_network_budget.py
   '';
   controller = "${pkgs.python3}/bin/python ${support}/solana_network_lifecycle.py";
-  path = [ pkgs.iproute2 pkgs.nftables pkgs.procps pkgs.coreutils ];
+  path = [ pkgs.iproute2 pkgs.ethtool pkgs.nftables pkgs.procps pkgs.coreutils ];
 in {
   options.services.solana-budget-isolation = {
     enable = lib.mkEnableOption "bounded, isolated Solana network sessions";

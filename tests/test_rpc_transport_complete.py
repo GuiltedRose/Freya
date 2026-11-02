@@ -60,3 +60,40 @@ class CompleteTransportTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):native.call('getSlot',[])
                 self.assertEqual(await native.call_async('getSlot',[]),7)
             asyncio.run(loop())
+
+    def test_native_body_failure_keeps_status_and_safe_diagnostics(self):
+        with LocalRpcServer() as server,patch('solana_rpc_compat.check_boundary',return_value=os.stat('/proc/self/ns/net').st_ino),self.setup_rpc(server.url) as native:
+            server.script=[{'declared_length':1000,'body':'partial'}]
+            with self.assertRaises(ConnectionError) as caught:native.call('getBlock',[])
+            error=caught.exception
+            self.assertEqual(error.phase,'response_body')
+            self.assertEqual(error.http_status,200)
+            self.assertEqual(error.rpc_method,'getBlock')
+            self.assertEqual(error.bytes_received,7)
+            self.assertGreater(error.elapsed_ms,0)
+            self.assertNotIn(server.url,str(error))
+            self.assertIsNone(error.pooled_connection_reused)
+
+    def test_native_disconnect_before_headers_is_distinct(self):
+        with LocalRpcServer() as server,patch('solana_rpc_compat.check_boundary',return_value=os.stat('/proc/self/ns/net').st_ino),self.setup_rpc(server.url) as native:
+            server.script=[{'disconnect':True}]
+            with self.assertRaises(ConnectionError) as caught:native.call('getSlot',[])
+            self.assertEqual(caught.exception.phase,'request_send')
+            self.assertIsNone(caught.exception.http_status)
+            self.assertEqual(caught.exception.bytes_received,0)
+
+    def test_native_cancelled_body_is_not_reported_as_socket_loss(self):
+        async def scenario(server):
+            native=NativeHttp(server.url,os.stat('/proc/self/ns/net').st_ino,True)
+            server.script=[{'declared_length':1000,'body':'partial'}]
+            pending=native.request('getSlot','[]')
+            for _ in range(100):
+                if server.requests:break
+                await asyncio.sleep(.005)
+            await asyncio.sleep(.05)
+            native.close()
+            with self.assertRaises(ConnectionError) as caught:await pending
+            self.assertTrue(caught.exception.cancelled)
+            self.assertTrue(caught.exception.client_closed)
+            self.assertEqual(caught.exception.phase,'cancellation')
+        with LocalRpcServer() as server:asyncio.run(scenario(server))

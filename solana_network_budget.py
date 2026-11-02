@@ -124,12 +124,13 @@ class Budget:
                 'isp_wire_budget_guaranteed':False, 'automatic_grants':False}
 
 
-def firewall(grant, upload_kbps=16, download_kbps=16, now=None):
+def firewall(grant, upload_kbps=16, download_kbps=16, now=None, upload_policed_on_host=False):
     """Render ONLY; install inside a dedicated, otherwise unrouted net namespace.
 
     The same named quota charges BOTH directions, all protocols/retransmissions.
     Counters precede quota/drop: inbound over-quota packets still cost WAN bytes.
-    Limits are policing (drop), not smooth shaping. Host/router tc must shape.
+    Rate policing is a backstop to tc shaping; its explicit burst covers the
+    shaper envelope rather than dropping ordinary paced TCP packets.
     """
     import time
     now=time.time() if now is None else now
@@ -142,6 +143,10 @@ def firewall(grant, upload_kbps=16, download_kbps=16, now=None):
         raise ValueError('Invalid OS quota')
     for value in (upload_kbps,download_kbps):
         if type(value) is not int or not 1 <= value <= 1024: raise ValueError('Invalid bandwidth limit')
+    if type(upload_policed_on_host) is not bool:raise ValueError('Invalid policing placement')
+    upload_rule=('# Upload rate backstop is installed on host forward, AFTER namespace tc.'
+                 if upload_policed_on_host else
+                 f'limit rate over {upload_kbps} kbytes/second burst 16 kbytes counter name upload_rate_drop drop')
     # Single grant, fresh table. Never reinstall/reuse a grant after reset/reboot.
     return f'''# grant {identifier}; installer must enforce cycle expiry {grant['cycle_end']}
 # UNTESTED. No routes or namespace are created by this renderer.
@@ -150,11 +155,13 @@ table inet solana_budget {{
  set active {{ type mark; flags timeout; elements = {{ 0x534f timeout {lease_seconds}s }}; }}
  counter download {{ comment "grant:{identifier}"; }}
  counter upload {{ comment "grant:{identifier}"; }}
+ counter download_rate_drop {{ comment "grant:{identifier}"; }}
+ counter upload_rate_drop {{ comment "grant:{identifier}"; }}
  chain input {{
   type filter hook input priority -150; policy drop;
   iifname "lo" accept
   counter name download
-  limit rate over {download_kbps} kbytes/second drop
+  limit rate over {download_kbps} kbytes/second burst 16 kbytes counter name download_rate_drop drop
   meta mark set 0x534f
   meta mark @active quota name shared accept
  }}
@@ -162,7 +169,7 @@ table inet solana_budget {{
   type filter hook output priority -150; policy drop;
   oifname "lo" accept
   counter name upload
-  limit rate over {upload_kbps} kbytes/second drop
+  {upload_rule}
   meta nfproto ipv4 ip dscp set cs1
   meta nfproto ipv6 ip6 dscp set cs1
   meta mark set 0x534f
@@ -180,8 +187,8 @@ def shaping_commands(namespace='solana-budget', root_veth='solana-host', upload_
             raise ValueError('Invalid interface/namespace')
     for value in (upload_kbytes,download_kbytes):
         if type(value) is not int or not 1<=value<=1024: raise ValueError('Invalid shaper rate')
-    return [f'ip netns exec {namespace} tc qdisc replace dev eth0 root tbf rate {upload_kbytes*8}kbit burst 16kb latency 100ms',
-            f'tc qdisc replace dev {root_veth} root tbf rate {download_kbytes*8}kbit burst 16kb latency 100ms']
+    return [f'ip netns exec {namespace} tc qdisc replace dev eth0 root tbf rate {upload_kbytes*8}kbit burst 1500b latency 100ms',
+            f'tc qdisc replace dev {root_veth} root tbf rate {download_kbytes*8}kbit burst 1500b latency 100ms']
 
 
 def sample_os(budget, identifier, namespace, now):

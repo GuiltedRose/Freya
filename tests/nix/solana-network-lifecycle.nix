@@ -83,6 +83,10 @@ pkgs.testers.runNixOSTest {
     machine.succeed("${pkgs.python3}/bin/python ${../../solana_network_budget.py} --ledger /var/lib/solana-network/budget.sqlite initialize --start 2026-10-01T00:00:00Z --end 2026-11-01T00:00:00Z")
     begin()
     # READY means quota, routes and both shapers are already present.
+    machine.succeed("${pkgs.ethtool}/bin/ethtool -k solana-host | grep 'generic-segmentation-offload: off'")
+    machine.succeed("ip netns exec solana-budget ${pkgs.ethtool}/bin/ethtool -k eth0 | grep 'generic-segmentation-offload: off'")
+    machine.succeed("ip netns exec solana-budget nft list counter inet solana_budget download_rate_drop")
+    machine.succeed("nft list counter inet solana_boundary upload_rate_drop")
     machine.succeed("ip netns exec solana-budget nft list quota inet solana_budget shared")
     machine.succeed("tc qdisc show dev solana-host | grep tbf")
     machine.succeed("ip netns exec solana-budget tc qdisc show dev eth0 | grep tbf")

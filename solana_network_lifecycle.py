@@ -29,9 +29,10 @@ def ns(*args, **kwargs):
     return run('ip','netns','exec',NS,*args,**kwargs)
 
 
-def host_rules(uplink,peer_ports=None):
+def host_rules(uplink,peer_ports=None,upload_kbytes=16):
     if not uplink or len(uplink)>15 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-' for c in uplink):
         raise ValueError('Invalid uplink interface')
+    if type(upload_kbytes) is not int or not 1<=upload_kbytes<=1024:raise ValueError('Invalid upload cap')
     dnat=''
     if peer_ports is not None:
         start,end=peer_ports['start'],peer_ports['end']
@@ -43,6 +44,7 @@ def host_rules(uplink,peer_ports=None):
  iifname "{uplink}" udp dport {start}-{end} dnat to {ADDRESS}
  }}'''
     return f'''table inet solana_boundary {{
+ counter upload_rate_drop {{ }}
  chain input {{ type filter hook input priority -200; policy accept; iifname "{VETH}" drop; }}
  chain output {{ type filter hook output priority -200; policy accept; oifname "{VETH}" drop; }}
  chain forward {{
@@ -52,6 +54,7 @@ def host_rules(uplink,peer_ports=None):
   iifname "{VETH}" ip saddr != {ADDRESS} drop
   iifname "{VETH}" meta nfproto ipv6 drop
   oifname "{VETH}" meta nfproto ipv6 drop
+  iifname "{VETH}" oifname "{uplink}" limit rate over {upload_kbytes} kbytes/second burst 16 kbytes counter name upload_rate_drop drop
  }}
 }}
 table ip solana_nat {{
@@ -94,7 +97,7 @@ def start(config):
     report=budget.report(time.time())
     if report['optional_collection_suspended'] and not config.get('reserveSession',False):
         raise ValueError('Normal budget reached; optional collection suspended')
-    host=host_rules(config['uplink'],config.get('peerPorts'))
+    host=host_rules(config['uplink'],config.get('peerPorts'),config['uploadKbytes'])
     # Refuse unknown existing namespace ownership; cleanup is an explicit stop action.
     if Path('/run/netns/'+NS).exists():
         raise ValueError('Existing namespace requires stopped-service cleanup before restart')
@@ -120,9 +123,14 @@ def start(config):
         run('ip','link','add',VETH,'type','veth','peer','name','solana-peer')
         run('ip','link','set','solana-peer','netns',NS)
         ns('ip','link','set','solana-peer','name','eth0')
+        # Dedicated veth only: prevent GSO/GRO super-packets bypassing tc pacing.
+        run('ip','link','set',VETH,'mtu','1500')
+        ns('ip','link','set','eth0','mtu','1500')
+        run('ethtool','-K',VETH,'tso','off','gso','off','gro','off')
+        ns('ethtool','-K','eth0','tso','off','gso','off','gro','off')
         ns('sysctl','-w','net.ipv6.conf.all.disable_ipv6=1')
         ns('sysctl','-w','net.ipv6.conf.default.disable_ipv6=1')
-        ns('nft','-f','-',input=firewall(grant,config['uploadKbytes'],config['downloadKbytes']))
+        ns('nft','-f','-',input=firewall(grant,config['uploadKbytes'],config['downloadKbytes'],upload_policed_on_host=True))
         # Atomic replacement of our tables only; deletion requires known existence.
         prefix=''
         for family,table in [('inet','solana_boundary'),('ip','solana_nat')]:

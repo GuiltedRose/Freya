@@ -100,11 +100,22 @@ class RustIndexRpc(IndexRpc):
         if len(text.encode())>65536: raise SourceAccessBlocked('RPC request exceeds bound')
         return text
 
-    def _transport_error(self,error):
-        if self._closed: raise RuntimeError('RPC client closed during request') from None
+    def _transport_error(self,error,method=None):
+        if self._closed:
+            from rpc_diagnostics import details
+            closed=RuntimeError('RPC client closed during request')
+            for name,value in details(error).items():setattr(closed,name,value)
+            closed.rpc_method=method;closed.client_closed=True;closed.cancelled=True
+            closed.http_status=getattr(error,'http_status',None);closed.category='cancelled'
+            raise closed from None
         if isinstance(error,ConnectionError):
-            self.budget.failure(self.url,503)
-            raise error
+            error.rpc_method=method
+            if getattr(error,'cancelled',False) or self._closed:
+                error.client_closed=self._closed or getattr(error,'client_closed',False)
+                raise error from None
+            self.budget.failure(self.url,503)  # Internal backoff, not an HTTP response.
+            error.backoff_origin='local_transport'
+            raise error from None
         raise SourceAccessBlocked('Malformed native transport evidence; no backend retry') from None
 
     async def call_async(self,method,params):
@@ -115,7 +126,7 @@ class RustIndexRpc(IndexRpc):
         self.requests+=1
         encoded=getattr(type(transport),'request_encoded',None) is not None
         try: response=await (transport.request_encoded(method,text) if encoded else transport.request(method,text))
-        except (ConnectionError,ValueError) as error: self._transport_error(error)
+        except (ConnectionError,ValueError) as error: self._transport_error(error,method)
         return (self._finish_encoded if encoded else self._finish)(*response,method=method)
 
     def call(self,method,params):
@@ -130,7 +141,7 @@ class RustIndexRpc(IndexRpc):
         self.requests+=1
         encoded=getattr(type(transport),'request_encoded_sync',None) is not None
         try: response=transport.request_encoded_sync(method,text) if encoded else transport.request_sync(method,text)
-        except (ConnectionError,ValueError) as error: self._transport_error(error)
+        except (ConnectionError,ValueError) as error: self._transport_error(error,method)
         return (self._finish_encoded if encoded else self._finish)(*response,method=method)
 
     def close(self):
@@ -152,7 +163,7 @@ class RustIndexRpc(IndexRpc):
         self._reserve('getBlock')
         self.requests+=1
         try:response=transport.request_blocks_encoded_sync(params)
-        except (ConnectionError,ValueError) as error:self._transport_error(error)
+        except (ConnectionError,ValueError) as error:self._transport_error(error,'getBlock')
         return self._finish_encoded(*response,method='getBlock',batch_count=len(slots))
 
     async def aclose(self): self.close()
@@ -160,9 +171,12 @@ class RustIndexRpc(IndexRpc):
     def __exit__(self,*_): self.close()
 
     def _finish(self,status,retry,text,method=None):
+        self.last_http_status=status
         if status!=200:
             self.budget.failure(self.url,status,{'Retry-After':retry} if retry else {})
             failure=http_error(status,self.source,method)
+            failure.phase='response_headers';failure.bytes_received=0;failure.timeout=False
+            failure.backoff_origin='provider_http'
             if getattr(type(self.budget),'cooldown_remaining',None) is not None:
                 failure.retry_after_seconds=self.budget.cooldown_remaining(self.url)
             raise failure
@@ -171,6 +185,7 @@ class RustIndexRpc(IndexRpc):
         return rpc_result(text,method,self.source,self.budget,self.url)
 
     def _finish_encoded(self,status,retry,encoding,text,method=None,batch_count=None):
+        self.last_http_status=status
         if status!=200:return self._finish(status,retry,'',method=method)
         # Native identity replies are already UTF-8-validated strings. Keep the
         # original text for JSON validation instead of encoding/decoding it twice.

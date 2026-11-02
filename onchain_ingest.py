@@ -5,6 +5,8 @@ import json
 import math
 import time
 import zlib
+from http.client import IncompleteRead
+from rpc_diagnostics import details
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener
@@ -113,21 +115,37 @@ class IndexRpc:
         self.requests += 1
         request = Request(self.url, data=json.dumps(payload,allow_nan=False).encode(),
                           headers={'Content-Type': 'application/json', 'Accept-Encoding': 'gzip', 'User-Agent': 'SolanaOnchainIndex/1'})
+        started=time.monotonic();status=None;received=0;phase='request_send'
         try:
             if self._opener is None:self._opener=build_opener(NoRedirect)
             with self._opener.open(request, timeout=30) as response:
-                raw = response.read(64_000_001)
+                status=getattr(response,'status',None)
+                if type(status) is not int:status=None
+                self.last_http_status=status
+                phase='response_body'
+                raw=response.read(64_000_001);received=len(raw)
+                length=response.headers.get('Content-Length')
+                if isinstance(length,str) and length.isdecimal() and received<int(length) and received<=64_000_000:
+                    received=0
+                    raise IncompleteRead(raw,int(length)-len(raw))
                 encoding = response.headers.get('Content-Encoding', 'identity').lower()
         except HTTPError as error:
             self.budget.failure(self.url, error.code, error.headers)
             # Do not expose endpoint paths, which may contain credentials.
             failure=http_error(error.code,self.source,method)
+            failure.phase='response_headers';failure.elapsed_ms=(time.monotonic()-started)*1000
+            failure.bytes_received=0;failure.timeout=False;failure.backoff_origin='provider_http'
             if getattr(type(self.budget),'cooldown_remaining',None) is not None:
                 failure.retry_after_seconds=self.budget.cooldown_remaining(self.url)
             raise failure from None
-        except (URLError, TimeoutError, OSError):
-            self.budget.failure(self.url, 503)
-            raise ConnectionError('RPC transport unavailable') from None
+        except (URLError, TimeoutError, OSError, IncompleteRead) as cause:
+            from rpc_diagnostics import transport_error
+            partial=getattr(cause,'partial',b'')
+            received+=len(partial) if isinstance(partial,bytes) else 0
+            self.budget.failure(self.url,503)
+            failure=transport_error(cause,started,phase,status,received)
+            failure.rpc_method=method;failure.backoff_origin='local_transport'
+            raise failure from None
         self.wire_bytes += len(raw)
         decoded = decode_rpc_body(raw, encoding)
         self.decoded_bytes += len(decoded)
@@ -343,6 +361,7 @@ def follow(ingester, start=None, count=8, interval=5, max_failures=6, max_catchu
             yield {'status': 'paused', 'reason': str(error), 'error_type': type(error).__name__,
                    'rpc_code':getattr(error,'rpc_code',None),'rpc_method':getattr(error,'rpc_method',None),
                    'http_status':getattr(error,'http_status',None),'category':getattr(error,'category',None),
+                   **details(error),
                    'retry_seconds':delay,
                    'checkpoint': ingester.store.next_slot()}
             if failures >= max_failures:

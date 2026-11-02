@@ -99,6 +99,8 @@
                 --add-flags "$out/share/freya/solana_observer.py"
               makeWrapper ${python}/bin/python $out/bin/freya-audit-ingestion \
                 --add-flags "$out/share/freya/audit_ingestion.py"
+              makeWrapper ${python}/bin/python $out/bin/freya-rpc-diagnostics \
+                --add-flags "$out/share/freya/diagnose_mainnet_rpc.py"
               makeWrapper ${python}/bin/python $out/bin/freya-health \
                 --add-flags "$out/share/freya/runtime_health.py"
               makeWrapper ${python}/bin/python $out/bin/freya-challengers \
@@ -151,6 +153,7 @@
         indexer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-indexer"; };
         observer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-observer"; };
         audit-ingestion = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-audit-ingestion"; };
+        rpc-diagnostics = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-rpc-diagnostics"; };
         tmux = { type = "app"; program = "${environments.${system}.pkgs.tmux}/bin/tmux"; };
         paper = {
           type = "app";

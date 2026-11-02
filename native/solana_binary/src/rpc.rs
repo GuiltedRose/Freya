@@ -2,7 +2,7 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyConnectionError, PyRuntimeError, PyValueError};
 use futures_util::{SinkExt, StreamExt};
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::{Duration, Instant}};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
@@ -10,6 +10,39 @@ use base64::Engine;
 
 fn bad(message: &str) -> PyErr { PyValueError::new_err(message.to_string()) }
 fn offline() -> PyErr { PyConnectionError::new_err("native transport unavailable; endpoint omitted") }
+
+// Only fixed categories and numeric codes cross this boundary: never error text/URLs.
+fn diagnostic(phase:&str, started:Instant, status:Option<u16>, received:usize,
+              cause:Option<&reqwest::Error>, cancelled:bool, closed:bool)->PyErr {
+    let timeout=cause.is_some_and(|e|e.is_timeout());
+    let connect=cause.is_some_and(|e|e.is_connect());
+    let mut code=None;
+    if let Some(error)=cause {
+        let mut source=std::error::Error::source(error);
+        for _ in 0..16 {
+            let Some(error)=source else {break};
+            if let Some(io)=error.downcast_ref::<std::io::Error>() {code=io.raw_os_error(); if code.is_some(){break;}}
+            source=error.source();
+        }
+    }
+    Python::with_gil(|py| {
+        let error=PyConnectionError::new_err("native RPC transport failure; endpoint omitted");
+        let value=error.value(py);
+        let _=value.setattr("phase",if connect && phase=="request_send" {"connect"} else {phase});
+        let _=value.setattr("category",if cancelled {"cancelled"} else if timeout && connect {"connect_timeout"}
+            else if timeout {"request_timeout"} else if connect {"connect"} else {"transport"});
+        let _=value.setattr("http_status",status);
+        let _=value.setattr("elapsed_ms",started.elapsed().as_secs_f64()*1000.0);
+        let _=value.setattr("bytes_received",received);
+        let _=value.setattr("timeout",timeout);
+        let _=value.setattr("connect_error",connect);
+        let _=value.setattr("socket_errno",code);
+        let _=value.setattr("cancelled",cancelled);
+        let _=value.setattr("client_closed",closed);
+        let _=value.setattr("pooled_connection_reused",py.None()); // Not observable in reqwest API.
+        error
+    })
+}
 
 fn boundary(inode: u64) -> PyResult<()> {
     #[cfg(target_os = "linux")]
@@ -76,19 +109,26 @@ impl NativeHttp {
     }
     fn operation_body(&self,body:String,compressed:bool)->PyResult<impl std::future::Future<Output=PyResult<EncodedReply>>+Send+'static> {
         boundary(self.inode)?;
-        let client=self.client.lock().map_err(|_|offline())?.as_ref().ok_or_else(offline)?.clone();
+        let started=Instant::now();
+        let client=self.client.lock().map_err(|_|diagnostic("client_state",started,None,0,None,false,false))?
+            .as_ref().ok_or_else(||diagnostic("client_state",started,None,0,None,false,true))?.clone();
         let endpoint=self.endpoint.clone(); let mut stop=self.stop.subscribe();
-        if *stop.borrow() {return Err(offline());}
+        if *stop.borrow() {return Err(diagnostic("cancellation",started,None,0,None,true,true));}
         let permit=self.busy.clone().try_acquire_owned().map_err(|_|PyRuntimeError::new_err("HTTP backpressure: one request already active"))?;
         Ok(async move {
             let _permit=permit;
+            let status_seen=std::sync::atomic::AtomicU16::new(0);
+            let received=std::sync::atomic::AtomicUsize::new(0);
             tokio::select! {
                 biased;
-                _=stop.changed()=>Err(offline()),
+                _=stop.changed()=>Err(diagnostic("cancellation",started,
+                    match status_seen.load(std::sync::atomic::Ordering::Relaxed) {0=>None,n=>Some(n)},
+                    received.load(std::sync::atomic::Ordering::Relaxed),None,true,true)),
                 result=async {
                     let mut response=client.post(endpoint).header("Content-Type","application/json")
-                        .header("Accept-Encoding",if compressed {"gzip"} else {"identity"}).body(body).send().await.map_err(|_|offline())?;
+                        .header("Accept-Encoding",if compressed {"gzip"} else {"identity"}).body(body).send().await.map_err(|e|diagnostic("request_send",started,None,0,Some(&e),false,false))?;
                     let status=response.status().as_u16();
+                    status_seen.store(status,std::sync::atomic::Ordering::Relaxed);
                     let retry=response.headers().get("retry-after").and_then(|v|v.to_str().ok()).unwrap_or("").chars().take(256).collect::<String>();
                     if status!=200 {return Ok((status,retry,"identity".to_string(),String::new()));}
                     if response.content_length().is_some_and(|n|n>64_000_000) {return Err(bad("oversized response"));}
@@ -98,9 +138,10 @@ impl NativeHttp {
                     // Normal block responses avoid repeatedly growing from zero.
                     let capacity=response.content_length().unwrap_or(0).min(1_048_576) as usize;
                     let mut bytes=Vec::with_capacity(capacity);
-                    while let Some(chunk)=response.chunk().await.map_err(|_|offline())? {
+                    while let Some(chunk)=response.chunk().await.map_err(|e|diagnostic("response_body",started,Some(status),bytes.len(),Some(&e),false,false))? {
                         if bytes.len()+chunk.len()>64_000_000 {return Err(bad("oversized response"));}
                         bytes.extend_from_slice(&chunk);
+                        received.store(bytes.len(),std::sync::atomic::Ordering::Relaxed);
                     }
                     let text=if encoding=="gzip" {base64::engine::general_purpose::STANDARD.encode(bytes)}
                         else {String::from_utf8(bytes).map_err(|_|bad("invalid response UTF8"))?};
@@ -125,7 +166,8 @@ impl NativeHttp {
             .pool_max_idle_per_host(1).pool_idle_timeout(Duration::from_secs(30)).no_proxy();
         // Benchmark-only opt-in. None preserves the existing production default.
         if let Some(enabled)=tcp_nodelay {builder=builder.tcp_nodelay(enabled);}
-        let client=builder.build().map_err(|_|offline())?;
+        let started=Instant::now();
+        let client=builder.build().map_err(|e|diagnostic("client_state",started,None,0,Some(&e),false,false))?;
         let (stop,_)=tokio::sync::watch::channel(false);
         Ok(Self {client:std::sync::Mutex::new(Some(client)),endpoint,inode:namespace_inode,busy:Arc::new(Semaphore::new(1)),stop})
     }
@@ -321,6 +363,48 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn request_timeout_diagnostics_are_redacted() {
+        // Local listener intentionally never sends headers; no external connection.
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint=format!("http://{}/SECRET-key",listener.local_addr().unwrap());
+        let runtime=tokio::runtime::Runtime::new().unwrap();
+        let cause=runtime.block_on(async {
+            reqwest::Client::builder().no_proxy().timeout(Duration::from_millis(200))
+                .connect_timeout(Duration::from_millis(100)).build().unwrap()
+                .get(endpoint).send().await.unwrap_err()
+        });
+        assert!(cause.is_timeout());
+        assert!(!cause.is_connect());
+        pyo3::prepare_freethreaded_python();
+        let error=diagnostic("request_send",Instant::now(),None,0,Some(&cause),false,false);
+        Python::with_gil(|py| {
+            assert!(!error.to_string().contains("SECRET"));
+            assert_eq!(error.value(py).getattr("category").unwrap().extract::<String>().unwrap(),"request_timeout");
+            assert!(error.value(py).getattr("timeout").unwrap().extract::<bool>().unwrap());
+            assert!(error.value(py).getattr("http_status").unwrap().is_none());
+        });
+    }
+
+    #[test] fn tls_connect_timeout_is_distinct_from_request_timeout() {
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint=format!("https://{}/SECRET-key",listener.local_addr().unwrap());
+        let runtime=tokio::runtime::Runtime::new().unwrap();
+        // TCP establishes locally, but no TLS handshake response ever arrives.
+        let cause=runtime.block_on(async {
+            reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(1))
+                .connect_timeout(Duration::from_millis(100)).build().unwrap()
+                .get(endpoint).send().await.unwrap_err()
+        });
+        assert!(cause.is_timeout());assert!(cause.is_connect());
+        pyo3::prepare_freethreaded_python();
+        let error=diagnostic("request_send",Instant::now(),None,0,Some(&cause),false,false);
+        Python::with_gil(|py| {
+            assert_eq!(error.value(py).getattr("category").unwrap().extract::<String>().unwrap(),"connect_timeout");
+            assert_eq!(error.value(py).getattr("phase").unwrap().extract::<String>().unwrap(),"connect");
+            assert!(!error.to_string().contains("SECRET"));
+        });
+    }
+
     #[test] fn bounded_block_batch_is_read_only() {
         let body=block_batch("[[10,{}],[11,{}]]").unwrap();
         let calls:serde_json::Value=serde_json::from_str(&body).unwrap();

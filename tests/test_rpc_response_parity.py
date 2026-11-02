@@ -23,9 +23,14 @@ class ResponseParityTests(unittest.TestCase):
         def outcome(function):
             try:return ('value',function())
             except Exception as error:return ('error',type(error),getattr(error,'rpc_code',None),getattr(error,'category',None))
-        for text in bodies:
-            with self.subTest(text=text),patch('onchain_ingest.build_opener') as opener:
-                response=opener.return_value.open.return_value.__enter__.return_value
-                response.read.return_value=text.encode();response.headers={}
-                self.assertEqual(outcome(lambda:python.call('getSlot',[])),
-                                 outcome(lambda:rust._finish(200,'',text,method='getSlot')))
+        # One opener now serves the lifetime of a client. Change its response,
+        # not its factory, so every malformed-envelope case still reaches parsing.
+        with patch('onchain_ingest.build_opener') as opener:
+            response=opener.return_value.open.return_value.__enter__.return_value
+            response.headers={}
+            for text in bodies:
+                with self.subTest(text=text):
+                    response.read.return_value=text.encode()
+                    self.assertEqual(outcome(lambda:python.call('getSlot',[])),
+                                     outcome(lambda:rust._finish(200,'',text,method='getSlot')))
+            opener.assert_called_once()

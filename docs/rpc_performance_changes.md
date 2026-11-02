@@ -1,6 +1,147 @@
-# Client overhead reduction
+# Native RPC reliability findings and repairs
 
-## Mainnet reliability finding — November 2, 2026
+## V3 implementation and current acceptance
+
+The mainnet root cause is **not yet confirmed**. Safe diagnostics now preserve
+request method, connect/send/body/cancellation phase, elapsed transport time,
+received body bytes, known HTTP status, timeout classification and an available
+numeric socket code. Rust cannot reliably distinguish every DNS/TLS failure from
+other connect failures through its public error API; those remain connect errors,
+not invented subcategories. Pooled-connection reuse is explicitly unknown (`null`).
+The probe caps Python connection establishment at 15 seconds and the call at
+30 seconds using an isolated worker timer, matching the native ceilings without
+changing production timeouts. Python/native HTTP errors retain their actual status. Local transport backoff is
+marked `local_transport`, not reported as a provider-issued 503. Explicit close
+retains the existing RuntimeError contract and does not charge provider failure.
+The collector's paused records include the new safe fields. No raw URL, error
+chain or credential is rendered by the new transport diagnostics.
+
+The NixOS isolated-node path now uses a 1500-byte tc burst instead of 16 KiB,
+explicit 16 KiB nft policing headroom, 1500-byte veth MTUs, and disabled TSO/GSO/GRO
+on **only the dedicated veth pair**. Upload rate policing moves from namespace
+OUTPUT (before tc) to the host FORWARD boundary (after namespace tc); otherwise
+an application write could be dropped before the shaper could queue it. Download
+policing remains after the host-veth shaper. Quota and lease checks stay in the
+namespace in both directions. This coordinates the existing shaper with its
+policing backstop and avoids oversized offloaded packets. The configured rates,
+hard aggregate byte quota, lease expiry, accounting-before-drop, namespace and
+manual-start requirements are retained. Named `download_rate_drop` and
+`upload_rate_drop` (host boundary) counters expose any remaining rate policing drops. Finite
+queues, quota exhaustion and session expiry can still drop traffic; this is not a
+claim of lossless networking or proof of Monolith's failure cause. No host/uplink
+interface settings were changed by the coding agent.
+
+`diagnose_mainnet_rpc.py` / `nix run .#rpc-diagnostics` prepares the missing mainnet
+comparison. It runs Python then Rust against common finalized slots, with ten
+logical requests total (genesis, finalized head, slot manifest, two single-block
+requests per backend), a default 180-second process deadline and the existing shared
+provider ledger. Cooldown waits do not create replacement requests; any request
+interrupted by the deadline is marked unknown, never successful. The default decoder
+checks authentic returned transactions through the reviewed schema configuration;
+results do not admit observations to storage, qualify training labels, or verify
+fresh on-chain deployment pins by themselves. Success latency includes call pacing;
+failure `elapsed_ms` is transport time when available. No signer environment or
+`.env` file is loaded by the subprocess. Reports are owner-only and never overwritten.
+An indexer ownership lock plus the required `--workers-stopped` operator assertion
+prevent accidental overlap in the normal configured deployment; the operator must
+also stop independently supervised RPC consumers. A failed comparison exits nonzero.
+
+### Operator sequence
+
+Include the new public modules and tests in the reviewed Git revision before
+Git-backed Nix builds; never stage `.env`, runtime configs, state or models. Retain
+any reviewed local `flake.lock`; all commands below prohibit lock writes.
+
+```bash
+nix develop --no-write-lock-file .#native-rpc --command python validate_production.py --native --output /tmp/freya-v3-offline-new.json
+nix build --no-write-lock-file .#native-rpc-app
+nix build --no-write-lock-file .#checks.x86_64-linux.solana-network-lifecycle
+```
+
+The VM check is separate from the offline suite and does not certify the actual
+host. Before changing NixOS network services, stop all owned paper/live/indexer/
+observer/learner workloads and `solana-budget-network.service`; do not restart a
+funded live service as part of this repair. For CLI supervision use Ctrl+C. For
+systemd deployments, stop only the configured units listed in the deployment guide.
+Back up complete runtime directories and the persistent budget ledger while stopped.
+
+For a host configuration importing this repository's NixOS module, first ensure
+its existing Freya input resolves to the reviewed repair revision; rebuilding an
+unchanged older host input will not apply this repair. Replace the
+example path below with the existing host flake reference; build before activation:
+
+```bash
+NIXOS_HOST_FLAKE=/absolute/path/to/host-config#monolith
+sudo nixos-rebuild build --flake "$NIXOS_HOST_FLAKE"
+# After reviewing the build, with owned workloads and network session stopped:
+sudo nixos-rebuild switch --flake "$NIXOS_HOST_FLAKE"
+```
+
+This does not authorize a new network-budget grant. Start a reviewed bounded node
+session manually only if using isolated mode; remote-provider probes do not require
+one. Monitor the existing ledger and session status. Inside an authorized isolated
+session these read-only commands expose the applied pacing and drop counters:
+
+```bash
+sudo tc -s qdisc show dev solana-host
+sudo ip netns exec solana-budget tc -s qdisc show dev eth0
+sudo ip netns exec solana-budget nft list counter inet solana_budget download_rate_drop
+sudo nft list counter inet solana_boundary upload_rate_drop
+```
+
+For the mainnet comparison, use the existing reviewed config and actual index path.
+If its URL is `${SOLANA_RPC_URL}`, export **only** that URL in a protected shell;
+do not source a wallet `.env` or put authenticated URLs in command history. The
+probe deliberately does not load `.env`. Keep all competing workers stopped:
+
+```bash
+nix run --no-write-lock-file .#rpc-diagnostics -- \
+  --config onchain_pipeline.json --index-db state/onchain/index.sqlite \
+  --output /tmp/freya-v3-mainnet-new.json --allow-mainnet --workers-stopped \
+  --max-requests 10 --deadline-seconds 180
+```
+
+Use a new report filename each time. Do not proceed to sustained paper acceptance
+until diagnostics/builds pass and actual mainnet failures are understood. Then
+resume the existing paper session with `nix run --no-write-lock-file .#paper`.
+Observe contiguous checkpoints, causal USD data, completed candle windows, genuine
+paper outcomes and eligible learning. Passing synthetic tests cannot substitute
+for these observations. Preserve the existing downstream acceptance criteria.
+
+Rollback: stop owned workers/network session, build the previous reviewed package
+and host revision, and restore the previous NixOS generation with
+`sudo nixos-rebuild switch --rollback` if needed. Resume only manually authorized
+workloads. Preserve current journals, configs, provider history, grants and pending
+signatures; never restore an older database over new trades. No data migration or
+budget reset is introduced.
+
+### Validation evidence
+
+The protected offline run passed 629 Python tests with zero failures, errors or
+skips; privileged kernel tests were deliberately omitted, so its overall host
+acceptance flag remains false. Ten focused diagnostic/probe checks also passed
+after the final closed-client metadata adjustment. Rust passed 13 unit tests,
+including separate stalled-loopback request and TLS-connect timeout cases.
+The first full run exposed 11 parity-test fixture failures caused by the earlier
+opener-reuse change; the fixture now varies responses on the same opener while
+retaining all malformed-envelope assertions, and subsequent runs passed.
+
+The final `native-rpc-app` built successfully from the complete public-source
+staging snapshot, and its packaged diagnostics CLI passed a `--help` smoke check.
+The NixOS VM build was attempted
+offline but stopped when evaluation required 3,749 uncached derivations; no VM
+or host/kernel lifecycle acceptance was obtained. Initial sandbox restrictions
+also blocked local sockets; authorized loopback tests were rerun outside that
+sandbox. Source-only Nix builds used a public-file staging snapshot so new
+untracked modules were included without copying credentials/state.
+
+Local evidence: `/tmp/freya-v3-offline-release.json` (629-test protected run),
+`/tmp/freya-v3-offline-final.json` (initial failing run), and
+`/tmp/freya-v3-offline-recheck.json` (626-test successful recheck). They are local
+validation artifacts, not evidence from Monolith. No mainnet probe, sustained paper run,
+new paper trade, ML promotion, or funded live activation was performed here.
+
+## Mainnet reliability finding — November 2, 2026 (pre-repair baseline)
 
 The operator reports frequent TCP drops on Monolith's external mainnet RPC path,
 without observed HTTP throttling responses. The supplied logs repeatedly show
@@ -10,7 +151,7 @@ and learning remain blocked by unavailable fresh market evidence.
 
 These logs establish repeated transport failures, not packet loss or its cause.
 No HTTP 429 was reported in this excerpt; provider/network-level connection
-limiting remains a hypothesis even without an HTTP response. Rust currently maps
+limiting remains a hypothesis even without an HTTP response. At the time of the baseline, Rust mapped
 request-send and response-body errors to the same generic connection exception;
 local cancellation and unavailable client state also use that message. The retry
 delays alone do not identify throttling.
@@ -47,7 +188,7 @@ for this findings update; the diagnostic probe described above is not yet implem
 ## Static code audit — possible failure locations
 
 Reviewed the current checkout without executing tests, builds, network calls or
-kernel commands. These are source-backed candidates, not a confirmed mainnet root
+kernel commands. These are source-backed candidates recorded before the V3 instrumentation, not a confirmed mainnet root
 cause. Line references describe this checkout; code changes may shift them.
 
 | Priority | Location | Finding and discriminating evidence |
@@ -115,7 +256,8 @@ nix develop --no-write-lock-file .#native-rpc --command env SOLANA_NATIVE_LOOPBA
 nix develop --no-write-lock-file .#native-rpc --command python benchmark_rpc_transport.py --allow-loopback --ab --iterations 100
 ```
 
-The coding agent did not run these tests, builds or benchmarks. Compare identical
+The overhead-only implementation originally left these checks to the operator.
+See V3 validation above for checks run during the subsequent reliability repair. Compare identical
 cases on the same host, retaining full output and source revision for before/after.
 Do not compare local getSlot fixtures with external-provider getBlock latency.
 
