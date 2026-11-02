@@ -21,10 +21,10 @@ class RpcRemoteError(PublicRpcError):
         self.category='throttled' if code in (429,-32005) else 'remote_rpc_error'
 
 
-def http_error(status,source_id):
+def http_error(status,source_id,method=None):
     kind=SourceAccessBlocked if status in (401,403) else ConnectionError if status in (500,502,503,504) else ValueError
     error=kind('RPC HTTP error '+str(status))
-    error.http_status=status;error.source_id=source_id
+    error.http_status=status;error.source_id=source_id;error.rpc_method=method
     error.category='authorization_denied' if status in (401,403) else 'throttled' if status==429 else 'provider_unavailable' if kind is ConnectionError else 'http_error'
     return error
 
@@ -61,6 +61,33 @@ def remote_error(code,source_id):
     return RpcRemoteError(code,source_id)
 
 
+def rpc_batch_result(text,source_id,budget,url,count):
+    """At most two getBlock results, matched by ID rather than response order."""
+    import json
+    def pairs(items):
+        result={}
+        for key,value in items:
+            if key in result:raise RpcEvidenceError('Duplicate batch JSON key')
+            result[key]=value
+        return result
+    def constant(_):raise RpcEvidenceError('Nonfinite batch JSON value')
+    try:
+        payload=json.loads(text,object_pairs_hook=pairs,parse_constant=constant)
+        if type(count) is not int or not 1<=count<=2 or not isinstance(payload,list) or len(payload)!=count:
+            raise RpcEvidenceError('Incomplete bounded block batch')
+        by_id={}
+        for item in payload:
+            if not isinstance(item,dict) or type(item.get('id')) is not int or not 1<=item['id']<=count or item['id'] in by_id:
+                raise RpcEvidenceError('Invalid or duplicate block batch ID')
+            by_id[item['id']]=item
+    except RpcEvidenceError:raise
+    except (ValueError,TypeError,UnicodeError,RecursionError):
+        raise RpcEvidenceError('Malformed block batch evidence') from None
+    # Preserve authorization, throttling and unavailable-history exception types.
+    return [rpc_result(json.dumps(dict(by_id[index],id=1),allow_nan=False),
+                       'getBlock',source_id,budget,url) for index in range(1,count+1)]
+
+
 def rpc_result(text,method,source_id,budget,url):
     """Identical strict JSON-RPC contract for Python and Rust response bodies."""
     import json
@@ -89,6 +116,12 @@ def rpc_result(text,method,source_id,budget,url):
     code=payload['error']['code']
     if code in (401,403):
         budget.failure(url,code)
-        raise SourceAccessBlocked('RPC source access denied')
+        failure=SourceAccessBlocked('RPC source access denied')
+        failure.rpc_method=method;failure.rpc_code=code
+        raise failure
     if code in (429,-32005):budget.failure(url,429 if code==429 else 503)
-    raise remote_error(code,source_id)
+    failure=remote_error(code,source_id)
+    failure.rpc_method=method
+    if getattr(type(budget),'cooldown_remaining',None) is not None:
+        failure.retry_after_seconds=budget.cooldown_remaining(url)
+    raise failure

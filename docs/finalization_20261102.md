@@ -1,9 +1,10 @@
 # Runtime finalization and acceptance
 
-Latest follow-up: [V3 runtime acceptance](v3_runtime_acceptance_20261102.md)
-records an additional framing regression, read-only replay and fresh mainnet probe.
-The deployed event-layout blocker remains unresolved; earlier evidence below is
-preserved as its original validation run.
+Latest status: [ingestion repair](ingestion_repair_20261102.md). The published SDK
+contract resolves the eight-byte event mismatch. Current mainnet samples decode,
+but the bounded paper run encountered public-RPC throttling; sustained fresh,
+complete ingestion and paper lifecycle acceptance remain unverified. The earlier
+validation evidence below is preserved as historical evidence.
 
 For this project, **production-ready means the shared bot pipeline works reliably
 in paper trading**: native RPC discovery → current market data and candles →
@@ -21,11 +22,11 @@ Results depend on the coins each bot discovers, market conditions, execution cos
 and operator configuration. Passing tests or starting the dashboard alone does not
 establish a working paper pipeline or a profitable strategy.
 
-This checkout has not yet met that production-readiness target: the event-layout
-blocker below prevents usable market observations and therefore paper evaluation,
-trades and learning outcomes. It is not ordinary first-hour warmup.
+This checkout has not yet met that production-readiness target. The original event
+layout blocker below has been repaired; the latest report distinguishes that repair
+from remaining provider-capacity limits and uncompleted paper acceptance.
 
-## Confirmed blockers and repairs
+## Earlier confirmed blockers and repairs
 
 * **Event layouts:** read-only replay of 128 saved finalized transactions produced
   identical Python/Rust/compare results: 127 transactions had issues, with repeated
@@ -87,8 +88,8 @@ Final results are recorded in [validation evidence](validation_2026-11-02.json):
 
 The successful probe demonstrates connectivity, not sustained ingestion throughput,
 complete market history or readiness to trade. The layout blocker is reproduced
-against current mainnet, not only old fixtures. Paper production readiness remains
-blocked by that feed issue. Funded-live execution has not been validated and remains
+against current mainnet, not only old fixtures. At that validation point, paper production readiness was blocked by the feed issue;
+the later SDK repair and current provider-capacity findings are linked above. Funded-live execution has not been validated and remains
 off under the operator's instructions; it is not a prerequisite for accepting the
 shared paper pipeline. Self-hosted validator startup and NixOS/kernel network enforcement were
 not run, as requested. Offline mocked policy/config tests are not node acceptance.

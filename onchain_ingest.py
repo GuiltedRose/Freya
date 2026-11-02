@@ -8,9 +8,9 @@ import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener
-from rpc_contract import RpcHistoryUnavailable, RpcEvidenceError, response_value, remote_error, http_error, rpc_result
+from rpc_contract import RpcHistoryUnavailable, RpcEvidenceError, response_value, remote_error, http_error, rpc_result, rpc_batch_result
 from data_policy import SourceAccessBlocked
-from provider_limits import BUDGET
+from provider_limits import BUDGET, ProviderBackoff
 from pump_narratives import NoRedirect
 from wallet_watch import MAINNET, PublicRpcError
 from onchain_decode import Decoder
@@ -57,15 +57,43 @@ class IndexRpc:
         self.interval = spacing
         self.budget = budget or BUDGET
         self.validated = False
+        self.block_batch_size=endpoint.get('block_batch_size',1)
+        if type(self.block_batch_size) is not int or not 1<=self.block_batch_size<=2:
+            raise ValueError('Block HTTP batch size must be 1 or 2')
         self.requests = self.wire_bytes = self.decoded_bytes = 0
 
     def call(self, method, params):
         if method not in READ_METHODS:
             raise ValueError('Indexer RPC is strictly read-only')
-        self.budget.reserve(self.url, self.interval)
+        decoded=self._post({'jsonrpc':'2.0','id':1,'method':method,'params':params})
+        return rpc_result(decoded,method,self.source,self.budget,self.url)
+
+    def call_blocks(self,slots,options):
+        if not isinstance(slots,list) or not 1<=len(slots)<=self.block_batch_size or any(type(slot) is not int or not 0<=slot<2**63 for slot in slots) or len(set(slots))!=len(slots):
+            raise ValueError('Invalid bounded block request')
+        if len(slots)==1:return [self.call('getBlock',[slots[0],options])]
+        decoded=self._post([{'jsonrpc':'2.0','id':index+1,'method':'getBlock','params':[slot,options]}
+                            for index,slot in enumerate(slots)])
+        return rpc_batch_result(decoded,self.source,self.budget,self.url,len(slots))
+
+    def _reserve(self,method):
+        try:self.budget.reserve(self.url,self.interval)
+        except ProviderBackoff as error:
+            error.rpc_method=method
+            raise
+
+    def _post(self,payload):
+        members=payload if isinstance(payload,list) else [payload]
+        if (not 1<=len(members)<=2 or any(not isinstance(item,dict) or item.get('method') not in READ_METHODS
+            for item in members) or isinstance(payload,list) and any(item['method']!='getBlock' for item in members)):
+            raise ValueError('Indexer HTTP transport is strictly read-only with bounded block batches')
+        # One paced HTTP operation, with no changes to shared cooldown/byte limits.
+        # Batches are capped at two logical calls (at most four getBlock calls/s
+        # under the existing 0.5s HTTP floor), within public method/IP ceilings.
+        method=payload[0]['method'] if isinstance(payload,list) else payload['method']
+        self._reserve(method)
         self.requests += 1
-        request = Request(self.url, data=json.dumps({'jsonrpc': '2.0', 'id': 1,
-                          'method': method, 'params': params}).encode(),
+        request = Request(self.url, data=json.dumps(payload,allow_nan=False).encode(),
                           headers={'Content-Type': 'application/json', 'Accept-Encoding': 'gzip', 'User-Agent': 'SolanaOnchainIndex/1'})
         try:
             with build_opener(NoRedirect).open(request, timeout=30) as response:
@@ -74,14 +102,17 @@ class IndexRpc:
         except HTTPError as error:
             self.budget.failure(self.url, error.code, error.headers)
             # Do not expose endpoint paths, which may contain credentials.
-            raise http_error(error.code,self.source) from None
+            failure=http_error(error.code,self.source,method)
+            if getattr(type(self.budget),'cooldown_remaining',None) is not None:
+                failure.retry_after_seconds=self.budget.cooldown_remaining(self.url)
+            raise failure from None
         except (URLError, TimeoutError, OSError):
             self.budget.failure(self.url, 503)
             raise ConnectionError('RPC transport unavailable') from None
         self.wire_bytes += len(raw)
         decoded = decode_rpc_body(raw, encoding)
         self.decoded_bytes += len(decoded)
-        return rpc_result(decoded,method,self.source,self.budget,self.url)
+        return decoded
 
     def validate(self):
         if not self.validated:
@@ -156,6 +187,7 @@ class Ingester:
         for index, rpc in enumerate(self.endpoints):
             start = self.store.next_slot()
             start = initial if start is None else start
+            finalized=sampled_at=None
             try:
                 rpc.validate()
                 finalized = rpc.call('getSlot', [{'commitment': 'finalized'}])
@@ -179,32 +211,43 @@ class Ingester:
                     if type(first) is not int or first<0:raise RpcEvidenceError('Invalid history floor')
                     if start<first:raise RpcHistoryUnavailable(rpc.source)
                 next_slot = start
-                for slot in slots:
-                    block = rpc.call('getBlock', [slot, {'commitment': 'finalized', 'encoding': 'json',
-                                     'transactionDetails': 'full', 'maxSupportedTransactionVersion': 1,
-                                     'rewards': False}])
-                    if not block or not isinstance(block.get('transactions'), list):
-                        raise ValueError('Missing finalized block; durable prefix preserved')
-                    events, issues, relevant = [], self.version_issues(slot, deployments), []
-                    for tx_index, tx in enumerate(block['transactions']):
-                        try:
-                            found, errors = self.decoder.transaction(tx, slot, tx_index, block['blockTime'])
-                        except (ValueError, KeyError, TypeError, IndexError) as error:
-                            found, errors = [], ['transaction decode failure: ' + type(error).__name__]
-                        if found or errors:
-                            relevant.append((tx_index, tx))
-                        events.extend(found)
-                        issues.extend(errors)
-                    block['_indexer_deployments'] = deployments
-                    decoded = (slot, block, events, sorted(set(issues)), relevant)
-                    # One block in memory. Commit known skipped slots plus this block
-                    # atomically, so interruptions lose at most the in-flight request.
-                    self.store.commit_range(next_slot, slot, [slot], [decoded], rpc.source)
-                    next_slot = slot + 1
+                batch_size=getattr(rpc,'block_batch_size',1)
+                options={'commitment':'finalized','encoding':'json','transactionDetails':'full',
+                         'maxSupportedTransactionVersion':1,'rewards':False}
+                for offset in range(0,len(slots),batch_size):
+                    selected=slots[offset:offset+batch_size]
+                    blocks=(rpc.call_blocks(selected,options) if len(selected)>1 else
+                            [rpc.call('getBlock',[selected[0],options])])
+                    if len(blocks)!=len(selected):raise RpcEvidenceError('Incomplete block batch')
+                    for slot,block in zip(selected,blocks):
+                        if not block or not isinstance(block.get('transactions'), list):
+                            raise ValueError('Missing finalized block; durable prefix preserved')
+                        events, issues, relevant = [], self.version_issues(slot, deployments), []
+                        for tx_index, tx in enumerate(block['transactions']):
+                            try:
+                                found, errors = self.decoder.transaction(tx, slot, tx_index, block['blockTime'])
+                            except (ValueError, KeyError, TypeError, IndexError) as error:
+                                found, errors = [], ['transaction decode failure: ' + type(error).__name__]
+                            if found or errors:
+                                relevant.append((tx_index, tx))
+                            events.extend(found)
+                            issues.extend(errors)
+                        block['_indexer_deployments'] = deployments
+                        decoded = (slot, block, events, sorted(set(issues)), relevant)
+                        # Commit each durable prefix independently, retaining at most two
+                        # blocks from one bounded HTTP response. No checkpoint jumps.
+                        self.store.commit_range(next_slot, slot, [slot], [decoded], rpc.source)
+                        next_slot = slot + 1
                 if next_slot <= end:
                     self.store.commit_range(next_slot, end, [], [], rpc.source)
                 return self.record_progress(finalized, sampled_at, initial, started, 'indexed')
-            except ConnectionError as error:
+            except (ConnectionError,ValueError) as error:
+                # Prefix commits remain useful even if a later request is throttled.
+                # Persist their progress so the dashboard does not report no index.
+                cursor=self.store.next_slot()
+                if type(finalized) is int and sampled_at is not None and cursor is not None and cursor>initial:
+                    self.record_progress(finalized,sampled_at,initial,started,'partial')
+                if not isinstance(error,ConnectionError):raise
                 print(json.dumps({'status':'rpc_source_unavailable','source_id':rpc.source,
                                   'category':getattr(error,'category','transport_unavailable'),
                                   'next_source_id':self.endpoints[index+1].source if index+1<len(self.endpoints) else None,
@@ -263,14 +306,26 @@ def follow(ingester, start=None, count=8, interval=5, max_failures=6, max_catchu
                 time.sleep(max(1, interval))
         except SourceAccessBlocked:
             raise
+        except ProviderBackoff as error:
+            if ingester.store.next_slot() is not None:start=None
+            remaining=max(0,float(error.seconds))
+            yield {'status':'paused','reason':'Provider cooldown active','category':'provider_cooldown',
+                   'error_type':type(error).__name__,'rpc_method':getattr(error,'rpc_method',None),
+                   'retry_seconds':remaining,'checkpoint':ingester.store.next_slot()}
+            # A local cooldown check is not a failed network attempt. Keep bounded
+            # actual retries, but do not exhaust them while honoring Retry-After.
+            time.sleep(min(60,max(1,remaining)))
         except (ConnectionError, ValueError) as error:
             if ingester.store.next_slot() is not None:
                 start = None
             failures += 1
-            delay = min(60, max(1, interval) * 2 ** min(failures, 6))
+            delay = max(min(60,max(1,interval)*2**min(failures,6)),
+                        getattr(error,'retry_after_seconds',0))
             yield {'status': 'paused', 'reason': str(error), 'error_type': type(error).__name__,
-                   'rpc_code': getattr(error, 'rpc_code', None), 'retry_seconds': delay,
+                   'rpc_code':getattr(error,'rpc_code',None),'rpc_method':getattr(error,'rpc_method',None),
+                   'http_status':getattr(error,'http_status',None),'category':getattr(error,'category',None),
+                   'retry_seconds':delay,
                    'checkpoint': ingester.store.next_slot()}
             if failures >= max_failures:
                 raise ValueError('Bounded reconnect attempts exhausted; restart from saved checkpoint') from None
-            time.sleep(delay)
+            time.sleep(min(60,delay))

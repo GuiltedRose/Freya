@@ -97,6 +97,8 @@
                 --add-flags "$out/share/crypto-bot/solana_network_budget.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-observer \
                 --add-flags "$out/share/crypto-bot/solana_observer.py"
+              makeWrapper ${python}/bin/python $out/bin/crypto-bot-audit-ingestion \
+                --add-flags "$out/share/crypto-bot/audit_ingestion.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-health \
                 --add-flags "$out/share/crypto-bot/runtime_health.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-challengers \
@@ -141,6 +143,7 @@
         default = self.apps.${system}.indexer;
         indexer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-indexer"; };
         observer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-observer"; };
+        audit-ingestion = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-audit-ingestion"; };
         tmux = { type = "app"; program = "${environments.${system}.pkgs.tmux}/bin/tmux"; };
         paper = {
           type = "app";
@@ -188,6 +191,7 @@
           chmod -R u+w source
           cd source
           python -m unittest discover -s tests -p test_onchain_indexer.py
+          python -m unittest discover -s tests -p test_block_batch.py
           python -m unittest discover -s tests -p test_onchain_hour.py
           python -m unittest discover -s tests -p test_onchain_stream_candles.py
           python -m unittest discover -s tests -p test_selfhost_observer.py

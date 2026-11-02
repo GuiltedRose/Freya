@@ -33,7 +33,18 @@ class CompactTests(unittest.TestCase):
 
 @unittest.skipUnless(NativeBorshSchema is not None,'Build rpc-engine first')
 class NativeEventTests(unittest.TestCase):
-    def test_recorded_extra_bytes_are_inside_event_not_cpi_wrapper(self):
+    def test_bounded_borsh_bytes_match_python_without_padding(self):
+        fields=[{'name':'fees','type':'bytes'}]
+        schema=NativeBorshSchema(json.dumps(fields),'{}')
+        raw=(4).to_bytes(4,'little')+bytes([0,1,128,255])
+        native,end=schema.decode(raw,0)
+        expected,python_end=read_struct(raw,fields,0,{})
+        self.assertEqual((json.loads(native),end),(expected,python_end))
+        for invalid in (raw[:-1],(16385).to_bytes(4,'little')):
+            with self.assertRaises(ValueError):schema.decode(invalid,0)
+            with self.assertRaises(ValueError):read_struct(invalid,fields,0,{})
+
+    def test_recorded_transfer_fee_field_is_inside_event_not_cpi_wrapper(self):
         root=Path(__file__).parent/'fixtures/onchain'
         manifest=json.loads((root/'manifest.json').read_text())
         for fixture in manifest['fixtures']:
@@ -52,18 +63,19 @@ class NativeEventTests(unittest.TestCase):
                     prefixes.append((program,name,raw,fields,end))
                     return fields,end
                 with patch.object(decoder,'event_fields',side_effect=observe):
-                    events,issues=decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],tx['blockTime'])
-                self.assertFalse(events)
-                self.assertIn('Unreviewed event layout/version',issues)
+                    events,issues=decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],tx.get('blockTime',fixture.get('block_time')))
+                self.assertNotIn('Unreviewed event layout/version',issues)
                 self.assertTrue(prefixes)
                 for program,name,raw,fields,end in prefixes:
                     self.assertIn(raw[8:],logs)
-                    self.assertEqual(len(raw)-end,8)
+                    self.assertEqual(end,len(raw))
+                    if name in ('TradeEvent','BuyEvent','SellEvent'):
+                        self.assertEqual(fields['quote_transfer_fee'],0)
                 interpretations.append(prefixes)
             self.assertEqual(interpretations[0],interpretations[1])
             self.assertEqual(interpretations[0],interpretations[2])
 
-    def test_synthetic_both_programs_and_recorded_layout_quarantine(self):
+    def test_synthetic_both_programs_and_recorded_layout_parity(self):
         inputs=[fixtures.transaction(venue=venue,buy=buy) for venue in ('pump','pump_amm') for buy in (True,False)]
         inputs += [json.loads(Path('tests/fixtures/onchain/'+name+'.json').read_text()) for name in ('curve','pumpswap')]
         for tx in inputs:

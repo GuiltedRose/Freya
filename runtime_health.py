@@ -51,6 +51,9 @@ def validate_config(config):
             raise ValueError('Reviewed deployment ranges missing for '+program)
         previous = -1
         for row in sorted(ranges,key=lambda v:v['from_slot']):
+            if row.get('idl_hash') != spec['hash']:
+                raise ValueError('Pinned SDK schema changed for '+program+
+                                 '; run the coordinated runner with --configure to recheck deployment pins; existing index and paper state must be preserved')
             if (any(type(row.get(k)) is not int for k in ('from_slot','through_slot','deployment_slot'))
                 or not 0 <= row['deployment_slot'] <= row['from_slot'] <= row['through_slot']
                 or row['from_slot'] <= previous or row.get('idl_hash') != spec['hash']):
@@ -100,10 +103,14 @@ def health(database, mints=(), now=None):
         row = db.execute("SELECT payload FROM telemetry WHERE name='oracle'").fetchone() if db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='telemetry'").fetchone() else None
     from wallet_watch import SOL
+    oracle_report=json.loads(row[0]) if row else None
     try:
         store.conversion(SOL,int(now))
     except ValueError as error:
         blockers.append(safe_reason(error))
+        if oracle_report and oracle_report.get('status')=='incomplete':
+            for feed in oracle_report.get('feeds',[])[:2]:
+                if feed.get('error'):blockers.append('USD oracle capture failed: '+safe_reason(feed['error']))
     if issues:
         details=json.loads(issues[0]['issues'])
         if details:blockers.append('Decoder/receipt quarantine in required hour: '+safe_reason('; '.join(details[:2])))
@@ -128,7 +135,7 @@ def health(database, mints=(), now=None):
             blockers.append('Market unavailable: '+mint)
     return {'ready':not blockers, 'blockers':blockers, 'index':store.metrics(),
             'progress':store.progress(), 'coverage':coverage, 'recent_issues':issues,
-            'conversions':conversions, 'oracle':json.loads(row[0]) if row else None, 'markets':markets}
+            'conversions':conversions, 'oracle':oracle_report, 'markets':markets}
 
 
 def main():

@@ -1,0 +1,226 @@
+{
+  "date": "2026-11-02",
+  "kind": "ingestion_implementation_validation_not_profitability",
+  "base_commit": "f2a63457d751cc4e0a34ea052bd0f90a15d4c6bd",
+  "working_tree_changes": true,
+  "source_snapshot": "/tmp/crypto-bot-public-build-8qtrf5jo",
+  "source_snapshot_manifest_sha256": "fb255346c408f82158ebdc022641840cd4ca55eb276bc166c71736bbe595b1e6",
+  "snapshot_matches_current_public_source": true,
+  "private_state_copied_to_nix": false,
+  "git_staging_changed_by_agent": false,
+  "flake_lock_still_ignored": true,
+  "python_native_loopback": {
+    "tests": 605,
+    "failures": 0,
+    "errors": 0,
+    "skips": [],
+    "omitted": [
+      "test_solana_network_kernel"
+    ],
+    "passed": true,
+    "complete": false
+  },
+  "python_report": "/tmp/freya-ingestion-validation-final-r3.json",
+  "rust": {
+    "tests": 11,
+    "failures": 0,
+    "doctests": 0,
+    "log": "/tmp/crypto-bot-sdk-rust-r1.log"
+  },
+  "nix": {
+    "packages": [
+      {
+        "drvPath": "/nix/store/g0xdiz9z9x9xcw5f4imbfki5lv8qdpy4-crypto-bot-native-rpc-app.drv",
+        "outputs": {
+          "out": "/nix/store/cl46id1hd3wnqblfrpp29fsanl3j1znk-crypto-bot-native-rpc-app"
+        }
+      },
+      {
+        "drvPath": "/nix/store/6x0qwfj36k00lcf40w8pm9mdswz8gdzb-crypto-bot-indexer-tests.drv",
+        "outputs": {
+          "out": "/nix/store/5gqqjc49z3hlsy7hw3haim3hkc447j2z-crypto-bot-indexer-tests"
+        }
+      }
+    ],
+    "offline_suites": 14,
+    "offline_tests": 158,
+    "passed": true,
+    "packaged_pipeline_help_passed": true,
+    "packaged_readonly_audit": {
+      "purpose": "read_only_contract_replay_not_training_or_promotion",
+      "source_db": "/home/zelda/repos/freya/state/onchain/index.sqlite",
+      "receipts": 128,
+      "clean": 128,
+      "decoded_events": 141,
+      "parity": true,
+      "errors": {},
+      "after": {
+        "slot": 464407475,
+        "tx_index": 191
+      },
+      "source_admission_checked": false,
+      "promotion_authorized": false,
+      "source_db_modified": false,
+      "paper_ready": false,
+      "contracts": {
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "5fe4e7a82694f314a4325709ee784566ed681023e5650e67d6e9baa02ad2b6fc",
+        "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": "6169dc52fe8ffd67d5d0e503ef17a04eaaee2dd99f1c059636d64625ebcd49d9"
+      },
+      "page_full": true
+    },
+    "log": "/tmp/freya-ingestion-nix-final-r3.log"
+  },
+  "schemas": {
+    "pump": {
+      "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "source_url": "https://registry.npmjs.org/@pump-fun/pump-sdk/-/pump-sdk-4.3.1.tgz",
+      "commit": "9841177110c786ff1b01c1b95ac7a253f033603b",
+      "sha256": "5fe4e7a82694f314a4325709ee784566ed681023e5650e67d6e9baa02ad2b6fc",
+      "package": "@pump-fun/pump-sdk",
+      "package_version": "4.3.1",
+      "archive_integrity": "sha512-C39JUoafBMTwv9sKOGxJFakFypsH/C8VJs54xde1Rl1C9Z10i+XMdAJrYMk3CKPUd41RUMu/pM834GUMuOewVA==",
+      "archive_sha256": "c8ff4e850651c81e9f488bfc6dffb4513a041bb4bca0819879dc19d9a72a4641",
+      "embedded_file": "package/dist/index.js",
+      "embedded_file_sha256": "5fcdf79808e77b1624b901b8a0baa032f0d782c70ee3f44b4e0ec9e7f2b96ee9",
+      "embedded_variable": "pump_default",
+      "extraction": "Static object-literal decoding, normalized JSON (indent=2, newline); SDK code was not executed",
+      "previous_public_docs_pin": {
+        "commit": "8cda1fa30ea658b20909d8aedf002047119388d2",
+        "source_url": "https://raw.githubusercontent.com/pump-fun/pump-public-docs/8cda1fa30ea658b20909d8aedf002047119388d2/idl/pump.json",
+        "sha256": "38b8abcc5b279bda85cf473e7c6f67bd15eb89df658cf93434687a43c88ad937",
+        "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+      },
+      "note": "Exact published SDK schema; deployment admission remains independently checked. No omitted fields are defaulted and no trailing event bytes are ignored."
+    },
+    "pump_amm": {
+      "program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "source_url": "https://registry.npmjs.org/@pump-fun/pump-sdk/-/pump-sdk-4.3.1.tgz",
+      "commit": "9841177110c786ff1b01c1b95ac7a253f033603b",
+      "sha256": "6169dc52fe8ffd67d5d0e503ef17a04eaaee2dd99f1c059636d64625ebcd49d9",
+      "package": "@pump-fun/pump-sdk",
+      "package_version": "4.3.1",
+      "archive_integrity": "sha512-C39JUoafBMTwv9sKOGxJFakFypsH/C8VJs54xde1Rl1C9Z10i+XMdAJrYMk3CKPUd41RUMu/pM834GUMuOewVA==",
+      "archive_sha256": "c8ff4e850651c81e9f488bfc6dffb4513a041bb4bca0819879dc19d9a72a4641",
+      "embedded_file": "package/dist/index.js",
+      "embedded_file_sha256": "5fcdf79808e77b1624b901b8a0baa032f0d782c70ee3f44b4e0ec9e7f2b96ee9",
+      "embedded_variable": "pump_amm_default",
+      "extraction": "Static object-literal decoding, normalized JSON (indent=2, newline); SDK code was not executed",
+      "previous_public_docs_pin": {
+        "source_url": "https://raw.githubusercontent.com/pump-fun/pump-public-docs/8cda1fa30ea658b20909d8aedf002047119388d2/idl/pump_amm.json",
+        "commit": "8cda1fa30ea658b20909d8aedf002047119388d2",
+        "sha256": "b7d8c57a4d9c4dd0109a9ab893052352333252d4eedced10ac091d4d66cab89b",
+        "program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        "note": "Restores a missing public specification only; not evidence of successful swap simulation or live adapter readiness."
+      },
+      "note": "Exact published SDK schema; deployment admission remains independently checked. No omitted fields are defaulted and no trailing event bytes are ignored."
+    }
+  },
+  "read_only_original_receipt_replay": {
+    "purpose": "read_only_contract_replay_not_training_or_promotion",
+    "source_db": "/home/zelda/repos/freya/state/onchain/index.sqlite",
+    "receipts": 128,
+    "clean": 128,
+    "decoded_events": 141,
+    "parity": true,
+    "errors": {},
+    "after": {
+      "slot": 464407475,
+      "tx_index": 191
+    },
+    "source_admission_checked": false,
+    "promotion_authorized": false,
+    "source_db_modified": false,
+    "paper_ready": false,
+    "contracts": {
+      "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "5fe4e7a82694f314a4325709ee784566ed681023e5650e67d6e9baa02ad2b6fc",
+      "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": "6169dc52fe8ffd67d5d0e503ef17a04eaaee2dd99f1c059636d64625ebcd49d9"
+    },
+    "page_full": true
+  },
+  "mainnet_batched_probe": {
+    "services_started": false,
+    "wallet_loaded": false,
+    "transactions_submitted": 0,
+    "state_reset": false,
+    "finalized_head": 464506039,
+    "sampled_slots": [
+      464506038,
+      464506039
+    ],
+    "transactions": 787,
+    "relevant_transactions": 90,
+    "clean_relevant_transactions": 90,
+    "decoded_events": 99,
+    "decoder_issues": [],
+    "http_block_batch_size": 2,
+    "oracle": {
+      "publish_time": 1793624788,
+      "confidence_bps": "4.725121144737224901353493717"
+    },
+    "elapsed_seconds": 2.8500113487243652,
+    "requests": 6,
+    "response_wire_bytes": 1539002,
+    "response_decoded_bytes": 4604411,
+    "live_ready": false,
+    "profitability_demonstrated": false
+  },
+  "bounded_packaged_paper_smoke": {
+    "state_directory": "/tmp/crypto-bot-sdk-paper-acceptance-eepmgnr3",
+    "wallet_loaded": false,
+    "funded_services_started": false,
+    "operator_state_reset": false,
+    "configure_exit": 0,
+    "first_exit": 0,
+    "first_indexed_blocks": 4,
+    "first_indexed_events": 191,
+    "restart_exit": 0,
+    "restart_indexed_blocks": 8,
+    "restart_indexed_events": 376,
+    "paper_state_preserved": true,
+    "existing_index_block_rows_preserved": true,
+    "paper_table_counts": {
+      "candidate_watchlist": 0,
+      "capital_decisions": 0,
+      "capital_outcomes": 0,
+      "capital_policy": 1,
+      "capital_revocations": 0,
+      "paper_bankroll_progression": 1,
+      "paper_events": 0,
+      "paper_runs": 1,
+      "paper_source_cursors": 1
+    },
+    "paper_production_ready": false,
+    "artifact": "/nix/store/wm9i4dmnw1b4gl1sralrw1rr6lhq8gq6-crypto-bot-native-rpc-app",
+    "market_pairs": 100,
+    "quarantined_blocks": 0,
+    "checkpoints": {
+      "next_slot": 464507952
+    },
+    "empty_position_restart_only": true,
+    "new_completed_outcomes": 0,
+    "complete_candle_window_verified": false,
+    "note": "Decoder and batching artifact exercised; later cooldown/progress/oracle diagnostics verified by final offline suite and final package build"
+  },
+  "preliminary_harness": {
+    "path": "/tmp/crypto-bot-sdk-paper-acceptance-3dse58k9",
+    "not_counted_as_runtime_acceptance": true,
+    "reason": "Stopped after finding legacy pacing-ledger override; all data retained. Its 296 captured public receipts were used only for subsequent read-only decoding regression."
+  },
+  "remaining_acceptance": [
+    "Default public endpoint returned HTTP 429 during sustained full-block collection; a permitted RPC with adequate capacity is required",
+    "Sustained throughput, bounded current lag, complete fresh candle/history windows and causal USD coverage remain unestablished",
+    "Observed paper entry/exit lifecycle and new real eligible learning outcomes remain unverified",
+    "Existing configuration requires reviewed SDK hash refresh through --configure; original quarantines are not automatically promoted"
+  ],
+  "excluded": [
+    "funded transaction signing/submission",
+    "funded/live services",
+    "self-hosted validator build/startup",
+    "NixOS/kernel networking runtime tests"
+  ],
+  "wallet_model_training_state_preserved": true,
+  "existing_provider_cooldowns_preserved": true,
+  "paper_production_ready": false,
+  "live_ready": false,
+  "profitability_demonstrated": false
+}

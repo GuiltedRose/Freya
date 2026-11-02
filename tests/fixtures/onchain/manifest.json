@@ -12,7 +12,7 @@
       "slot": 463439519,
       "transaction_index": 234,
       "version": 1,
-      "expected": "quarantine: eight bytes beyond published event layout"
+      "expected": "Exact official SDK quote_transfer_fee layout; parent/transfer/deployment checks remain independent"
     },
     {
       "file": "pumpswap.json",
@@ -21,7 +21,55 @@
       "slot": 463439529,
       "transaction_index": 368,
       "version": 0,
-      "expected": "quarantine: eight bytes beyond published event layout"
+      "expected": "Exact official SDK quote_transfer_fee layout; parent/transfer/deployment checks remain independent"
+    },
+    {
+      "file": "protocol_buy_burn.json",
+      "sha256": "5b9c43b1bf59f390b7095c5948a0b6fe1487ce155bf0c18fd202296e7dae89be",
+      "signature": "3XhsP8pSJL4ur1murwbe3GJ56XMAEEwWrKR4aEo92r93qvqsquVnBwK73EbFhu1y2MYK4n4RtD5FfJ8dtTHfvpbD",
+      "slot": 464407473,
+      "transaction_index": 66,
+      "version": 0,
+      "expected": "Exact SDK BuyEvent plus matched protocol burn; not a wallet trade or learning outcome",
+      "obtained_at": "2026-11-02",
+      "source": "Existing saved finalized RPC receipt, read-only extraction",
+      "block_time": 1793603686
+    },
+    {
+      "file": "closed_wsol.json",
+      "sha256": "34a00efff50b41905cb4b9bc38e420cbda452f6d3496f367441d54996e5f9d1d",
+      "signature": "254f2vo6FPA57QF9tp4wxxphtsYRtXdW7qwFFEwSydV85jjzLXw8LVbYzSJUVkF9zJHg7xFwgTjavdqsATSgGHLB",
+      "slot": 464496031,
+      "transaction_index": 29,
+      "block_time": 1793622642,
+      "version": 1,
+      "obtained_at": "2026-11-02",
+      "source": "https://api.mainnet.solana.com",
+      "expected": "Explicit TransferChecked mint/decimals for closed temporary WSOL self-transfer; no inferred wallet movement"
+    },
+    {
+      "file": "multihop.json",
+      "sha256": "a246f66d4e5bc5809c27d72045c1c964752e0979251160f2aba756c9250ebfaa",
+      "signature": "QGjdm2A5Wer6zi4LH6ETYf9kyFdpTh8Xf4DqwVFrXbn3RgsN3N2ngLQBXTxHrLErtPZd8GXGMynKMCXveUvUeCk",
+      "slot": 464499076,
+      "transaction_index": 351,
+      "block_time": 1793623295,
+      "version": 1,
+      "obtained_at": "2026-11-02",
+      "source": "Bounded public-mainnet acceptance receipt; read-only extraction",
+      "expected": "multihop exact contract; not training labels or wallet net-delta inference"
+    },
+    {
+      "file": "token2022_fee.json",
+      "sha256": "f7d029f7a39e25112cfcf77f5de444814adcf99f022a2f12bb1141f299812c2f",
+      "signature": "4Kp3uyKjBu3j6oFpEz5TkAowAGWcxGzDyjGHAHJfB21G8aeuxxEA8L4TeC9iqAopLumqF8kc7hL5SfpqKSNvq5rg",
+      "slot": 464499081,
+      "transaction_index": 351,
+      "block_time": 1793623296,
+      "version": 0,
+      "obtained_at": "2026-11-02",
+      "source": "Bounded public-mainnet acceptance receipt; read-only extraction",
+      "expected": "Token-2022 TransferCheckedWithFee exact layout; recorded zero expected fee, not inferred default"
     }
   ]
 }

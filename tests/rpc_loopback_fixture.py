@@ -46,7 +46,9 @@ class LocalRpcServer:
                     step=owner.script.pop(0) if owner.script else {}
                 if step.get('disconnect'):
                     self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
-                payload=step.get('body',json.dumps({'jsonrpc':'2.0','id':1,'result':RESULTS.get(value['method'])}))
+                default=({'jsonrpc':'2.0','id':1,'result':RESULTS.get(value['method'])} if isinstance(value,dict)
+                         else [{'jsonrpc':'2.0','id':call['id'],'result':RESULTS.get(call['method'])} for call in value])
+                payload=step.get('body',json.dumps(default))
                 body=payload.encode() if isinstance(payload,str) else payload
                 self.send_response(step.get('status',200))
                 self.send_header('Retry-After','60')

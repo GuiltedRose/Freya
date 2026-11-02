@@ -1,6 +1,21 @@
 {
-  "commit": "8cda1fa30ea658b20909d8aedf002047119388d2",
-  "source_url": "https://raw.githubusercontent.com/pump-fun/pump-public-docs/8cda1fa30ea658b20909d8aedf002047119388d2/idl/pump.json",
-  "sha256": "38b8abcc5b279bda85cf473e7c6f67bd15eb89df658cf93434687a43c88ad937",
-  "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+  "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  "source_url": "https://registry.npmjs.org/@pump-fun/pump-sdk/-/pump-sdk-4.3.1.tgz",
+  "commit": "9841177110c786ff1b01c1b95ac7a253f033603b",
+  "sha256": "5fe4e7a82694f314a4325709ee784566ed681023e5650e67d6e9baa02ad2b6fc",
+  "package": "@pump-fun/pump-sdk",
+  "package_version": "4.3.1",
+  "archive_integrity": "sha512-C39JUoafBMTwv9sKOGxJFakFypsH/C8VJs54xde1Rl1C9Z10i+XMdAJrYMk3CKPUd41RUMu/pM834GUMuOewVA==",
+  "archive_sha256": "c8ff4e850651c81e9f488bfc6dffb4513a041bb4bca0819879dc19d9a72a4641",
+  "embedded_file": "package/dist/index.js",
+  "embedded_file_sha256": "5fcdf79808e77b1624b901b8a0baa032f0d782c70ee3f44b4e0ec9e7f2b96ee9",
+  "embedded_variable": "pump_default",
+  "extraction": "Static object-literal decoding, normalized JSON (indent=2, newline); SDK code was not executed",
+  "previous_public_docs_pin": {
+    "commit": "8cda1fa30ea658b20909d8aedf002047119388d2",
+    "source_url": "https://raw.githubusercontent.com/pump-fun/pump-public-docs/8cda1fa30ea658b20909d8aedf002047119388d2/idl/pump.json",
+    "sha256": "38b8abcc5b279bda85cf473e7c6f67bd15eb89df658cf93434687a43c88ad937",
+    "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+  },
+  "note": "Exact published SDK schema; deployment admission remains independently checked. No omitted fields are defaulted and no trailing event bytes are ignored."
 }

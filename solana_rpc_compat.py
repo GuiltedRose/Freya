@@ -9,7 +9,7 @@ import threading
 from data_policy import SourceAccessBlocked, require_permitted_url
 from onchain_ingest import IndexRpc, READ_METHODS
 from wallet_watch import PublicRpcError
-from rpc_contract import response_value, remote_error, http_error, rpc_result
+from rpc_contract import response_value, remote_error, http_error, rpc_result, rpc_batch_result
 
 
 def native_module():
@@ -110,7 +110,7 @@ class RustIndexRpc(IndexRpc):
     async def call_async(self,method,params):
         text=self._parameters(method,params)
         inode=check_boundary(self.endpoint)
-        await asyncio.to_thread(self.budget.reserve,self.url,self.interval)
+        await asyncio.to_thread(self._reserve,method)
         transport=self._transport_for(inode)
         self.requests+=1
         encoded=getattr(type(transport),'request_encoded',None) is not None
@@ -124,7 +124,7 @@ class RustIndexRpc(IndexRpc):
         else: raise RuntimeError('Use await call_async() inside an asyncio loop')
         text=self._parameters(method,params)
         inode=check_boundary(self.endpoint)
-        self.budget.reserve(self.url,self.interval)
+        self._reserve(method)
         transport=self._transport_for(inode)
         if not hasattr(transport,'request_sync'): raise RuntimeError('Rebuild native RPC extension with request_sync')
         self.requests+=1
@@ -138,6 +138,23 @@ class RustIndexRpc(IndexRpc):
             self._closed=True
             if self._transport is not None: self._transport.close()
 
+    def call_blocks(self,slots,options):
+        if not isinstance(slots,list) or not 1<=len(slots)<=self.block_batch_size or any(type(slot) is not int or not 0<=slot<2**63 for slot in slots) or len(set(slots))!=len(slots):
+            raise ValueError('Invalid bounded block request')
+        if len(slots)==1:return [self.call('getBlock',[slots[0],options])]
+        try:asyncio.get_running_loop()
+        except RuntimeError:pass
+        else:raise RuntimeError('Run synchronous block batching outside the asyncio loop')
+        params=self._parameters('getBlock',[[slot,options] for slot in slots])
+        transport=self._transport_for(check_boundary(self.endpoint))
+        if not hasattr(type(transport),'request_blocks_encoded_sync'):
+            raise RuntimeError('Rebuild native RPC extension with bounded block batching')
+        self._reserve('getBlock')
+        self.requests+=1
+        try:response=transport.request_blocks_encoded_sync(params)
+        except (ConnectionError,ValueError) as error:self._transport_error(error)
+        return self._finish_encoded(*response,method='getBlock',batch_count=len(slots))
+
     async def aclose(self): self.close()
     def __enter__(self): return self
     def __exit__(self,*_): self.close()
@@ -145,12 +162,15 @@ class RustIndexRpc(IndexRpc):
     def _finish(self,status,retry,text,method=None):
         if status!=200:
             self.budget.failure(self.url,status,{'Retry-After':retry} if retry else {})
-            raise http_error(status,self.source)
+            failure=http_error(status,self.source,method)
+            if getattr(type(self.budget),'cooldown_remaining',None) is not None:
+                failure.retry_after_seconds=self.budget.cooldown_remaining(self.url)
+            raise failure
         size=len(text.encode())
         self.wire_bytes+=size; self.decoded_bytes+=size
         return rpc_result(text,method,self.source,self.budget,self.url)
 
-    def _finish_encoded(self,status,retry,encoding,text,method=None):
+    def _finish_encoded(self,status,retry,encoding,text,method=None,batch_count=None):
         if status!=200:return self._finish(status,retry,'',method=method)
         import base64
         from onchain_ingest import decode_rpc_body
@@ -165,6 +185,7 @@ class RustIndexRpc(IndexRpc):
         except (ValueError,UnicodeError):
             raise SourceAccessBlocked('Malformed compressed native evidence; no backend retry') from None
         self.wire_bytes+=len(raw);self.decoded_bytes+=len(decoded)
+        if batch_count is not None:return rpc_batch_result(body,self.source,self.budget,self.url,batch_count)
         return rpc_result(body,method,self.source,self.budget,self.url)
 
     def decode_binary(self,response,*,tx_index,commitment):

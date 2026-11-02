@@ -1,0 +1,60 @@
+{
+  "kind": "recorded_fixture_indexer_compatibility_byte_preservation",
+  "test": "test_native_transport_stress.NativeTransportStress.test_recorded_event_bytes_survive_transport_indexer_and_storage",
+  "tests": 1,
+  "subcases": 16,
+  "failures": 0,
+  "errors": 0,
+  "skips": 0,
+  "local_http_requests": 64,
+  "input": "tests/fixtures/onchain/manifest.json",
+  "matrix": {
+    "fixtures": [
+      "curve.json",
+      "pumpswap.json"
+    ],
+    "clients": [
+      "IndexRpc",
+      "RustIndexRpc"
+    ],
+    "encodings": [
+      "identity",
+      "gzip"
+    ],
+    "transfer_framing": [
+      "Content-Length",
+      "chunked"
+    ]
+  },
+  "real_components": [
+    "Python/native HTTP",
+    "rpc_result",
+    "Ingester.step",
+    "Decoder compare",
+    "EventStore",
+    "extract_event_batch"
+  ],
+  "mocked_components": [
+    "source/deployment admission for fixture-only loopback",
+    "provider pacing accounting"
+  ],
+  "checks": {
+    "transaction_objects_and_hashes_preserved": true,
+    "instruction_and_log_strings_preserved": true,
+    "block_preserved_except_documented_deployment_metadata": true,
+    "before_after_decode_identical": true,
+    "unsupported_events_still_quarantined": true,
+    "compact_projection_rows_empty": true,
+    "temporary_checkpoint_contiguous": true
+  },
+  "native_artifact": "/nix/store/hd9gdzhcmi2z05r08715rsbsp0c29kr1-python3.13-crypto-bot-solana-binary-0.1.0",
+  "log": "/tmp/crypto-bot-v3-indexer-byte-preservation.log",
+  "test_source_sha256": "ca58aa903bfb250e10c537e3d601ab62ae13e6c4c807e4da35cb2e401e05fd1c",
+  "external_network": false,
+  "operator_databases_modified": false,
+  "wallet_loaded": false,
+  "funded_services_started": false,
+  "schema_contract_established": false,
+  "paper_production_ready": false,
+  "limitation": "Proves byte preservation for these receipts; not full deployed event semantics, source admission or runtime acceptance"
+}

@@ -19,6 +19,11 @@ impl<'a> Reader<'a> {
             return match kind {
                 "pubkey"=>Ok(Value::String(base58(self.take(32)?))),
                 "bool"=>match self.take(1)?[0] {0=>Ok(json!(false)),1=>Ok(json!(true)),_=>Err(error("Invalid Borsh bool"))},
+                "bytes"=>{
+                    let n=u32::from_le_bytes(self.take(4)?.try_into().map_err(|_|error("bytes size"))?) as usize;
+                    if n>16384 {return Err(error("Oversized bytes"));}
+                    Ok(json!(self.take(n)?))
+                },
                 "string"=>{
                     let n=u32::from_le_bytes(self.take(4)?.try_into().map_err(|_|error("string size"))?) as usize;
                     if n>16384 { return Err(error("Oversized string")); }
@@ -119,6 +124,14 @@ impl NativeBorshSchema {
 mod tests {
     use super::*;
     #[test] fn pubkeys() {assert_eq!(base58(&[0;32]),"1".repeat(32)); assert_eq!(base58(&[0,1]),"12");}
+    #[test] fn bounded_bytes() {
+        let raw=[3,0,0,0,0,128,255];
+        let mut reader=Reader {raw:&raw,offset:0,nodes:0};
+        assert_eq!(reader.value(&json!("bytes"),&json!({}),0).unwrap(),json!([0,128,255]));
+        assert_eq!(reader.offset,raw.len());
+        let mut short=Reader {raw:&raw[..6],offset:0,nodes:0};
+        assert!(short.value(&json!("bytes"),&json!({}),0).is_err());
+    }
     #[test] fn bad_boolean() {
         let mut r=Reader {raw:&[2],offset:0,nodes:0};
         assert!(r.value(&json!("bool"),&json!({}),0).is_err());

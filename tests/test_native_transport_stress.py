@@ -1,4 +1,4 @@
-"""UNEXECUTED opt-in LOOPBACK ONLY native socket tests, no external RPC.
+"""Opt-in LOOPBACK ONLY native socket tests, no external RPC.
 
 Default discovery skips these. Run on the monolith, not alongside production
 traffic. Creates only ephemeral local servers; no namespace/firewall changes.
@@ -18,6 +18,115 @@ ENABLED=os.environ.get('SOLANA_NATIVE_LOOPBACK_STRESS')=='1' and sys.platform=='
 
 @unittest.skipUnless(ENABLED,'Explicit monolith loopback stress and native rpc-engine required')
 class NativeTransportStress(unittest.IsolatedAsyncioTestCase):
+    async def test_python_and_native_bounded_blocks_preserve_ids_and_pacing(self):
+        import gzip
+        from unittest.mock import MagicMock,patch
+        from rpc_loopback_fixture import LocalRpcServer
+        from onchain_ingest import IndexRpc
+        from solana_rpc_compat import RustIndexRpc
+        inode=os.stat('/proc/self/ns/net').st_ino
+        rows=[{'jsonrpc':'2.0','id':2,'result':{'transactions':[],'blockhash':'second'}},
+              {'jsonrpc':'2.0','id':1,'result':{'transactions':[],'blockhash':'first'}}]
+        for backend in ('python','rust'):
+            for encoding in ('identity','gzip'):
+                for chunked in (False,True):
+                    with self.subTest(backend=backend,encoding=encoding,chunked=chunked):
+                        with LocalRpcServer() as server:
+                            body=json.dumps(rows).encode()
+                            server.script=[{'body':gzip.compress(body) if encoding=='gzip' else body,
+                                            'encoding':encoding,'chunked':chunked}]
+                            budget=MagicMock()
+                            rpc=(RustIndexRpc if backend=='rust' else IndexRpc)(
+                                {'url':server.url,'source_id':'fixture','allow_loopback_http':True,
+                                 'block_batch_size':2,'request_interval_seconds':.5},budget)
+                            try:
+                                with patch('solana_rpc_compat.check_boundary',return_value=inode):
+                                    result=await asyncio.to_thread(rpc.call_blocks,[5,6],{'commitment':'finalized'})
+                                self.assertEqual([item['blockhash'] for item in result],['first','second'])
+                                budget.reserve.assert_called_once_with(server.url,.5)
+                                self.assertEqual(rpc.requests,1)
+                                calls=server.requests[0]
+                                self.assertEqual([call['id'] for call in calls],[1,2])
+                                self.assertTrue(all(call['method']=='getBlock' for call in calls))
+                            finally:
+                                if backend=='rust':rpc.close()
+
+    async def test_recorded_event_bytes_survive_transport_indexer_and_storage(self):
+        import copy
+        import gzip
+        import hashlib
+        from pathlib import Path
+        import tempfile
+        import zlib
+        from unittest.mock import MagicMock,patch
+        from rpc_loopback_fixture import LocalRpcServer
+        from onchain_decode import Decoder
+        from onchain_ingest import IndexRpc,Ingester
+        from onchain_store import EventStore,canonical
+        from solana_rpc_compat import RustIndexRpc,extract_event_batch
+        from wallet_watch import MAINNET
+        root=Path(__file__).parent/'fixtures/onchain'
+        manifest=json.loads((root/'manifest.json').read_text())
+        inode=os.stat('/proc/self/ns/net').st_ino
+        policy={'storage_verified':True,'evidence':'Recorded fixture loopback regression only'}
+        for fixture in manifest['fixtures']:
+            packed=(root/fixture['file']).read_bytes()
+            self.assertEqual(hashlib.sha256(packed).hexdigest(),fixture['sha256'])
+            original=json.loads(packed)
+            slot=fixture['slot']
+            block={'blockTime':original.get('blockTime',fixture.get('block_time')),'blockhash':'fixture-block',
+                   'previousBlockhash':'fixture-parent','parentSlot':slot-1,
+                   'transactions':[original]}
+            before=canonical(original)
+            direct=Decoder('compare').transaction(original,slot,0,block['blockTime'])
+            self.assertNotIn('Unreviewed event layout/version',direct[1])
+            for backend in ('python','rust'):
+                for encoding in ('identity','gzip'):
+                    for chunked in (False,True):
+                        with self.subTest(fixture=fixture['file'],backend=backend,encoding=encoding,chunked=chunked):
+                            with LocalRpcServer() as server,tempfile.TemporaryDirectory() as directory:
+                                for result in (MAINNET,slot,[slot],block):
+                                    body=json.dumps({'jsonrpc':'2.0','id':1,'result':result}).encode()
+                                    server.script.append({'body':gzip.compress(body) if encoding=='gzip' else body,
+                                                          'encoding':encoding,'chunked':chunked})
+                                endpoint={'url':server.url,'allow_loopback_http':True,'source_id':'fixture'}
+                                client=(RustIndexRpc if backend=='rust' else IndexRpc)(endpoint,MagicMock())
+                                # Mock deployment probes, not transport or block/transaction decoding.
+                                # This test checks byte preservation, not source/deployment admission.
+                                client.supports_history_probe=False
+                                store=EventStore(Path(directory)/'index.sqlite',retain_blocks=True)
+                                store.register_source('fixture',policy)
+                                decoder=Decoder('compare')
+                                deployments={program:1 for program in decoder.specs}
+                                versions={program:[{'from_slot':slot,'through_slot':slot,
+                                    'deployment_slot':1,'idl_hash':spec['hash']}]
+                                    for program,spec in decoder.specs.items()}
+                                ingester=Ingester(store,[client],versions=versions,decoder=decoder)
+                                try:
+                                    with patch('solana_rpc_compat.check_boundary',return_value=inode),patch.object(ingester,'deployments',return_value=deployments):
+                                        await asyncio.to_thread(ingester.step,start=slot,count=1)
+                                finally:
+                                    if backend=='rust':client.close()
+                                with store.connect() as db:
+                                    saved=db.execute('SELECT raw,raw_hash FROM transactions').fetchone()
+                                    saved_block=db.execute('SELECT raw FROM raw_blocks').fetchone()[0]
+                                    self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0],len(direct[0]))
+                                restored=json.loads(zlib.decompress(saved[0]))
+                                self.assertEqual(canonical(restored),before)
+                                self.assertEqual(saved[1],hashlib.sha256(before.encode()).hexdigest())
+                                restored_block=json.loads(zlib.decompress(saved_block))
+                                restored_block.pop('_indexer_deployments')
+                                self.assertEqual(restored_block,block)
+                                self.assertEqual(Decoder('compare').transaction(restored,slot,0,block['blockTime']),direct)
+                                projection=extract_event_batch([copy.deepcopy(restored)],slot=slot,
+                                    block_time=block['blockTime'],source_id='fixture',backend='compare')
+                                self.assertEqual(bool(projection['issues']),bool(direct[1]))
+                                self.assertEqual(len(projection['rows']),0 if direct[1] else len(direct[0]))
+                                self.assertFalse(projection['market_eligible'])
+                                self.assertEqual(canonical(original),before)
+                                self.assertEqual(store.next_slot(),slot+1)
+                                self.assertEqual(len(server.requests),4)
+
     @unittest.skipUnless(NativeHttp is not None and hasattr(NativeHttp,'request_encoded_sync'),'Build native gzip transport methods')
     async def test_gzip_wire_transport_and_strict_decompression(self):
         import gzip

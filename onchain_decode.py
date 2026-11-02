@@ -9,9 +9,24 @@ import json
 from pathlib import Path
 from solders.pubkey import Pubkey
 from wallet_watch import decode58, SOL
+from onchain_routes import route_binding, event_binding, validate_route
 
 EVENT_IX = bytes.fromhex('e445a52e51cb9a1d')
 ROOT = Path(__file__).parent / 'vendor'
+
+# Explicit legacy wire variants, not defaults for arbitrary missing Borsh fields.
+# Older official IDLs omit these trailing OptionBool arguments. Retained successful
+# receipts also carry those shorter forms. None records absence, never false or a
+# claim about the program's execution defaults. All supplied bool bytes stay strict.
+EOF_FLAGS = {
+    'pump': {
+        'buy': {'track_volume', 'partial_fill'},
+        'buy_exact_sol_in': {'track_volume', 'partial_fill'},
+        'buy_v2': {'partial_fill'}, 'buy_exact_quote_in_v2': {'partial_fill'},
+        'buy_v3': {'partial_fill'}, 'buy_exact_quote_in_v3': {'partial_fill'},
+    },
+    'pump_amm': {'buy': {'track_volume'}, 'buy_exact_quote_in': {'track_volume'}},
+}
 
 
 def read_value(raw, kind, offset, types):
@@ -33,6 +48,12 @@ def read_value(raw, kind, offset, types):
             raise ValueError('Oversized string')
         value, end = take(size)
         return value.decode('utf8'), end
+    if kind == 'bytes':
+        size, offset = read_value(raw, 'u32', offset, types)
+        if size > 16384:
+            raise ValueError('Oversized bytes')
+        value, end = take(size)
+        return list(value), end
     if isinstance(kind, str) and kind[:1] in ('u', 'i') and kind[1:].isdigit():
         value, end = take(int(kind[1:]) // 8)
         return int.from_bytes(value, 'little', signed=kind[0] == 'i'), end
@@ -155,6 +176,7 @@ class Decoder:
             swaps = []
             emitted = set()
             supplements = set()
+            routes = {}
             for ordinal, ix in enumerate([root] + inner.get(outer, [])):
                 try:
                     program = ix.get('programId') or keys[ix['programIdIndex']]
@@ -178,13 +200,24 @@ class Decoder:
                             continue
                         names = [a['name'] for a in instruction['accounts']]
                         binding = dict(zip(names, accounts))
+                        binding = route_binding(program,instruction['name'],binding,accounts,len(names),parents,ordinal,
+                                                {value['venue']:key for key,value in self.specs.items()})
+                        if instruction['name'] == 'multi_hop_swap':
+                            routes[ordinal] = binding['_route_hops']
                         parents[height] = (program, instruction['name'], binding, ordinal, None)
-                        if instruction['name'].startswith(('buy', 'sell')):
+                        if instruction['name'].startswith(('buy', 'sell')) or (
+                            spec['venue'] == 'pump_amm' and instruction['name'] == 'boost_buy_and_burn'):
                             swaps.append(ordinal)
                         arguments, end = {}, 8
                         for argument in instruction['args']:
-                            # Official TRADE_V3 explicitly permits this trailing flag's omission.
-                            if end == len(raw) and instruction['name'] in ('buy_v3', 'buy_exact_quote_in_v3') and argument['name'] == 'partial_fill':
+                            optional=EOF_FLAGS[spec['venue']].get(instruction['name'],set())
+                            optional_type='OptionBool' if argument['name'] in optional else None
+                            # The pinned SDK's create_v2 docs explicitly mark these
+                            # trailing fields EOF-tolerant. Record absence, not defaults.
+                            if spec['venue']=='pump' and instruction['name']=='create_v2':
+                                optional_type={'creator_fee_bps':'OptionU64','is_holder_reward':'OptionBool'}.get(argument['name'])
+                            if (end == len(raw) and optional_type is not None
+                                and argument['type'] == {'defined': {'name': optional_type}}):
                                 arguments[argument['name']] = None
                             else:
                                 arguments[argument['name']], end = read_value(raw, argument['type'], end, spec['types'])
@@ -206,25 +239,55 @@ class Decoder:
                         issues.append(f'{event_name}: payload {len(raw)-16} bytes, pinned fields {end-16}, trailing {len(raw)-end}; program {program}')
                         raise ValueError('Unreviewed event layout/version')
                     event = self.normalize(spec, event_name, fields, parent, decimals)
-                    event.update(instruction_name=parent[1], instruction_args=parent[4], signature=signature, slot=slot, tx_index=tx_index,
+                    event.update(instruction_name=parent[1], instruction_args=parent[4],
+                                 omitted_instruction_args=[key for key,value in (parent[4] or {}).items() if value is None],
+                                 parent_instruction_index=parent[3],
+                                 signature=signature, slot=slot, tx_index=tx_index,
                                  outer_index=outer, event_index=ordinal, block_time=block_time,
                                  program=program, idl_hash=spec['hash'], event_name=event_name,
                                  transaction_fee_lamports=meta['fee'], raw_event=base64.b64encode(raw).decode())
                     events.append(event)
+                    event_key=((event['route_parent_instruction_index'],event['route_hop_index'])
+                               if 'route_hop_index' in event else parent[3])
                     if event['kind'] == 'swap' and event_name == 'PostCompleteBuyEvent':
-                        if parent[3] in supplements:
+                        if event_key in supplements:
                             raise ValueError('Duplicate post-completion event')
-                        supplements.add(parent[3])
+                        supplements.add(event_key)
                     elif event['kind'] == 'swap':
-                        if parent[3] in emitted:
+                        if event_key in emitted:
                             raise ValueError('Multiple trade events for one instruction')
-                        emitted.add(parent[3])
+                        emitted.add(event_key)
                 except (KeyError, ValueError, IndexError, TypeError, UnicodeError) as error:
                     issues.append(str(error))
             if not supplements.issubset(emitted):
                 issues.append('post-completion buy without primary trade event')
-            if set(swaps) != emitted:
+            if set(swaps) != {key for key in emitted if isinstance(key,int)}:
                 issues.append('trade instruction/event mismatch')
+            for route_id,hops in routes.items():
+                try:
+                    validate_route(hops,[event for event in events if event['outer_index']==outer],route_id)
+                except ValueError as error:
+                    issues.append(str(error))
+            boost_groups={}
+            for event in events:
+                if event['outer_index'] == outer and event['instruction_name'] == 'boost_buy_and_burn':
+                    boost_groups.setdefault(event['parent_instruction_index'],[]).append(event)
+            for boost in boost_groups.values():
+                # The pool trade and burn receipt describe the same protocol action.
+                buys=[event for event in boost if event['event_name'] == 'BuyEvent']
+                burns=[event for event in boost if event['event_name'] == 'BoostBuyAndBurnEvent']
+                if len(buys) != 1 or len(burns) != 1:
+                    issues.append('Missing or duplicate protocol buy/burn receipt')
+                else:
+                    buy,burn=buys[0],burns[0]
+                    f,g=buy['fields'],burn['fields']
+                    if (buy['pool'] != burn['pool'] or buy['mint'] != burn['mint']
+                        or f['timestamp'] != g['timestamp']
+                        or int(buy['base_units']) != g['base_amount_burned']
+                        or f['user_quote_amount_in'] != g['quote_amount_in_used']
+                        or f['pool_base_token_reserves']-int(buy['base_units']) != g['base_reserves_after']
+                        or f['pool_quote_token_reserves']+f['quote_amount_in_with_lp_fee'] != g['real_quote_reserves_after']):
+                        issues.append('Protocol buy/burn accounting mismatch')
         if events or issues:
             transfers, transfer_issues = self.transfers(tx, keys)
             issues.extend(transfer_issues)
@@ -250,12 +313,14 @@ class Decoder:
                     continue
                 try:
                     raw = decode58(ix['data'])
-                    if raw[0] not in (3, 12):
+                    fee_transfer=(program == 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+                                  and raw[:2] == b'\x1a\x01')
+                    if raw[0] not in (3, 12) and not fee_transfer:
                         if raw[0] == 26:
                             issues.append('Token-2022 transfer fee extension requires reviewed decoder')
                         continue
-                    checked = raw[0] == 12
-                    if len(raw) != (10 if checked else 9):
+                    checked = raw[0] == 12 or fee_transfer
+                    if len(raw) != (19 if fee_transfer else 10 if checked else 9):
                         raise ValueError('Unreviewed SPL transfer layout')
                     accounts = [keys[a] if isinstance(a, int) else a for a in ix['accounts']]
                     source, destination = accounts[0], accounts[2 if checked else 1]
@@ -263,37 +328,66 @@ class Decoder:
                                 if keys[account_index] in (source, destination)]
                     mints = {row['mint'] for row in matching}
                     digits = {row['uiTokenAmount']['decimals'] for row in matching}
-                    if len(mints) != 1 or len(digits) != 1:
-                        raise ValueError('SPL transfer identity unavailable')
-                    mint, decimals = next(iter(mints)), next(iter(digits))
-                    if checked and (accounts[1] != mint or raw[9] != decimals):
-                        raise ValueError('SPL checked transfer identity mismatch')
+                    if checked:
+                        # TransferChecked supplies the mint and decimals explicitly;
+                        # the successful token-program invocation checks both. Closed
+                        # temporary accounts need not appear in pre/post balances.
+                        mint,decimals=accounts[1],raw[10 if fee_transfer else 9]
+                        if not 0 <= decimals <= 18:
+                            raise ValueError('Unsupported SPL checked transfer decimals')
+                        if matching and (mints != {mint} or digits != {decimals}):
+                            raise ValueError('SPL checked transfer identity mismatch')
+                    else:
+                        if len(mints) != 1 or len(digits) != 1:
+                            raise ValueError('SPL transfer identity unavailable')
+                        mint, decimals = next(iter(mints)), next(iter(digits))
+                    amount=int.from_bytes(raw[2:10] if fee_transfer else raw[1:9],'little')
+                    fee=int.from_bytes(raw[11:19],'little') if fee_transfer else 0
+                    if fee > amount:
+                        raise ValueError('SPL transfer fee exceeds amount')
+                    fee_known=fee_transfer or program == 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
                     result.append({'outer_index': outer, 'instruction_index': index,
                                    'program': program, 'mint': mint, 'source': source,
                                    'destination': destination, 'decimals': decimals,
-                                   'amount_units': str(int.from_bytes(raw[1:9], 'little'))})
+                                   'self_transfer':source == destination,
+                                   'identity_basis':'checked_instruction' if checked else 'balance_metadata',
+                                   'amount_units':str(amount),'expected_fee_units':str(fee) if fee_known else None,
+                                   'debited_units':str(0 if source == destination else amount),
+                                   'credited_units':'0' if source == destination else str(amount-fee) if fee_known else None})
                 except (ValueError, KeyError, IndexError, TypeError) as error:
                     issues.append(str(error))
         return result, issues
 
     def normalize(self, spec, name, f, parent, decimals):
         _, instruction, binding, _, _ = parent
-        result = {'kind': 'lifecycle', 'fields': f, 'venue': spec['venue']}
+        binding, route = event_binding(spec,name,f,binding)
+        result = {'kind': 'lifecycle', 'fields': f, 'venue': spec['venue'], **route}
         if name not in ('TradeEvent', 'BuyEvent', 'SellEvent', 'PostCompleteBuyEvent'):
             mint = f.get('mint', f.get('base_mint'))
             bound_mint = binding.get('mint', binding.get('base_mint'))
             if mint and bound_mint and mint != bound_mint:
                 raise ValueError('Lifecycle mint identity mismatch')
+            if name == 'BoostBuyAndBurnEvent' and (
+                instruction != 'boost_buy_and_burn' or f['pool'] != binding.get('pool')
+                or f['authority'] != binding.get('authority')):
+                raise ValueError('Protocol burn identity mismatch')
             result.update(mint=mint, pool=f.get('pool', f.get('bonding_curve')),
                           wallet=f.get('user', f.get('creator')))
             return result
         buy = f['is_buy'] if name == 'TradeEvent' else name in ('BuyEvent', 'PostCompleteBuyEvent')
-        if not instruction.startswith('buy' if buy else 'sell'):
+        protocol_buy=(spec['venue'] == 'pump_amm' and instruction == 'boost_buy_and_burn'
+                      and name == 'BuyEvent')
+        if not route and not protocol_buy and not instruction.startswith('buy' if buy else 'sell'):
             raise ValueError('Trade direction/instruction mismatch')
         mint = binding.get('mint', binding.get('base_mint'))
         quote = binding.get('quote_mint', SOL)
         pool = binding.get('pool', binding.get('bonding_curve'))
-        user = binding.get('user')
+        user = binding.get('boost_vault_authority') if protocol_buy else binding.get('user')
+        if protocol_buy:
+            authority=str(Pubkey.find_program_address(
+                [b'boost_vault',bytes(Pubkey.from_string(pool))],Pubkey.from_string(parent[0]))[0])
+            if user != authority or f['user_quote_token_account'] != binding.get('boost_vault'):
+                raise ValueError('Protocol boost vault identity mismatch')
         if mint is None or pool is None or user is None or mint == quote:
             raise ValueError('Missing trade identity')
         if f.get('mint', mint) != mint or f.get('pool', pool) != pool or f['user'] != user:
@@ -306,7 +400,7 @@ class Decoder:
             if event_quote != quote:
                 raise ValueError('Quote identity mismatch')
             if name == 'PostCompleteBuyEvent':
-                if instruction not in ('buy_v3', 'buy_exact_quote_in_v3') or f['bonding_curve'] != pool:
+                if (not route and instruction not in ('buy_v3', 'buy_exact_quote_in_v3')) or f['bonding_curve'] != pool:
                     raise ValueError('Unbound post-completion trade')
                 amount, quote_amount = f['base_out'], f['quote_in']
             else:
@@ -319,12 +413,23 @@ class Decoder:
             raise ValueError('Mint decimals unavailable from transaction')
         if min(amount, quote_amount) <= 0:
             raise ValueError('Nonpositive swap amounts')
+        if quote == SOL and f.get('quote_transfer_fee', 0) != 0:
+            raise ValueError('Native SOL cannot charge a Token-2022 quote transfer fee')
         fees = {k: f[k] for k in ('fee', 'creator_fee', 'lp_fee', 'protocol_fee',
-                                 'coin_creator_fee', 'cashback', 'buyback_fee', 'holder_rewards') if k in f}
+                                 'coin_creator_fee', 'cashback', 'buyback_fee', 'holder_rewards',
+                                 'quote_transfer_fee') if k in f}
         result.update(kind='swap', mint=mint, quote_mint=quote, pool=pool, wallet=user,
                       direction='buy' if buy else 'sell', base_units=str(amount),
                       quote_units=str(quote_amount), base_decimals=decimals[mint],
                       quote_decimals=9 if quote == SOL else decimals[quote], fees=fees,
                       reserves={k: v for k, v in f.items() if 'reserves' in k},
                       amount_basis='program trade event; fees separate; not net wallet delta')
+        if protocol_buy:
+            result.update(wallet=None,protocol_actor=user,actor_kind='protocol_buy_and_burn')
+        if route:
+            result['route_user']=user
+            wallet_leg=(route['route_hop_index'] == route['route_hop_count']-1 if buy
+                        else route['route_hop_index'] == 0)
+            if not wallet_leg:
+                result.update(wallet=None,actor_kind='routed_intermediate')
         return result

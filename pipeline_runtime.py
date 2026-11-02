@@ -65,6 +65,7 @@ def resolve_indexer(config,env):
         profile=endpoint.get('policy',{}).get('profile',{}).get('kind')
         if endpoint.get('source_id','').startswith('builtin-') and profile in ('public_mainnet','selfhosted'):
             endpoint.setdefault('request_interval_seconds',.5)
+            endpoint.setdefault('block_batch_size',2)
     # Literal configured endpoints retain their reviewed identity. The environment
     # is consumed only where the config explicitly requests it.
     return config

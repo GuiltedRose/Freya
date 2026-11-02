@@ -133,19 +133,21 @@ metrics. Learning parameters and risk limits are unchanged.
 **Data-source audit:** Pump-host HTTP collectors are currently disabled: their
 web access was not verified as permitted, and the official Developer API terms
 prohibit AI training/evaluation. Existing histories are retained pending rights
-review; default online market collection cannot resume without a permitted
-replacement. Saved-wallet Solana RPC remains available with shared rate limits.
-Live entries additionally require ten consecutive successful challenger promotions.
+review. The replacement uses finalized native Solana RPC with source permissions
+and shared rate limits. The optional qualified live mode retains its ten-consecutive-
+promotion gate; ingestion does not qualify models or authorize live orders.
 See [audit evidence and source inventory](research/learning_source_audit_2026-10-30.md).
 
 For Nix development, separate server services and current throughput limits, see
 the [on-chain deployment guide](docs/onchain_deployment.md).
 
 An opt-in [local on-chain indexer](research/onchain_indexer.md) now provides
-durable finalized-block ingestion and shared paper/live adapters. Current real
-fixtures expose unresolved event layouts; no complete real market window or new
-NN dataset is approved yet. Existing data-source and trading gates remain closed
-where required evidence is unavailable.
+durable finalized-block ingestion and shared paper/live adapters. The
+[ingestion repair](docs/ingestion_repair_20261102.md) pins the published SDK event
+contract, including quote transfer fees and multi-hop receipts. Current replay and
+mainnet samples decode correctly. Sustained public-RPC capacity and complete real
+market windows remain separate acceptance requirements; missing evidence still
+blocks entries and learning eligibility.
 
 ## Getting started
 

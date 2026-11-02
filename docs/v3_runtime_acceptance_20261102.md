@@ -1,5 +1,10 @@
 # V3 runtime acceptance: blocked on deployed event contract
 
+**Historical report:** the later [ingestion repair](ingestion_repair_20261102.md)
+identifies the missing published SDK field and resolves the serialization mismatch.
+The earlier findings and test counts below are retained unchanged as historical
+evidence; they do not describe the current decoder's admission results.
+
 Production readiness means reliable end-to-end paper operation, using the shared
 strategy, models and rules. This acceptance has **not passed**. No profitability
 or funded-live claim is made. Full evidence is in
@@ -83,3 +88,35 @@ market input remains blocked. This is a component failure, not an absence of a
 natural trading signal. Real paper lifecycle, new learning outcomes, sustained
 restart acceptance and complete one-command runtime acceptance remain unverified.
 No funded-live activation is needed for that paper acceptance.
+
+## Indexer and compatibility byte trace
+
+A subsequent regression specifically checked whether our indexer or compatibility
+layer introduces the bytes. Both hash-pinned finalized fixtures were served through
+real loopback HTTP sockets, using Python and Rust clients, identity and gzip bodies,
+and fixed-length and chunked transfer framing: 16 combinations, 64 local requests.
+The test passed. No external RPC or operator state was used.
+
+The response passed through the real JSON-RPC parser, `Ingester.step`, comparison
+decoder and `EventStore` canonical JSON/zlib persistence. Stored transaction objects
+and their hashes matched the fixture inputs, including instruction data and log
+strings. Stored block contents matched except for the intentional top-level
+`_indexer_deployments` audit metadata. Direct decoding before ingestion and decoding
+after storage returned identical events/issues. The compact compatibility projection
+also retained rejection and produced no eligible rows. Deployment probes were mocked;
+this tests byte preservation, not chain continuity or deployment/schema admission.
+
+Static tracing confirms the polling indexer requests full JSON blocks and calls
+`Decoder.transaction` directly. Native HTTP returns the original response body
+(base64-wrapped only for gzip transport); Python validates/decompresses that body
+before parsing JSON. Neither path inserts event fields. The separate binary-ingest
+adapter is not called by this finalized JSON polling path. Event decoding starts
+after the eight-byte CPI tag and eight-byte event discriminator in both Borsh
+backends; their returned offsets and field values agree.
+
+This rules out byte insertion or alteration in the exercised transport/index/storage
+paths for these receipts. It does not prove that every deployed event has the pinned
+schema, or establish the unknown bytes' meaning. The unresolved boundary remains
+the event serialization contract versus decoder interpretation, not a demonstrated
+transport/indexer corruption. Evidence is recorded separately in
+[the byte-trace report](validation_2026-11-02_indexer_trace.json).

@@ -52,11 +52,12 @@ def encode(kind, value, types):
     raise ValueError(kind)
 
 
-def transaction(venue='pump', buy=True, amount=1_000_000, quote=2_000_000_000, signature='synthetic', name=None):
+def transaction(venue='pump', buy=True, amount=1_000_000, quote=2_000_000_000, signature='synthetic', name=None, instruction_name=None):
     decoder = Decoder()
     program, spec = next((p, s) for p, s in decoder.specs.items() if s['venue'] == venue)
-    instruction_name = 'buy' if buy else 'sell'
-    if name:
+    requested_instruction=instruction_name
+    instruction_name = instruction_name or ('buy' if buy else 'sell')
+    if name and requested_instruction is None:
         instruction_name = {'CreateEvent': 'create', 'CreatePoolEvent': 'create_pool',
                             'CompletePumpAmmMigrationEvent': 'migrate', 'PostCompleteBuyEvent': 'buy_v3'}[name]
     ix = next(i for i in spec['instructions'].values() if i['name'] == instruction_name)
@@ -116,7 +117,54 @@ class IndexerTests(unittest.TestCase):
             events.extend(e); issues.extend(errors)
         return slot, b, events, issues, list(enumerate(txs or []))
 
-    def test_real_finalized_fixtures_are_hash_verified_and_unknown_tail_quarantined(self):
+    def recorded(self,name):
+        root=Path(__file__).parent/'fixtures/onchain'
+        fixture=next(row for row in json.loads((root/'manifest.json').read_text())['fixtures'] if row['file']==name+'.json')
+        return json.loads((root/fixture['file']).read_text()),fixture
+
+    def test_multihop_has_one_bound_receipt_per_venue_without_middle_wallet_buys(self):
+        tx,fixture=self.recorded('multihop')
+        events,issues=self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])
+        self.assertEqual(issues,[])
+        trades=[event for event in events if 'route_hop_index' in event and event['kind']=='swap']
+        self.assertEqual(sorted(event['route_hop_index'] for event in trades),list(range(3)))
+        self.assertEqual(len([event for event in trades if event['wallet'] is not None]),1)
+        self.assertTrue(all(event.get('actor_kind')=='routed_intermediate' for event in trades if event['wallet'] is None))
+        target=trades[0]
+        from wallet_watch import decode58
+        group=next(group for group in tx['meta']['innerInstructions'] if group['index']==target['outer_index'])
+        group['instructions'][:]=[ix for ix in group['instructions'] if base64.b64encode(decode58(ix.get('data','1'))).decode()!=target['raw_event']]
+        self.assertIn('Missing or duplicate route trade event',self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])[1])
+
+    def test_route_rejects_noncanonical_venue(self):
+        tx,fixture=self.recorded('multihop')
+        from wallet_watch import decode58
+        spec=next(spec for spec in self.decoder.specs.values() if spec['venue']=='pump_amm')
+        disc=next(disc for disc,ix in spec['instructions'].items() if ix['name']=='multi_hop_swap')
+        for group in tx['meta']['innerInstructions']:
+            for ix in group['instructions']:
+                if decode58(ix.get('data','1'))[:8]==disc:
+                    ix['accounts'][18]=ix['accounts'][0]
+        self.assertIn('Route venue is not the canonical pool or curve',self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])[1])
+
+    def test_transfer_fee_extension_has_explicit_checked_fee_and_strict_bounds(self):
+        tx,fixture=self.recorded('token2022_fee')
+        events,issues=self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])
+        self.assertEqual(issues,[])
+        from wallet_watch import decode58
+        instruction=next(ix for group in tx['meta']['innerInstructions'] for ix in group['instructions']
+                         if decode58(ix.get('data','1'))[:2]==b'\x1a\x01')
+        raw=decode58(instruction['data'])
+        self.assertEqual(len(raw),19)
+        self.assertTrue(all(row['credited_units']=='0' for event in events
+                            for row in event['transaction_token_transfers'] if row['self_transfer']))
+        for invalid,reason in ((raw[:-1],'Unreviewed SPL transfer layout'),
+                               (raw[:11]+(int.from_bytes(raw[2:10],'little')+1).to_bytes(8,'little'),'SPL transfer fee exceeds amount'),
+                               (b'\x1a\x04','Token-2022 transfer fee extension requires reviewed decoder')):
+            instruction['data']=encode58(invalid)
+            self.assertIn(reason,self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])[1])
+
+    def test_real_finalized_fixtures_are_hash_verified_and_sdk_event_layout_matches(self):
         root = Path(__file__).parent/'fixtures/onchain'
         manifest = json.loads((root/'manifest.json').read_text())
         for item in manifest['fixtures']:
@@ -124,9 +172,110 @@ class IndexerTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(raw).hexdigest(), item['sha256'])
             tx = json.loads(raw)
             self.assertEqual(tx['transaction']['signatures'][0], item['signature'])
-            events, issues = self.decoder.transaction(tx, item['slot'], item['transaction_index'], tx['blockTime'])
-            self.assertFalse(events)
-            self.assertIn('Unreviewed event layout/version', issues)
+            events, issues = self.decoder.transaction(tx, item['slot'], item['transaction_index'], tx.get('blockTime',item.get('block_time')))
+            self.assertNotIn('Unreviewed event layout/version', issues)
+            swaps=[event for event in events if event['kind']=='swap']
+            self.assertTrue(swaps)
+            self.assertEqual(swaps[0]['fees']['quote_transfer_fee'],0)
+
+    def test_legacy_eof_flags_preserve_absence_and_reject_partial_required_args(self):
+        from wallet_watch import decode58
+        from onchain_decode import EOF_FLAGS
+        for venue,names in EOF_FLAGS.items():
+            for name in names:
+                original=transaction(venue,instruction_name=name)
+                raw=decode58(original['transaction']['message']['instructions'][0]['data'])
+                for length in range(24,len(raw)+1):
+                    tx=copy.deepcopy(original)
+                    tx['transaction']['message']['instructions'][0]['data']=encode58(raw[:length])
+                    events,issues=self.decoder.transaction(tx,1,0,100)
+                    self.assertEqual(issues,[],(venue,name,length))
+                    omitted=events[0]['omitted_instruction_args']
+                    self.assertEqual(len(omitted),len(raw)-length)
+                    self.assertTrue(all(events[0]['instruction_args'][key] is None for key in omitted))
+                for malformed in (raw[:23],raw[:24]+b'\2',raw+bytes(8)):
+                    tx=copy.deepcopy(original)
+                    tx['transaction']['message']['instructions'][0]['data']=encode58(malformed)
+                    self.assertTrue(self.decoder.transaction(tx,1,0,100)[1])
+
+    def test_protocol_buy_burn_is_accounted_without_a_wallet_lead(self):
+        tx=json.loads((Path(__file__).parent/'fixtures/onchain/protocol_buy_burn.json').read_text())
+        manifest=json.loads((Path(__file__).parent/'fixtures/onchain/manifest.json').read_text())
+        fixture=next(row for row in manifest['fixtures'] if row['file']=='protocol_buy_burn.json')
+        events,issues=self.decoder.transaction(tx,fixture['slot'],0,fixture['block_time'])
+        self.assertEqual(issues,[])
+        swap=next(event for event in events if event['kind']=='swap')
+        self.assertEqual(swap['actor_kind'],'protocol_buy_and_burn')
+        self.assertIsNone(swap['wallet'])
+        self.assertTrue(swap['protocol_actor'])
+        # An authenticated-looking buy cannot omit its paired burn receipt.
+        target=next(event for event in events if event['event_name']=='BoostBuyAndBurnEvent')
+        from wallet_watch import decode58
+        inner=next(group['instructions'] for group in tx['meta']['innerInstructions'] if group['index']==target['outer_index'])
+        inner[:]=[ix for ix in inner if base64.b64encode(decode58(ix.get('data','1'))).decode()!=target['raw_event']]
+        self.assertIn('Missing or duplicate protocol buy/burn receipt',self.decoder.transaction(tx,fixture['slot'],0,fixture['block_time'])[1])
+
+    def test_closed_wsol_checked_identity_does_not_invent_wallet_movement(self):
+        root=Path(__file__).parent/'fixtures/onchain'
+        fixture=next(row for row in json.loads((root/'manifest.json').read_text())['fixtures']
+                     if row['file']=='closed_wsol.json')
+        tx=json.loads((root/fixture['file']).read_text())
+        events,issues=self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])
+        self.assertEqual(issues,[])
+        transfers=events[0]['transaction_token_transfers']
+        self.assertTrue(any(row['self_transfer'] and row['mint']==SOL
+                            and row['identity_basis']=='checked_instruction' for row in transfers))
+        # Removing the checked mint/decimals leaves an unsupported unchecked
+        # transfer: the missing pre/post balance identity must still fail closed.
+        from wallet_watch import decode58
+        changed=False
+        for group in tx['meta']['innerInstructions']:
+            for ix in group['instructions']:
+                raw=decode58(ix.get('data','1'))
+                if raw[:1]==b'\x0c' and len(ix.get('accounts',[]))>=3 and ix['accounts'][0]==ix['accounts'][2]:
+                    ix['data']=encode58(b'\x03'+raw[1:9])
+                    ix['accounts']=[ix['accounts'][0],ix['accounts'][2],*ix['accounts'][3:]]
+                    changed=True
+                    break
+            if changed:break
+        self.assertTrue(changed)
+        self.assertIn('SPL transfer identity unavailable',self.decoder.transaction(tx,fixture['slot'],fixture['transaction_index'],fixture['block_time'])[1])
+
+    def test_documented_creation_eof_suffix_keeps_required_fields_strict(self):
+        from wallet_watch import decode58
+        original=transaction(name='CreateEvent',instruction_name='create_v2')
+        raw=decode58(original['transaction']['message']['instructions'][0]['data'])
+        for removed,missing in ((1,['is_holder_reward']),(9,['creator_fee_bps','is_holder_reward'])):
+            tx=copy.deepcopy(original)
+            tx['transaction']['message']['instructions'][0]['data']=encode58(raw[:-removed])
+            events,issues=self.decoder.transaction(tx,1,0,100)
+            self.assertEqual(issues,[])
+            self.assertEqual(events[0]['omitted_instruction_args'],missing)
+        for removed in (2,10):
+            tx=copy.deepcopy(original)
+            tx['transaction']['message']['instructions'][0]['data']=encode58(raw[:-removed])
+            self.assertIn('Truncated Borsh field',self.decoder.transaction(tx,1,0,100)[1])
+
+    def test_unpublished_event_tail_is_still_quarantined(self):
+        for venue in ('pump','pump_amm'):
+            tx=transaction(venue)
+            ix=tx['meta']['innerInstructions'][0]['instructions'][0]
+            from wallet_watch import decode58
+            ix['data']=encode58(decode58(ix['data'])+bytes(8))
+            events,issues=self.decoder.transaction(tx,1,0,100)
+            self.assertEqual(events,[])
+            self.assertIn('Unreviewed event layout/version',issues)
+
+    def test_sol_transfer_fee_is_not_silently_accepted(self):
+        for venue in ('pump','pump_amm'):
+            tx=transaction(venue)
+            ix=tx['meta']['innerInstructions'][0]['instructions'][0]
+            from wallet_watch import decode58
+            raw=decode58(ix['data'])
+            ix['data']=encode58(raw[:-8]+(1).to_bytes(8,'little'))
+            events,issues=self.decoder.transaction(tx,1,0,100)
+            self.assertEqual(events,[])
+            self.assertIn('Native SOL cannot charge a Token-2022 quote transfer fee',issues)
 
     def test_curve_and_amm_direction_amounts_fees(self):
         for venue in ('pump', 'pump_amm'):

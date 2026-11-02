@@ -7346,6 +7346,11 @@
       "code": 6087,
       "name": "SelfTransferNotAllowed",
       "msg": "A transfer's source is its destination and the signer does not own it"
+    },
+    {
+      "code": 6088,
+      "name": "QuoteMintNotWritable",
+      "msg": "quote_mint must be writable for a quote with a Token-2022 transfer fee: its withheld fees are harvested to the mint"
     }
   ],
   "types": [
@@ -7695,6 +7700,10 @@
           },
           {
             "name": "creator_fee_unclaimed",
+            "type": "u64"
+          },
+          {
+            "name": "quote_transfer_fee",
             "type": "u64"
           }
         ]
@@ -8047,6 +8056,10 @@
           {
             "name": "user_pool_token_account",
             "type": "pubkey"
+          },
+          {
+            "name": "quote_transfer_fee",
+            "type": "u64"
           }
         ]
       }
@@ -8710,6 +8723,10 @@
           {
             "name": "creator_fee_unclaimed",
             "type": "u64"
+          },
+          {
+            "name": "quote_transfer_fee",
+            "type": "u64"
           }
         ]
       }
@@ -9117,6 +9134,10 @@
           {
             "name": "user_pool_token_account",
             "type": "pubkey"
+          },
+          {
+            "name": "quote_transfer_fee",
+            "type": "u64"
           }
         ]
       }

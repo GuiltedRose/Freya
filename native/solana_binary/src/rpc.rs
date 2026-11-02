@@ -54,6 +54,17 @@ fn request(method: &str, params: &str) -> PyResult<String> {
 
 type HttpReply = (u16,String,String);
 type EncodedReply = (u16,String,String,String);
+fn block_batch(params:&str)->PyResult<String> {
+    if params.len()>65536 {return Err(bad("block batch request too large"));}
+    let items:Vec<serde_json::Value>=serde_json::from_str(params).map_err(|_|bad("invalid block batch params"))?;
+    if items.is_empty() || items.len()>2 {return Err(bad("block batch must contain one or two calls"));}
+    let mut requests=Vec::new();
+    for (index,params) in items.into_iter().enumerate() {
+        if !params.is_array() {return Err(bad("block params must be array"));}
+        requests.push(serde_json::json!({"jsonrpc":"2.0","id":index+1,"method":"getBlock","params":params}));
+    }
+    Ok(serde_json::Value::Array(requests).to_string())
+}
 #[pyclass]
 struct NativeHttp {
     client: std::sync::Mutex<Option<reqwest::Client>>, endpoint: reqwest::Url,
@@ -61,8 +72,10 @@ struct NativeHttp {
 }
 impl NativeHttp {
     fn operation(&self,method:&str,params:&str,compressed:bool)->PyResult<impl std::future::Future<Output=PyResult<EncodedReply>>+Send+'static> {
+        self.operation_body(request(method,params)?,compressed)
+    }
+    fn operation_body(&self,body:String,compressed:bool)->PyResult<impl std::future::Future<Output=PyResult<EncodedReply>>+Send+'static> {
         boundary(self.inode)?;
-        let body=request(method,params)?;
         let client=self.client.lock().map_err(|_|offline())?.as_ref().ok_or_else(offline)?.clone();
         let endpoint=self.endpoint.clone(); let mut stop=self.stop.subscribe();
         if *stop.borrow() {return Err(offline());}
@@ -131,6 +144,11 @@ impl NativeHttp {
     fn request_encoded_sync(&self,py:Python<'_>,method:&str,params:&str)->PyResult<EncodedReply> {
         if tokio::runtime::Handle::try_current().is_ok() {return Err(PyRuntimeError::new_err("blocking RPC inside Tokio is forbidden"));}
         let operation=self.operation(method,params,true)?;
+        py.allow_threads(move ||pyo3_async_runtimes::tokio::get_runtime().block_on(operation))
+    }
+    fn request_blocks_encoded_sync(&self,py:Python<'_>,params:&str)->PyResult<EncodedReply> {
+        if tokio::runtime::Handle::try_current().is_ok() {return Err(PyRuntimeError::new_err("blocking RPC inside Tokio is forbidden"));}
+        let operation=self.operation_body(block_batch(params)?,true)?;
         py.allow_threads(move ||pyo3_async_runtimes::tokio::get_runtime().block_on(operation))
     }
     fn close(&self)->PyResult<()> {
@@ -300,6 +318,17 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn bounded_block_batch_is_read_only() {
+        let body=block_batch("[[10,{}],[11,{}]]").unwrap();
+        let calls:serde_json::Value=serde_json::from_str(&body).unwrap();
+        assert_eq!(calls[0]["method"],"getBlock");
+        assert_eq!(calls[1]["method"],"getBlock");
+        assert_eq!(calls[0]["id"],1);
+        assert_eq!(calls[1]["id"],2);
+        for invalid in ["[]","[[],[],[]]","[null]","[{\"method\":\"sendTransaction\"}]"] {
+            assert!(block_batch(invalid).is_err());
+        }
+    }
     #[test] fn read_only_requests() {
         assert!(request("sendTransaction","[]").is_err());
         assert!(request("getSlot","{}").is_err());

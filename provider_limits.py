@@ -81,6 +81,14 @@ class ProviderBudget:
                     (host,row[0],max(row[1],self.clock()+wait),attempts,int(status in (401,403) or row[3])))
         finally:db.close()
 
+    def cooldown_remaining(self,url):
+        """Observe the shared deadline without clearing a denial or cooldown."""
+        db=self.connect()
+        try:
+            row=db.execute('SELECT blocked FROM providers WHERE host=?',(self.key(url),)).fetchone()
+            return max(0,row[0]-self.clock()) if row else 0
+        finally:db.close()
+
     def success(self,url):
         db=self.connect()
         try:

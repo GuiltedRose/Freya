@@ -2566,14 +2566,14 @@
         "- floor(a/b) = a / b (integer division)",
         "- ceil(a/b) = (a + b - 1) / b",
         "",
-        "SOL → tokens quote",
+        "SOL \u2192 tokens quote",
         "To calculate tokens_out for a given spendable_sol_in:",
         "1. net_sol = floor(spendable_sol_in * 10_000 / (10_000 + total_fee_bps))",
         "2. fees = ceil(net_sol * protocol_fee_bps / 10_000) + ceil(net_sol * creator_fee_bps / 10_000) (creator_fee_bps is 0 if no creator)",
         "3. if net_sol + fees > spendable_sol_in: net_sol = net_sol - (net_sol + fees - spendable_sol_in)",
         "4. tokens_out = floor((net_sol - 1) * virtual_token_reserves / (virtual_sol_reserves + net_sol - 1))",
         "",
-        "Reverse quote (tokens → SOL)",
+        "Reverse quote (tokens \u2192 SOL)",
         "To calculate spendable_sol_in for a desired number of tokens:",
         "1. net_sol = ceil(tokens * virtual_sol_reserves / (virtual_token_reserves - tokens)) + 1",
         "2. spendable_sol_in = ceil(net_sol * (10_000 + total_fee_bps) / 10_000)",
@@ -5282,22 +5282,30 @@
         "mint Q, an optional fifth account, Q's own pump `bonding-curve` PDA, admits a pump coin as",
         "the quote (`InvalidQuoteBondingCurve` if it is not that PDA; missing keeps",
         "`UnsupportedQuoteMint`): the new curve's depth, Q's depth plus one, must not exceed",
-        "`Global.max_curve_depth` (`CurveDepthExceeded`; 0 disables the path, 1 admits children of",
-        "depth-0 coins only, up to 5 planned), and Q's curve must not be mayhem mode; a depth-0 Q",
-        "must itself be quoted in SOL, a `Global`-whitelisted mint or a quote-control mint",
+        "`Global.max_curve_depth` or the program's cap of 5 (`CurveDepthExceeded`; 0 disables the",
+        "path, 1 admits children of depth-0 coins only), and Q's curve must not be mayhem mode",
         "(`QuoteBondingCurveNotEligible`). The new curve's virtual quote reserves are then derived",
-        "from Q's live price — the seed a fresh curve in Q's own quote would get for a depth-0 Q, or",
-        "Q's own stored `initial_virtual_quote_reserves` for a deeper Q (so every hop below Q is",
-        "pinned at its creation price and only Q is read), times Q's curve `virtual_token_reserves`",
-        "over `virtual_quote_reserves` while Q's curve trades, or times Q's canonical pump-amm pool",
-        "base vault balance over its quote vault balance plus `Pool.virtual_quote_reserves` once it is",
-        "migrated (a complete Q not yet migrated fails `QuoteCurveAwaitingMigration`);",
-        "a migrated Q requires accounts six to eight: the pool (index 0 under pump's",
-        "`pool-authority` PDA for Q, quote seed WSOL for a SOL-quoted Q) and its base and quote",
-        "vaults (`QuotePoolAccountsRequired`, `QuotePoolNotFound`, `InvalidQuotePool`). The derived",
-        "value must be at least 1 and its graduation raise at most Q's mint supply",
-        "(`QuoteReservesOutOfRange`); the new curve stores `depth = Q.depth + 1` and, like a",
-        "quote-control coin, cannot be mayhem mode. The Token-2022",
+        "from the live reserves of every coin on Q's quote chain, Q down to its depth-0 root R (Q",
+        "itself at depth 1), whose own quote must be SOL, a `Global`-whitelisted mint or a",
+        "quote-control mint (`QuoteBondingCurveNotEligible`): the graduation raise of a Target, the",
+        "seed a fresh curve in R's quote would get today, is bought on R's constant product, the R",
+        "tokens that returns are bought on the next coin up, and so on to Q; the Q tokens the last",
+        "buy returns are the new curve's graduation raise and its seed is that raise scaled back by",
+        "the curve's raise ratio. Each coin is priced over its curve `virtual_token_reserves` and",
+        "`virtual_quote_reserves` while its curve trades, a buy past its real token reserves",
+        "completing the curve at the remainder's price and continuing in the pool the migration",
+        "would create (the migration deposit against the raise, as `buy_v3` does), or over its",
+        "canonical pump-amm pool base vault balance and its quote vault balance plus",
+        "`Pool.virtual_quote_reserves` once it is migrated (a complete coin not yet migrated fails",
+        "`QuoteCurveAwaitingMigration`). The chain",
+        "follows Q's group: one group per coin below Q, nearest first, each the coin's",
+        "`bonding-curve` PDA alone while it trades or that PDA followed by its pool (index 0 under",
+        "pump's `pool-authority` PDA for the coin, quote seed WSOL for a SOL-quoted coin) and the",
+        "pool's base and quote vaults once migrated, Q's own pool accounts being the sixth to",
+        "eighth (`QuoteChainAccountsRequired`, `QuotePoolAccountsRequired`, `QuotePoolNotFound`,",
+        "`InvalidQuotePool`). The derived value must be at least 1 (`QuoteReservesOutOfRange`); each",
+        "buy returns less than that coin's token side, so there is no supply bound. The new curve",
+        "stores `depth = Q.depth + 1` and, like a quote-control coin, cannot be mayhem mode. The Token-2022",
         "native mint is rejected, and a Token-2022 quote mint may only carry the xStock operable",
         "extension set (metadata pointer/metadata, permanent delegate, initialized default account",
         "state, scaled UI amount, pausable, confidential-transfer mint, and a transfer hook with no",
@@ -13183,12 +13191,12 @@
     {
       "code": 6100,
       "name": "QuoteBondingCurveNotEligible",
-      "msg": "Quote bonding curve is not eligible as a quote: mayhem mode, or a depth-0 coin whose own quote is not listed"
+      "msg": "Quote bonding curve is not eligible as a quote: mayhem mode, or the chain's depth-0 root is quoted in a mint no list admits"
     },
     {
       "code": 6101,
       "name": "QuotePoolAccountsRequired",
-      "msg": "Quote bonding curve has migrated: pool and vault remaining accounts are required"
+      "msg": "A quote-chain bonding curve has migrated: its pool and vault remaining accounts are required"
     },
     {
       "code": 6102,
@@ -13203,12 +13211,12 @@
     {
       "code": 6104,
       "name": "QuoteReservesOutOfRange",
-      "msg": "Derived quote reserves are zero or their graduation raise exceeds the quote mint supply"
+      "msg": "Derived quote reserves are zero"
     },
     {
       "code": 6105,
       "name": "CurveDepthExceeded",
-      "msg": "The new curve's depth (quote coin depth plus one) exceeds Global.max_curve_depth"
+      "msg": "The new curve's depth (quote coin depth plus one) exceeds Global.max_curve_depth or the program's cap of 5"
     },
     {
       "code": 6106,
@@ -13218,7 +13226,22 @@
     {
       "code": 6107,
       "name": "QuoteCurveAwaitingMigration",
-      "msg": "The quote coin's curve is complete but not yet migrated; retry once migrate_v2 creates its pool"
+      "msg": "A quote-chain coin's curve is complete but not yet migrated; retry once migrate_v2 creates its pool"
+    },
+    {
+      "code": 6108,
+      "name": "MultiHopMayhemCurveNotSupported",
+      "msg": "multi-hop: mayhem-mode curves are not routable; use the v2 instructions"
+    },
+    {
+      "code": 6109,
+      "name": "QuoteChainAccountsRequired",
+      "msg": "The quote coin is nested: a bonding curve remaining account is required for every coin on its quote chain down to the depth-0 root"
+    },
+    {
+      "code": 6110,
+      "name": "QuoteMintNotWritable",
+      "msg": "quote_mint must be writable for a quote with a Token-2022 transfer fee: its withheld fees are harvested to the mint"
     }
   ],
   "types": [
@@ -14888,6 +14911,10 @@
           },
           {
             "name": "creator_fee_unclaimed",
+            "type": "u64"
+          },
+          {
+            "name": "quote_transfer_fee",
             "type": "u64"
           }
         ]
