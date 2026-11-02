@@ -34,14 +34,45 @@ file explicitly; none of these commands updates it:
 ```bash
 nix --extra-experimental-features 'nix-command flakes' run \
   --reference-lock-file ./flake.lock --no-write-lock-file \
-  .#paper -- --prepare-config
+  .#paper -- --configure
 ```
 
-This creates `onchain_pipeline.json` and `learning_pipeline.json` with mode 0600,
-only if each file is absent. Existing files are preserved. Templates are deliberately
-unapproved, never activated automatically. New `.env.example` path settings are
+The interactive wizard gathers explicit source, oracle, IDL-compatibility and ledger
+provenance evidence. It uses the existing paced, read-only native RPC client to
+discover mainnet finalized deployment slots and validate the oracle account/layout,
+freshness and confidence. It never loads signing fields or starts services.
+It saves `onchain_pipeline.json` and `learning_pipeline.json` with mode 0600 and
+retains exact owner-only backups of existing files before replacement. New path settings are
 optional; defaults match these filenames and `state/onchain/index.sqlite`,
 `state/paper_volume`, `state/meme_live`, and `state/ml/unified.sqlite`.
+
+Interactive first-time `--initialize` and live `--execute` launch this wizard
+automatically when config files are absent, then continue startup after setup passes.
+Without a terminal, missing configuration produces `configuration_required`; paper
+initialization creates unapproved templates. `--prepare-config` still creates only
+unapproved templates and preserves existing files. Parse failures are reported without cascading
+errors about fields in a configuration that could not be loaded. A valid endpoint
+and wallet key alone cannot supply the review evidence listed below.
+
+The same wizard is available through `.#live -- --configure`; live startup is
+`.#live -- --execute`, without a paper prerequisite. Setup never authorizes signing.
+Forward-only setup approves a range from its observed head while requiring the
+same deployed program slot on every ingestion batch; upgrades remain quarantined.
+An older existing index checkpoint requires historical reviewed ranges: the wizard
+refuses to skip/reset it. Isolated/self-hosted configurations retain their dedicated
+network-budget setup and are not replaced with a remote-provider policy.
+For rollback, stop owned services and restore the reported `*.json.backup-*` files
+to their original config paths; retain all ledgers, models and checkpoints.
+For example, substitute the actual backup IDs printed by setup:
+
+```bash
+cp -- onchain_pipeline.json.backup-<ID> onchain_pipeline.json
+cp -- learning_pipeline.json.backup-<ID> learning_pipeline.json
+chmod 600 onchain_pipeline.json learning_pipeline.json
+```
+
+The `<ID>` markers are placeholders, not literal shell input. Re-run `--preflight`
+before restarting the selected runner. Keep the backups until acceptance completes.
 
 The actual remaining operator inputs are:
 
@@ -176,6 +207,7 @@ Operator-only checks (not executed by the implementation agent):
 
 ```bash
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_pipeline_startup.py
+nix develop .#native-rpc -c python -m unittest discover -s tests -p test_pipeline_setup.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_dynamic_capital.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_paper_startup.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_model_decisions.py

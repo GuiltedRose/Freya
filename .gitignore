@@ -13,4 +13,7 @@ result-*
 flake.lock
 onchain_pipeline.json
 learning_pipeline.json
+*.json.backup-*
+*.json.setup.lock
+.*.json.*
 

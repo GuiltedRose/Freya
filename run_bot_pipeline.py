@@ -33,8 +33,8 @@ def stop(process):
         except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
 
 
-def prepare_files(args):
-    """Create review templates exclusively; never assert rights or deployment facts."""
+def template_documents(args):
+    """Public defaults only; no inferred approvals or deployment facts."""
     indexer=read_json(ROOT/'onchain_pipeline.example.json')
     indexer.pop('schema_directory',None)
     source=indexer['endpoints'][0]
@@ -52,6 +52,12 @@ def prepare_files(args):
     learning=read_json(ROOT/'learning_pipeline.example.json')
     learning['ledgers']=[{'source':'bot_paper','path':str(args.paper_state/'paper.sqlite')},
                          {'source':'bot_live','path':str(args.live_state/'meme_live.sqlite')}]
+    return indexer,learning
+
+
+def prepare_files(args,*,emit=True):
+    """Create review templates exclusively; never assert rights or deployment facts."""
+    indexer,learning=template_documents(args)
     results=[]
     for path,document in ((args.indexer_config,indexer),(args.learning_config,learning)):
         if path.exists():results.append({'file':str(path),'status':'existing_preserved'});continue
@@ -59,7 +65,9 @@ def prepare_files(args):
         descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(descriptor,'w') as stream:json.dump(document,stream,indent=2);stream.write('\n')
         results.append({'file':str(path),'status':'created_unapproved_review_template'})
-    print(json.dumps({'configuration':results,'activated':False,'review_required':True}))
+    result={'configuration':results,'activated':False,'review_required':True}
+    if emit:print(json.dumps(result))
+    return result
 
 
 def main():
@@ -78,6 +86,7 @@ def main():
     parser.add_argument('--preflight',action='store_true')
     parser.add_argument('--status',action='store_true',help='Read the saved pipeline status without starting workers')
     parser.add_argument('--prepare-config',action='store_true')
+    parser.add_argument('--configure',action='store_true',help='Guided first-run setup: explicit source review, read-only RPC discovery and saved configuration; starts no services')
     parser.add_argument('--initialize',action='store_true')
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--manage-only',action='store_true',help='Live exits/reconciliation only; unavailable ML cannot prevent this recovery path')
@@ -97,7 +106,7 @@ def main():
         if args.mode=='paper':args.paper_state=args.state_dir.resolve()
         elif args.mode=='live':args.live_state=args.state_dir.resolve()
         else:parser.error('--state-dir belongs to a paper/live consumer')
-    if sum((args.prepare_config,args.preflight,args.status))>1:parser.error('Choose prepare-config, preflight or status separately')
+    if sum((args.prepare_config,args.configure,args.preflight,args.status))>1:parser.error('Choose configure, prepare-config, preflight or status separately')
     if args.status:
         directory=args.live_state if args.mode=='live' else args.paper_state
         status_file=directory/'pipeline'/args.mode/'status.json'
@@ -105,12 +114,38 @@ def main():
               {'status':'not_started','mode':args.mode,'services_started':False}))
         return
     if args.external_workers:args.external_indexer=True
+    if args.configure:
+        if args.initialize or args.execute:parser.error('--configure is setup only; do not combine initialization or execution')
+        from pipeline_setup import configure
+        configure(args,public,*template_documents(args))
+        return
     if args.prepare_config:prepare_files(args);return
     if not 30<=args.learning_interval<=86400:parser.error('Learning interval must be 30..86400 seconds')
     if args.mode=='live' and not (args.execute or args.preflight):parser.error('Live startup requires explicit --execute; credentials alone do not authorize trading')
     if args.execute and args.mode!='live':parser.error('--execute is only valid with --mode live')
     if args.manage_only and args.mode!='live':parser.error('--manage-only belongs to the live recovery path')
     if args.initialize and args.mode!='paper':parser.error('--initialize creates a paper session only')
+    learning_required=args.mode!='indexer' and not args.manage_only
+    configuration_paths=[args.indexer_config]+([args.learning_config] if learning_required else [])
+    missing=[str(candidate) for candidate in configuration_paths if not candidate.is_file()]
+    if missing and sys.stdin.isatty() and (args.initialize or (args.mode=='live' and args.execute)):
+        if args.initialize and (args.paper_state/'paper.sqlite').exists():parser.error('Paper state exists; omit --initialize to resume; nothing was reset')
+        from pipeline_setup import configure
+        configure(args,public,*template_documents(args))
+        missing=[str(candidate) for candidate in configuration_paths if not candidate.is_file()]
+    if missing:
+        prepared=None
+        if args.initialize:
+            if (args.paper_state/'paper.sqlite').exists():parser.error('Paper state exists; omit --initialize to resume; nothing was reset')
+            prepared=prepare_files(args,emit=False)
+        print(json.dumps({'status':'configuration_required','mode':args.mode,
+            'missing_before_setup':missing,'configuration':prepared,
+            'services_started':False,'runtime_ready':False,'state_preserved':True,
+            'next_steps':[
+                'Run this runner with --configure for guided setup without editing JSON',
+                'Run the same runner with --preflight to see remaining configuration blockers'],
+            'documentation':'docs/coordinated_pipeline.md#first-configuration'}),flush=True)
+        raise SystemExit(2)
     # Raw commands remain available for deliberate replay/repair; the coordinated
     # path never resets state or decouples a consumer from its configured index.
     if any(value.split('=',1)[0] in ('--reset','--feed','--unified-config','--start-slot','--resume') for value in extra):
@@ -123,7 +158,6 @@ def main():
             indexer['schema_directory']=str(schema if schema.is_absolute() else (args.indexer_config.parent/schema).resolve())
     except (OSError,ValueError,KeyError,TypeError) as error:
         issues.append('indexer config: '+safe_reason(error)+'; use --prepare-config to create non-active review templates')
-    learning_required=args.mode!='indexer' and not args.manage_only
     if learning_required:
         try:
             learning=read_json(args.learning_config)
@@ -131,6 +165,12 @@ def main():
                 candidate=Path(row['path'])
                 row['path']=str(candidate if candidate.is_absolute() else (args.learning_config.parent/candidate).resolve())
         except (OSError,ValueError,KeyError,TypeError) as error:issues.append('learning config: '+safe_reason(error))
+    # Invalid/unreadable input is not an empty valid configuration. Report its
+    # actual parse error without manufacturing downstream missing-field errors.
+    if issues:
+        print(json.dumps({'status':'configuration_invalid','mode':args.mode,'blockers':issues,
+            'services_started':False,'runtime_ready':False,'state_preserved':True}),flush=True)
+        raise SystemExit(2)
     issues+=preflight(indexer,learning,training=learning_required,
         ledger_paths=([args.paper_state/'paper.sqlite',args.live_state/'meme_live.sqlite'] if learning_required else []))
     if args.mode!='indexer' and not indexer.get('oracle',{}).get('feeds'):
@@ -294,6 +334,6 @@ def monitor(args,children,consumer,status,stopping):
 
 if __name__=='__main__':
     try:main()
-    except (OSError,ValueError,KeyError,TypeError) as error:
+    except (OSError,ValueError,KeyError,TypeError,ConnectionError,RuntimeError,EOFError) as error:
         print(json.dumps({'status':'blocked','reason':safe_reason(error),'services_started':False}),flush=True)
         raise SystemExit(2) from None

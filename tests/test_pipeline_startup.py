@@ -16,6 +16,25 @@ from run_bot_pipeline import clean_environment,prepare_files,supervise
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_initialize_creates_missing_config_without_starting_workers_or_claiming_review(self):
+        from run_bot_pipeline import main
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);output=io.StringIO()
+            command=['run_bot_pipeline.py','--initialize','--env-file',str(root/'absent.env'),
+                '--indexer-config',str(root/'indexer.json'),'--learning-config',str(root/'learning.json'),
+                '--state-dir',str(root/'paper')]
+            with patch('sys.argv',command),patch('sys.stdout',output),patch('sys.stdin.isatty',return_value=False),patch('run_bot_pipeline.supervise') as supervise,patch.dict(os.environ,{},clear=True):
+                with self.assertRaises(SystemExit) as error:main()
+            self.assertEqual(error.exception.code,2)
+            result=json.loads(output.getvalue())
+            self.assertEqual(result['status'],'configuration_required')
+            self.assertFalse(result['services_started'])
+            self.assertTrue((root/'indexer.json').is_file())
+            self.assertTrue((root/'learning.json').is_file())
+            self.assertFalse(json.loads((root/'indexer.json').read_text())['endpoints'][0]['enabled'])
+            self.assertFalse((root/'paper').exists())
+            supervise.assert_not_called()
+
     def test_index_target_cannot_repurpose_existing_trading_database(self):
         import sqlite3
         with tempfile.TemporaryDirectory() as directory:

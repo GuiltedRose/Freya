@@ -86,6 +86,27 @@ class IndexRpc:
             self.validated = True
 
 
+def read_program_deployments(rpc,programs):
+    """Read finalized loader state; does not assert compatibility with an IDL."""
+    from solders.pubkey import Pubkey
+    loader='BPFLoaderUpgradeab1e11111111111111111111111'
+    result={}
+    for program in programs:
+        account=rpc.call('getAccountInfo',[program,{'encoding':'base64','commitment':'finalized'}])['value']
+        if not account or account['owner']!=loader or not account['executable']:
+            raise ValueError('Unrecognized program loader/identity')
+        raw=base64.b64decode(account['data'][0],validate=True)
+        if len(raw)!=36 or int.from_bytes(raw[:4],'little')!=2:raise ValueError('Invalid program account')
+        address=str(Pubkey.from_bytes(raw[4:36]))
+        data=rpc.call('getAccountInfo',[address,{'encoding':'base64','commitment':'finalized',
+            'dataSlice':{'offset':0,'length':12}}])['value']
+        if not data or data['owner']!=loader:raise ValueError('Invalid ProgramData owner')
+        raw=base64.b64decode(data['data'][0],validate=True)
+        if len(raw)!=12 or int.from_bytes(raw[:4],'little')!=3:raise ValueError('Invalid ProgramData layout')
+        result[program]=int.from_bytes(raw[4:12],'little')
+    return result
+
+
 class Ingester:
     def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None):
         if not endpoints:
@@ -100,26 +121,7 @@ class Ingester:
 
     def deployments(self, rpc):
         """Read upgradeable-loader ProgramData, without assuming today's IDL is historical."""
-        from solders.pubkey import Pubkey
-        loader = 'BPFLoaderUpgradeab1e11111111111111111111111'
-        result = {}
-        for program in self.decoder.specs:
-            account = rpc.call('getAccountInfo', [program, {'encoding': 'base64', 'commitment': 'finalized'}])['value']
-            if not account or account['owner'] != loader or not account['executable']:
-                raise ValueError('Unrecognized program loader/identity')
-            raw = base64.b64decode(account['data'][0], validate=True)
-            if len(raw) != 36 or int.from_bytes(raw[:4], 'little') != 2:
-                raise ValueError('Invalid program account')
-            address = str(Pubkey.from_bytes(raw[4:36]))
-            data = rpc.call('getAccountInfo', [address, {'encoding': 'base64', 'commitment': 'finalized',
-                                                       'dataSlice': {'offset': 0, 'length': 12}}])['value']
-            if not data or data['owner'] != loader:
-                raise ValueError('Invalid ProgramData owner')
-            raw = base64.b64decode(data['data'][0], validate=True)
-            if len(raw) != 12 or int.from_bytes(raw[:4], 'little') != 3:
-                raise ValueError('Invalid ProgramData layout')
-            result[program] = int.from_bytes(raw[4:12], 'little')
-        return result
+        return read_program_deployments(rpc,self.decoder.specs)
 
     def version_issues(self, slot, deployments):
         issues = []

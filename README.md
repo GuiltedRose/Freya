@@ -163,8 +163,8 @@ or valid USD oracle data. Prepare and review that configuration first:
 ```bash
 nix --extra-experimental-features 'nix-command flakes' run \
   --reference-lock-file ./flake.lock --no-write-lock-file \
-  .#paper -- --prepare-config
-# Review the generated owner-only configs; do not simply flip their flags.
+  .#paper -- --configure
+# Guided setup gathers review evidence, discovers deployments and checks the oracle.
 nix --extra-experimental-features 'nix-command flakes' run \
   --reference-lock-file ./flake.lock --no-write-lock-file \
   .#paper -- --preflight
@@ -186,6 +186,29 @@ With Nix, after configuration passes preflight:
 ```bash
 nix --extra-experimental-features 'nix-command flakes' run .#paper -- --initialize
 ```
+
+If runtime configs are absent in an interactive terminal, `--initialize` opens the
+same guided setup before continuing. Without a terminal it creates review templates
+and exits with `configuration_required`. The wizard reads the public `.env` endpoint,
+asks for source/IDL/provenance review evidence, discovers finalized deployment slots,
+checks the oracle and saves both owner-only configs with backups. It does not infer
+IDL compatibility or source permissions from a successful RPC response.
+
+Live has the same setup and supervision; paper history is optional:
+
+```bash
+nix --extra-experimental-features 'nix-command flakes' run \
+  --reference-lock-file ./flake.lock --no-write-lock-file \
+  .#live -- --configure
+# When you choose to activate real-money trading:
+nix --extra-experimental-features 'nix-command flakes' run \
+  --reference-lock-file ./flake.lock --no-write-lock-file \
+  .#live -- --execute
+```
+
+Interactive first-time `--execute` also opens guided setup if configs are missing.
+Setup alone never loads a signer or starts trading. Live execution requires a local
+signing source; collection and paper workers do not receive it.
 
 This explicitly creates a new virtual session with 0 USDC, 0.1 SOL and an
 illustrative initial valuation of $100/SOL. Override those values with `--balance`,
