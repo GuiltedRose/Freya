@@ -94,6 +94,7 @@ def main():
     parser.add_argument('--external-workers',action='store_true',help='Use independently supervised data workers; do not own or stop them')
     parser.add_argument('--learning-interval',type=int,default=900)
     args,extra=parser.parse_known_args()
+    args.json_console='--json' in extra
     public=public_env(args.env_file)
     def path(value,key,default):return Path(value or public.get(key) or default).resolve()
     args.indexer_config=path(args.indexer_config,'CRYPTO_BOT_INDEXER_CONFIG','onchain_pipeline.json')
@@ -199,7 +200,8 @@ def main():
     except (OSError,ValueError,sqlite3.Error) as error:issues.append('database target: '+safe_reason(error))
     result={'status':'blocked' if issues else 'preflight_passed','blockers':list(dict.fromkeys(issues)),
             'mode':args.mode,'services_started':False,'runtime_ready':False}
-    print(json.dumps(result),flush=True)
+    if args.preflight or args.json_console or issues:print(json.dumps(result),flush=True)
+    else:print('PIPELINE | configuration passed | starting '+args.mode+' services',flush=True)
     if issues:raise SystemExit(2)
     if args.preflight:return
     args.model_selection_configured=bool(learning and set(learning.get('candidates',{}))=={'svm','lstm','rag'})
@@ -210,6 +212,8 @@ def supervise(args,extra,indexer,learning):
     state=args.live_state if args.mode=='live' else args.paper_state
     directory=state/'pipeline'/args.mode;directory.mkdir(parents=True,exist_ok=True)
     children={};streams=[];stopping=False;startup_error=None
+    from pipeline_console import WorkerOutput,format_pipeline
+    output=WorkerOutput(getattr(args,'json_console',False));args.worker_output=output
     environment=clean_environment()
     from provider_limits import provider_limits_path
     environment['CRYPTO_BOT_PROVIDER_LIMITS']=str(provider_limits_path(args.onchain_db))
@@ -222,10 +226,11 @@ def supervise(args,extra,indexer,learning):
         temporary=directory/'status.tmp'
         temporary.write_text(json.dumps(value,allow_nan=False))
         temporary.replace(directory/'status.json')
-        print(json.dumps(value),flush=True)
+        print(json.dumps(value) if getattr(args,'json_console',False) else format_pipeline(value),flush=True)
     def spawn(role,script,arguments,env=environment):
         stream=(directory/(role+'.log')).open('ab');streams.append(stream)
-        child=subprocess.Popen([sys.executable,str(ROOT/script),*map(str,arguments)],env=env,stdout=stream,stderr=subprocess.STDOUT)
+        output.follow(role,directory/(role+'.log'))
+        child=subprocess.Popen([sys.executable,'-u',str(ROOT/script),*map(str,arguments)],env=env,stdout=stream,stderr=subprocess.STDOUT)
         children[role]=child
         status({'status':'worker_started','role':role,'pid':child.pid,'log':str(directory/(role+'.log'))})
         return child
@@ -269,6 +274,7 @@ def supervise(args,extra,indexer,learning):
         from onchain_store import EventStore
         deadline=time.monotonic()+30
         while not stopping:
+            output.poll()
             if any(p.poll() is not None for p in children.values()):raise RuntimeError('A data worker failed before consumer startup; inspect its owner-only log')
             try:
                 EventStore(args.onchain_db,readonly=True).next_slot()
@@ -303,6 +309,7 @@ def supervise(args,extra,indexer,learning):
                 try:stop(children[role])
                 except (OSError,subprocess.TimeoutExpired):remaining.append(role)
         for stream in streams:stream.close()
+        output.poll()
         for sig,handler in old.items():signal.signal(sig,handler)
         status({'status':'shutdown_incomplete' if remaining else 'stopped','remaining_workers':remaining,
                 'startup_error':startup_error,'state_preserved':True})
@@ -311,6 +318,8 @@ def supervise(args,extra,indexer,learning):
 def monitor(args,children,consumer,status,stopping):
     reported=set();next_health=0
     while not stopping():
+        output=getattr(args,'worker_output',None)
+        if output:output.poll()
         if consumer and consumer.poll() is not None:
             if consumer.returncode:raise RuntimeError('Consumer stopped with errors; inspect consumer.log; no automatic order retry')
             return

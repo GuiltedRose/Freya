@@ -12,6 +12,20 @@ from test_momentum_reclaim import policy, setup
 
 
 class ModelDecisionTests(unittest.TestCase):
+    def test_ledger_sync_uses_json_source_with_existing_observation_schema(self):
+        import sqlite3
+        from learning_pipeline import synchronize
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);ledger=root/'paper.sqlite'
+            with sqlite3.connect(ledger) as db:db.execute('CREATE TABLE paper_runs(id TEXT,archived REAL)')
+            store=ObservationStore(root/'models.sqlite',create=True)
+            config={'rights':{},'provenance':{},'ledgers':[{'source':'bot_paper','path':str(ledger)}]}
+            with patch('meme_learning.paper_outcomes',return_value=([],)),patch('learning_pipeline.import_position_quotes',return_value={}),patch('learning_pipeline.build_candidate',return_value={'status':'blocked','reason':'No eligible observations'}):
+                report=synchronize(store,config)
+            self.assertEqual(report['ledgers'],[{'source':'bot_paper','imported':0}])
+            with store.connect(readonly=True) as db:
+                self.assertNotIn('source',{row[1] for row in db.execute('PRAGMA table_info(observations)')})
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

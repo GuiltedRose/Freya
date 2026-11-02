@@ -227,11 +227,25 @@ data warmup, incomplete coverage, throughput warnings, worker failures and shutd
 does not get silently restarted, and the consumer is retained for existing-position
 management. Credentials, order bytes and RPC API keys are excluded from status.
 
+The runner follows the current invocation's consumer log to restore the existing
+paper/live trade and neural-learning consoles. Learner batches appear as compact
+family summaries, and learner tracebacks are visible in the terminal. Full logs
+remain append-only; old sessions are not replayed. Pipeline health shows compact
+lag/coverage/worker status every 30 seconds. Add `--json` for structured terminal
+records. The terminal is an observer of the logs, never an order/restart mechanism.
+
+State is local to each host and user checkout, including when both use the same
+flake. `--configure` prepares sources and model paths; it does not create the paper
+inventory. On a host with no session, start once with `--initialize --state-dir
+state/paper_volume`, then resume without `--initialize`. Never reset or copy a
+database over an existing session to resolve a missing-path error.
+
 Operator-only checks (not executed by the implementation agent):
 
 ```bash
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_pipeline_startup.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_pipeline_setup.py
+nix develop .#native-rpc -c python -m unittest discover -s tests -p test_pipeline_console.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_dynamic_capital.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_paper_startup.py
 nix develop .#native-rpc -c python -m unittest discover -s tests -p test_model_decisions.py

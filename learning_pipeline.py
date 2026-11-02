@@ -63,7 +63,7 @@ def synchronize(store, config, risk_config=None):
                 continue
             active.add(outcome['exit_signature'])
         with store.connect(readonly=True) as db:
-            previous = db.execute("SELECT body FROM observations WHERE source=? AND json_extract(body,'$.provenance.ledger_path')=? LIMIT 4097",
+            previous = db.execute("SELECT body FROM observations WHERE json_extract(body,'$.source')=? AND json_extract(body,'$.provenance.ledger_path')=? LIMIT 4097",
                                   (source,str(path))).fetchall()
         if len(previous)>4096:
             raise ValueError('Ledger reconciliation exceeds bounded worker; explicit offline review required')
