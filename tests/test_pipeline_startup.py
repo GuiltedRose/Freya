@@ -131,6 +131,7 @@ class OwnershipTests(unittest.TestCase):
                 consumer=launched[2]
                 self.assertIn(str(index),consumer[0]);self.assertIn(str(models),consumer[0])
                 self.assertEqual('--execute' in consumer[0],mode=='live')
+                self.assertEqual('--no-auto-reset' in consumer[0],mode=='paper')
                 if mode=='paper':self.assertNotIn('SOLANA_PRIVATE_KEY',consumer[1]['env'])
                 self.assertEqual(stopped,[launched[2][2],launched[1][2],launched[0][2]])
                 self.assertTrue((root/mode/'pipeline'/mode/'status.json').is_file())
@@ -182,7 +183,7 @@ class LiveManagementTests(unittest.TestCase):
         position={'mint':'fixture','pool':'pool','kind':'pumpswap'}
         store=SimpleNamespace(state={'pending':None},all_positions=lambda:[position],select_position=MagicMock(),
                               refresh_learning_model=MagicMock(side_effect=ValueError('unavailable')))
-        engine=SimpleNamespace(store=store,loss_streak_cooldown=lambda now:None,
+        engine=SimpleNamespace(store=store,rpc=MagicMock(),user='fixture',loss_streak_cooldown=lambda now:None,
             prepare=MagicMock(return_value={'status':'held_position_managed'}))
         sources=SimpleNamespace(observation=lambda mint:dict(position,market_kind='pumpswap'))
         with patch('run_meme_live.valuation',return_value=100),patch('run_meme_live.wallet_equity',return_value=10):
@@ -195,6 +196,22 @@ class LiveManagementTests(unittest.TestCase):
         from neural_exits import decision
         with patch('neural_exits._decision',side_effect=ValueError('invalid model fixture')):
             self.assertIsNone(decision({}, {},None,0,1))
+
+    def test_index_failure_and_unavailable_ml_still_attempt_held_position_recovery(self):
+        from run_meme_live import tick
+        position={'mint':'fixture','pool':'pool','kind':'pumpswap'}
+        row=dict(position,market_kind='pumpswap',exit_only=True,recovery_sol_price_usd=101)
+        store=SimpleNamespace(state={'pending':None},all_positions=lambda:[position],select_position=MagicMock(),
+            refresh_learning_model=MagicMock(side_effect=ValueError('no ML')))
+        engine=SimpleNamespace(store=store,rpc=MagicMock(),user='fixture',loss_streak_cooldown=lambda now:None,
+            prepare=MagicMock(return_value={'status':'holding'}))
+        sources=SimpleNamespace(observation=MagicMock(side_effect=ValueError('index unavailable')),
+            position_observation=MagicMock(return_value=row))
+        with patch('run_meme_live.valuation',return_value=100),patch('run_meme_live.wallet_equity',return_value=10):
+            report=tick(engine,sources,None,[],[])
+        sources.position_observation.assert_called_once_with(engine,position)
+        engine.prepare.assert_called_once_with(row,101,10)
+        self.assertEqual(report['status'],'learning_unavailable_entries_blocked')
 
     def test_live_mode_requires_explicit_execution_flag_before_configuration_or_wallet_loading(self):
         from run_bot_pipeline import main

@@ -1,0 +1,256 @@
+{
+  "report_kind": "v3_runtime_acceptance_blocked_not_training_data",
+  "base_commit": "26edc2817b02b0397feff004abfc585eb1e40d24",
+  "source_state": "uncommitted working tree; previous complete validation retained separately",
+  "paper_production_ready": false,
+  "previous_validation": "validation_2026-11-02.json",
+  "additional_tests": {
+    "suite": "test_native_events",
+    "tests": 6,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "native_artifact": "/nix/store/hd9gdzhcmi2z05r08715rsbsp0c29kr1-python3.13-crypto-bot-solana-binary-0.1.0",
+    "external_network_used": false,
+    "operational_state_used": false
+  },
+  "layout_replay": {
+    "kind": "read_only_diagnostic_not_market_or_learning_evidence",
+    "python_rust_compare_identical": true,
+    "counts": {
+      "transactions": 128,
+      "transactions_with_issues": 127,
+      "diagnostic_trade_prefixes": 131,
+      "log_equals_cpi_without_wrapper": 131,
+      "extra_eight_bytes": 131,
+      "timestamp_matches_block_time": 131,
+      "nonzero_unconsumed_bytes": 0,
+      "single_curve_prefix_balance_checks": 11,
+      "single_curve_prefix_balance_matches": 11,
+      "single_curve_prefix_native_checks": 7,
+      "single_curve_prefix_native_matches": 0
+    },
+    "issues": [
+      [
+        "Unreviewed event layout/version",
+        127
+      ],
+      [
+        "trade instruction/event mismatch",
+        126
+      ],
+      [
+        "SellEvent: payload 441 bytes, pinned fields 433, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        72
+      ],
+      [
+        "BuyEvent: payload 504 bytes, pinned fields 496, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        25
+      ],
+      [
+        "BuyEvent: payload 489 bytes, pinned fields 481, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        17
+      ],
+      [
+        "Truncated Borsh field",
+        12
+      ],
+      [
+        "TradeEvent: payload 397 bytes, pinned fields 389, trailing 8; program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        5
+      ],
+      [
+        "TradeEvent: payload 382 bytes, pinned fields 374, trailing 8; program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        5
+      ],
+      [
+        "TradeEvent: payload 383 bytes, pinned fields 375, trailing 8; program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        3
+      ],
+      [
+        "BuyEvent: payload 507 bytes, pinned fields 499, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        2
+      ],
+      [
+        "BuyEvent: payload 492 bytes, pinned fields 484, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        1
+      ],
+      [
+        "TradeEvent: payload 417 bytes, pinned fields 409, trailing 8; program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        1
+      ]
+    ],
+    "examples": [
+      {
+        "slot": 464407473,
+        "signature": "5CF87q72mKtBAHH6gUVkBYDtSyDZQ6gvxSRt26617oh7V28GAHS6p7F8omSiKV1TWPhSgRhgTdJCteCXfkqGw66M",
+        "event": "SellEvent",
+        "cpi_bytes": 457,
+        "event_bytes": 449,
+        "published_event_bytes": 441,
+        "unconsumed_hex": "0000000000000000",
+        "event_sha256": "3b3a0e91f0fc9f67c2854005355b329f7a9533101c33624329217c492b5e0dd0",
+        "matching_program_data_log": true
+      },
+      {
+        "slot": 464407473,
+        "signature": "41Q19UEfDEYChA12Kq1MJ5odsVhac2NzhLZVuLzUot2LpedKym9ksSTGv8mTLa3V8cXoXLhpCJC5wVJfkgtVZxe8",
+        "event": "SellEvent",
+        "cpi_bytes": 457,
+        "event_bytes": 449,
+        "published_event_bytes": 441,
+        "unconsumed_hex": "0000000000000000",
+        "event_sha256": "d406bbee437e8d39b3f3add3ff429ca10646aabf623cf2cc03eb82d5e3df5741",
+        "matching_program_data_log": true
+      },
+      {
+        "slot": 464407473,
+        "signature": "4RRUFohBnerUBh1WLbFdya6SjPekt3erZUZMTfNc3dfuk8NFVXN68NVUUwswxCtLcfi5EqmscgaZCv4vBN7aPtZY",
+        "event": "BuyEvent",
+        "cpi_bytes": 520,
+        "event_bytes": 512,
+        "published_event_bytes": 504,
+        "unconsumed_hex": "0000000000000000",
+        "event_sha256": "7c9b57d5d0c13878bf110f426d300e2a4aadedbd1450953b5c66e561e89a679b",
+        "matching_program_data_log": true
+      },
+      {
+        "slot": 464407473,
+        "signature": "4VDcR6C1o7di4cehdTpHEkogdU6ZwvNouCCYoC8CY7qiJrixKLJDr2ZmtEMruGUtKQcvYhEbE2EZTC11cZnGYsGv",
+        "event": "TradeEvent",
+        "cpi_bytes": 413,
+        "event_bytes": 405,
+        "published_event_bytes": 397,
+        "unconsumed_hex": "0000000000000000",
+        "event_sha256": "3a6685c635b515d7d025874e466f6935737266dddacd5e174f73b36a533bb48c",
+        "matching_program_data_log": true
+      },
+      {
+        "slot": 464407473,
+        "signature": "o7PkRVbWdT7iFuZUDAwrgUdXV53GeiLgpfdi93PUZCmuZmEjXLu7CJ7mJ41fd56LqudtbP5yuyv6tVzAebUV3p4",
+        "event": "BuyEvent",
+        "cpi_bytes": 505,
+        "event_bytes": 497,
+        "published_event_bytes": 489,
+        "unconsumed_hex": "0000000000000000",
+        "event_sha256": "d55ec1ac1121dfba67f494d2dcb27890627f9562202f6cd08fec2cd53f133095",
+        "matching_program_data_log": true
+      },
+      {
+        "slot": 464407473,
+        "signature": "aQj7s5XMNs93xkyZyp42eG7LMi2NP2FJETTwYxewBFPHGCuDN6peSb4KdSaXau2LuLrLwQPQYaWCozF4DVgx8PE",
+        "event": "BuyEvent",
+        "cpi_bytes": 520,
+        "event_bytes": 512,
+        "published_event_bytes": 504,
+        "unconsumed_hex": "0000000000000000",
+        "event_sha256": "166b16745bd852e9584ae9414babb64c37195a8965daeeaccb0d636041b36da6",
+        "matching_program_data_log": true
+      }
+    ],
+    "accepted_unknown_layouts": 0,
+    "original_receipts_modified": false,
+    "layout_semantics_established": false
+  },
+  "public_mainnet_probe": {
+    "services_started": false,
+    "wallet_loaded": false,
+    "transactions_submitted": 0,
+    "state_reset": false,
+    "finalized_head": 464446876,
+    "sampled_slot": 464446876,
+    "transactions": 333,
+    "relevant_transactions": 28,
+    "clean_relevant_transactions": 0,
+    "decoded_events": 0,
+    "decoder_issues": [
+      [
+        "Unreviewed event layout/version",
+        28
+      ],
+      [
+        "trade instruction/event mismatch",
+        28
+      ],
+      [
+        "SellEvent: payload 441 bytes, pinned fields 433, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        8
+      ],
+      [
+        "BuyEvent: payload 504 bytes, pinned fields 496, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        5
+      ],
+      [
+        "BuyEvent: payload 489 bytes, pinned fields 481, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        5
+      ],
+      [
+        "TradeEvent: payload 383 bytes, pinned fields 375, trailing 8; program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        5
+      ],
+      [
+        "BuyEvent: payload 507 bytes, pinned fields 499, trailing 8; program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        4
+      ],
+      [
+        "Truncated Borsh field",
+        2
+      ]
+    ],
+    "oracle": {
+      "publish_time": 1793612087,
+      "confidence_bps": "5.454731986005017790307030288"
+    },
+    "elapsed_seconds": 2.5644237995147705,
+    "requests": 6,
+    "response_wire_bytes": 844219,
+    "response_decoded_bytes": 3141540,
+    "live_ready": false,
+    "profitability_demonstrated": false
+  },
+  "upstream_comparison": {
+    "pump_blob": "bb79d04e5a4ef8b286d67511757c23a15672ef51",
+    "pump_amm_blob": "d907b16a91f035aeb3c3182bfa0972a91bf23a86",
+    "all_pinned_type_definitions_identical_to_current_official": true,
+    "trade_event_fields": 35,
+    "buy_event_fields": 40,
+    "sell_event_fields": 33,
+    "creator_fee_unclaimed_already_included": true,
+    "framing_source": "https://github.com/coral-xyz/anchor/blob/v0.31.1/lang/attribute/event/src/lib.rs",
+    "layout_issue": "https://github.com/pump-fun/pump-public-docs/issues/54",
+    "earlier_candidate_issue": "https://github.com/pump-fun/pump-public-docs/issues/56"
+  },
+  "balance_check_limitations": [
+    "11 single-prefix curve token deltas match published-prefix token_amount; diagnostic agreement cannot authorize unsupported events",
+    "7 available native wallet deltas do not equal the simple amount-minus-published-fees formula; other transfers, rent, routing and fee semantics were not independently isolated",
+    "No claim of validated SOL cashflow or meaning/location/type of unexplained bytes"
+  ],
+  "acceptance_not_established": {
+    "supported_current_trade_layout": "No verified serialization contract for unexplained bytes",
+    "ingestion_throughput_and_lag": "No sustained indexer acceptance run; one-block probe is not throughput evidence",
+    "market_discovery_and_candles": "No fresh complete verified market window demonstrated",
+    "observed_paper_entries_exits": "Not run because verified market input remains blocked; not a no-signal observation",
+    "real_eligible_outcomes_and_learning": "No new accepted paper outcomes or corresponding training demonstrated",
+    "runtime_restart": "Prior isolated recovery tests pass; real sustained pipeline restart acceptance remains unverified",
+    "one_command_nix_startup": "Prior package/check builds pass; real complete pipeline acceptance remains blocked by decoding"
+  },
+  "excluded": [
+    "funded-live services and transactions",
+    "self-hosted validator build/startup",
+    "NixOS/kernel runtime network tests"
+  ],
+  "preservation": {
+    "original_receipts_unchanged": true,
+    "wallet_loaded": false,
+    "state_reset": false,
+    "unknown_layouts_promoted": false,
+    "provider_pacing_ledger": "normal read-only-probe accounting only"
+  },
+  "source_hashes": {
+    "onchain_decode.py": "bb05adaac5e7d814ff8e693d10d8722ac6c829db5af61515ad86eca4e57a484d",
+    "native/solana_binary/src/borsh.rs": "6941937e6d32931a89286905799781774bbfa0e6e5464e8bbb3fd72e6081e616",
+    "tests/test_native_events.py": "9d7291654dc5b457c2cc31552360f6ff01bb37838148325e87b3eb8c61b6af9c",
+    "vendor/pump.json": "38b8abcc5b279bda85cf473e7c6f67bd15eb89df658cf93434687a43c88ad937",
+    "vendor/pump_amm.json": "b7d8c57a4d9c4dd0109a9ab893052352333252d4eedced10ac091d4d66cab89b"
+  }
+}

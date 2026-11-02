@@ -196,6 +196,10 @@
           python -m unittest discover -s tests -p test_production_pipeline.py
           python -m unittest discover -s tests -p test_dynamic_capital.py
           python -m unittest discover -s tests -p test_challenger_management.py
+          python -m unittest discover -s tests -p test_pipeline_startup.py
+          python -m unittest discover -s tests -p test_pipeline_setup.py
+          python -m unittest discover -s tests -p test_pipeline_console.py
+          python -m unittest discover -s tests -p test_runtime_completion.py
           touch $out
         ''; } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           solana-network-lifecycle = import ./tests/nix/solana-network-lifecycle.nix { inherit pkgs; };

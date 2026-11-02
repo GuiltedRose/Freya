@@ -256,7 +256,7 @@ def supervise(args,extra,indexer,learning):
             live_env=dict(os.environ,CRYPTO_BOT_PROVIDER_LIMITS=environment['CRYPTO_BOT_PROVIDER_LIMITS'],
                           SOLANA_ENV_FILE=str(args.env_file.resolve()))
             spawn('consumer','run_meme_live.py',['--state-dir',args.live_state,'--onchain-db',args.onchain_db,
-                '--capital-config',capital_config,'--execute','--manage-only','--loop',*extra],live_env)
+                '--capital-config',capital_config,'--recovery-config',index_config,'--execute','--manage-only','--loop',*extra],live_env)
             monitor(args,children,children['consumer'],status,lambda:stopping)
             return
         learning_config=temporary/'learning.json';learning_config.write_text(json.dumps(learning))
@@ -290,13 +290,13 @@ def supervise(args,extra,indexer,learning):
         common=['--state-dir',state,'--onchain-db',args.onchain_db,'--capital-config',capital_config,
                 '--unified-db',args.unified_db,'--unified-config',learning_config,'--loop']
         if args.mode=='paper':
-            arguments=common+['--discover','--interval','30','--learning-live-db',args.live_state/'meme_live.sqlite']
+            arguments=common+['--discover','--interval','30','--no-auto-reset','--learning-live-db',args.live_state/'meme_live.sqlite']
             if args.initialize:arguments+=['--initialize']
             spawn('consumer','run_paper.py',arguments+extra)
         else:
             live_env=dict(os.environ,CRYPTO_BOT_PROVIDER_LIMITS=environment['CRYPTO_BOT_PROVIDER_LIMITS'],
                           SOLANA_ENV_FILE=str(args.env_file.resolve()))
-            spawn('consumer','run_meme_live.py',common+['--execute','--learning-paper-db',args.paper_state/'paper.sqlite']+extra,live_env)
+            spawn('consumer','run_meme_live.py',common+['--execute','--recovery-config',index_config,'--learning-paper-db',args.paper_state/'paper.sqlite']+extra,live_env)
         monitor(args,children,children['consumer'],status,lambda:stopping)
     except (OSError,ValueError,RuntimeError) as error:
         startup_error=safe_reason(error)

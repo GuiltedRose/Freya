@@ -12,6 +12,10 @@ research, and a from-scratch neural network with optional live execution.
 The project is experimental. Backtests, modeled paper returns, and small live
 samples do not establish profitability.
 
+Current acceptance status and remaining market-feed blockers are recorded in
+[runtime finalization](docs/finalization_20261102.md). Passing tests or starting
+the dashboard does not establish that current on-chain event layouts are supported.
+
 Live execution does not require paper history or promotion milestones. Start with
 paper trading to collect data and assess behavior before risking real funds; this
 is a recommendation, not an activation requirement. Live still requires explicit
@@ -25,7 +29,7 @@ activation gates and rollback, see [pipeline recovery](docs/pipeline_recovery.md
 Pump web collectors remain disabled; paper collection requires a permitted feed
 or an explicitly selected local index.
 
-Momentum reclaim is the single production strategy. New-launch sniping has been
+Momentum reclaim is the sole enabled entry strategy. New-launch sniping has been
 removed. See [production acceptance](docs/production_acceptance.md) for active model
 decisions, the aggregate test command and manually authorized live service wiring.
 See [retrieval and Kelly](docs/retrieval_kelly.md) for net-expectancy validation,

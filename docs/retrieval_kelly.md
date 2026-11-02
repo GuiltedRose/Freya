@@ -103,8 +103,8 @@ twenty fresh markets. Freshness and all existing network budgets remain enforced
 ## Operator validation
 
 ```bash
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_dynamic_capital.py
-nix develop "path:$PWD#native-rpc" --command python validate_production.py --native --nix --output /tmp/crypto-bot-capital-validation.json
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_dynamic_capital.py
+nix develop .#native-rpc --command python validate_production.py --native --nix --output /tmp/crypto-bot-capital-validation.json
 ```
 
 The deterministic suite covers asymmetric low-win-rate positive expectancy, negative

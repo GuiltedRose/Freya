@@ -60,6 +60,11 @@ def resolve_indexer(config,env):
             if host not in endpoint.get('policy',{}).get('allowed_rpc_hosts',[]):
                 raise ValueError('RPC hostname is outside the source policy allowed_rpc_hosts; review the source before changing providers')
             endpoint['url']=rpc
+        # Cycle rest must not become a five-second delay on every RPC call.
+        # ProviderBudget still applies its unchanged hard request minimum.
+        profile=endpoint.get('policy',{}).get('profile',{}).get('kind')
+        if endpoint.get('source_id','').startswith('builtin-') and profile in ('public_mainnet','selfhosted'):
+            endpoint.setdefault('request_interval_seconds',.5)
     # Literal configured endpoints retain their reviewed identity. The environment
     # is consumed only where the config explicitly requests it.
     return config

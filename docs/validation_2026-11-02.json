@@ -1,0 +1,68 @@
+{
+  "date": "2026-11-02",
+  "report_kind": "implementation_validation_not_training_data",
+  "base_commit": "26edc2817b02b0397feff004abfc585eb1e40d24",
+  "source_state": "working tree changes, tested using a sanitized public source snapshot",
+  "source_manifest_sha256": "1071cc72bc4b6f5b2547b34a8823a5c1f7062345506eefc6156580ae4c7cf004",
+  "python_native_loopback": {
+    "tests": 584,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "protected_operational_state": true,
+    "external_network_blocked": true,
+    "evidence": "/tmp/crypto-bot-finalize-validation-20261102-r5.json"
+  },
+  "rust": {
+    "tests": 9,
+    "failures": 0,
+    "doctests_defined": 0,
+    "evidence": "/tmp/crypto-bot-finalize-rust-tests-r2.log"
+  },
+  "nix": {
+    "native_extension_built": true,
+    "native_app_built": true,
+    "offline_check_suites": 13,
+    "offline_check_tests": 143,
+    "paper_cli_help_passed": true,
+    "live_cli_help_passed": true,
+    "packaged_recovery_import_passed": true,
+    "service_module_syntax_passed": true,
+    "private_working_tree_files_copied": false,
+    "git_index_modified": false,
+    "evidence": "/tmp/crypto-bot-finalize-package-build-r5.json"
+  },
+  "public_rpc_probe": {
+    "endpoint": "https://api.mainnet.solana.com",
+    "requests": 6,
+    "elapsed_seconds": 2.596540689468384,
+    "response_body_wire_bytes": 409005,
+    "response_body_decoded_bytes": 1451933,
+    "finalized_slot": 464431194,
+    "sample_transactions": 257,
+    "relevant_transactions": 33,
+    "clean_relevant_transactions": 0,
+    "mainnet_identity_validated": true,
+    "gzip_validated": true,
+    "oracle_validated": true,
+    "existing_provider_pacing_preserved": true,
+    "index_or_trading_state_modified": false,
+    "wallet_loaded": false,
+    "transactions_submitted": 0,
+    "evidence": "/tmp/crypto-bot-public-probe.json"
+  },
+  "excluded_runtime_checks": [
+    "self-hosted RPC validator startup and synchronization",
+    "NixOS VM and privileged kernel/network enforcement",
+    "funded transaction signing or submission",
+    "sustained complete-hour production collection"
+  ],
+  "remaining_blockers": [
+    "Current Pump/PumpSwap event bytes exceed the pinned serialization layouts; unknown bytes and malformed receipts remain quarantined",
+    "Sustained complete, fresh ingestion must be established after exact deployed schemas are supported"
+  ],
+  "upstream_layout_report": "https://github.com/pump-fun/pump-public-docs/issues/54",
+  "live_ready": false,
+  "profitability_demonstrated": false,
+  "production_readiness_certified": false
+}

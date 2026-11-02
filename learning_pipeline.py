@@ -81,7 +81,10 @@ def synchronize(store, config, risk_config=None):
         report['quotes']=import_position_quotes(store,paths,config['rights'],config['provenance'])
     for family in ('svm','lstm','rag'):
         candidate = build_candidate(store,family,risk_config=risk_config,features_config=config.get('features',{}))
-        report['models'][family]={k:candidate[k] for k in ('id','status','reason') if k in candidate}
+        report['models'][family]={k:candidate[k] for k in ('id','status','reason','historical_evaluation') if k in candidate}
+        if candidate.get('id'):
+            report['models'][family]['training_evidence']=len(candidate.get('training_ids',[]))
+            report['models'][family]['qualification_claimed']=False
     return report
 
 

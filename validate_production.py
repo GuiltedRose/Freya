@@ -66,12 +66,21 @@ def tests(native=False,kernel=False):
             'omitted':omitted,'passed':result.wasSuccessful(),'complete':result.wasSuccessful() and not result.skipped and not omitted}
 
 
+def nix_validation_command(root,system):
+    """Git excludes private ignored state; never copy the entire checkout to Nix."""
+    if system not in ('x86_64-linux','aarch64-linux'):raise ValueError('Unsupported native validation platform')
+    root=Path(root).resolve();reference='git+'+root.as_uri()
+    return ['nix','--extra-experimental-features','nix-command flakes','build','--no-link',
+        '--no-write-lock-file','--reference-lock-file',str(root/'flake.lock'),
+        reference+'#checks.'+system+'.indexer',reference+'#native-rpc-app']
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--native',action='store_true')
     parser.add_argument('--kernel',action='store_true',help='Explicit isolated namespace tests; requires root on monolith')
-    parser.add_argument('--nix',action='store_true',help='Run flake checks on operator Nix host')
+    parser.add_argument('--nix',action='store_true',help='Build native app and offline indexer check; excludes NixOS VM/node/network checks')
     args=parser.parse_args()
     if args.output.exists():parser.error('Output must be new; prior validation evidence is preserved')
     if args.kernel and os.geteuid()!=0:parser.error('--kernel requires root on the monolith')
@@ -87,12 +96,18 @@ def main():
         report['python']=tests(args.native,args.kernel)
     if args.nix:
         try:
-            result=subprocess.run(['nix','flake','check','path:'+str(ROOT)],cwd=ROOT,check=False)
+            untracked=subprocess.run(['git','ls-files','--others','--exclude-standard','--','*.py','*.nix'],
+                cwd=ROOT,check=True,capture_output=True,text=True).stdout.splitlines()
+            if untracked:raise ValueError('Stage new source/test files before Git-backed flake validation; keep private files ignored')
+            system=subprocess.run(['nix','--extra-experimental-features','nix-command flakes','eval','--raw',
+                '--impure','--expr','builtins.currentSystem'],cwd=ROOT,check=True,capture_output=True,text=True).stdout.strip()
+            result=subprocess.run(nix_validation_command(ROOT,system),cwd=ROOT,check=False)
             report['nix']={'passed':result.returncode==0,'returncode':result.returncode}
-        except OSError as error:
-            report['nix']={'passed':False,'reason':type(error).__name__}
+        except (OSError,ValueError,subprocess.CalledProcessError) as error:
+            report['nix']={'passed':False,'reason':type(error).__name__,'detail':str(error)[:240]}
     report['completed_at']=time.time()
     report['complete']=report['python']['complete'] and report.get('nix',{}).get('passed',False)
+    report['requested_checks_passed']=report['python']['passed'] and (not args.nix or report.get('nix',{}).get('passed',False))
     with args.output.open('x') as stream:
         json.dump(report,stream,indent=2,allow_nan=False)
         stream.write('\n')

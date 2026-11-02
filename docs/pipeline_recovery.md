@@ -46,19 +46,19 @@ These commands include untracked source files without changing Git branches:
 ```bash
 cd /home/zelda/repos/crypto-bot
 export REPAIR_BUILD_DIR="$(mktemp -d /tmp/crypto-bot-review.XXXXXX)"
-nix build "path:$PWD#native-rpc-app" --out-link "$REPAIR_BUILD_DIR/app"
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_pipeline_repair.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_production_pipeline.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_model_decisions.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_onchain_indexer.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_onchain_hour.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_onchain_stream_candles.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_solana_observer.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_paper_runtime.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_meme_learning.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_unified_learning.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_rpc_backend_contract.py
-nix develop "path:$PWD#native-rpc" --command python -m unittest discover -s tests -p test_data_compliance.py
+nix build .#native-rpc-app --out-link "$REPAIR_BUILD_DIR/app"
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_pipeline_repair.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_production_pipeline.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_model_decisions.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_onchain_indexer.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_onchain_hour.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_onchain_stream_candles.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_solana_observer.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_paper_runtime.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_meme_learning.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_unified_learning.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_rpc_backend_contract.py
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_data_compliance.py
 "$REPAIR_BUILD_DIR/app/bin/crypto-bot-health" --config /etc/crypto-bot/pipeline.json
 ```
 

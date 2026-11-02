@@ -75,6 +75,15 @@ class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.rpc=CurveRpc();self.adapter=MemeAdapter(self.rpc,self.rpc.user,str(self.rpc.mint),str(self.rpc.pool),'bonding_curve')
 
+    def test_unknown_nonzero_trade_account_tail_is_not_used_for_execution(self):
+        account=self.rpc.records[str(self.rpc.pool)]
+        raw=base64.b64decode(account['data'][0])
+        account['data'][0]=base64.b64encode(raw+b'\0'*8).decode()
+        self.adapter.snapshot(True)
+        account['data'][0]=base64.b64encode(raw+b'\1').decode()
+        with self.assertRaisesRegex(ValueError,'Unreviewed nonzero account extension'):
+            self.adapter.snapshot(True)
+
     def test_constructs_unsigned_exact_input_bound_curve_and_creates_only_own_ata(self):
         market=self.adapter.snapshot(True);unsigned,ctx=self.adapter.build('buy',10000000,snapshot=market)
         self.assertTrue(all(s==Signature.default() for s in unsigned.signatures))
@@ -225,7 +234,9 @@ class EngineTests(unittest.TestCase):
         self.engine.signer=object()
         self.engine.eligibility_provider=lambda:{'live_eligible':False,'consecutive_promotions':0}
         self.store.state['halted']=True
-        self.assertEqual(self.engine.prepare(self.row,100,6.5,1200)['status'],'drawdown_halted')
+        with patch.object(self.engine,'mark'):
+            self.assertEqual(self.engine.prepare(self.row,100,6.5,1200)['status'],'drawdown_halted')
+        self.store.state['halted']=False
         self.store.state['position']={'mint':'Mint','pool':'Pool','kind':'bonding_curve',
             'units':1000,'cost_usd':1.78,'opened_at':1200}
         self.assertEqual(self.engine.prepare(self.row,100,6.5,1200)['status'],'holding')

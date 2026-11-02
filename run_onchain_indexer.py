@@ -52,10 +52,12 @@ def main():
     if not 1<=args.interval<=3600:parser.error('Indexer interval must be 1..3600 seconds')
     if not (args.status or args.mint):
         config = json.loads(args.config.read_text())
+        from pipeline_runtime import resolve_indexer
+        public={}
         if any(e.get('url')=='${SOLANA_RPC_URL}' for e in config.get('endpoints',[])):
             from config import public_env
-            from pipeline_runtime import resolve_indexer
-            config=resolve_indexer(config,public_env(args.env_file))
+            public=public_env(args.env_file)
+        config=resolve_indexer(config,public)
         from runtime_health import validate_config
         decoder = validate_config(config)
         from pipeline_runtime import writer_lock,check_index_target

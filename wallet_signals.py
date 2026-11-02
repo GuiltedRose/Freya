@@ -134,6 +134,9 @@ def ensure_worker(watchlist=DEFAULT_WATCHLIST, directory=DEFAULT_DIRECTORY, rpc=
         except BlockingIOError:
             return False
     environment = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C.UTF-8', 'PYTHONUNBUFFERED': '1'}
+    # Standalone collector keeps the same accounting ledger, never the signer.
+    if os.environ.get('CRYPTO_BOT_PROVIDER_LIMITS'):
+        environment['CRYPTO_BOT_PROVIDER_LIMITS']=os.environ['CRYPTO_BOT_PROVIDER_LIMITS']
     with (directory/'collector.log').open('a') as log:
         subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--watchlist', str(Path(watchlist).resolve()),
                           '--state-dir', str(directory.resolve()), '--rpc', rpc, '--loop'],
@@ -151,6 +154,53 @@ class SharedWalletFeed:
 
     def read_context(self,wallets):
         return read_signals(wallets,self.directory)
+
+
+class IndexedWalletFeed:
+    """Bounded discovery leads from the same finalized index; never wallet labels."""
+    def __init__(self,database):
+        from onchain_store import EventStore
+        self.store=EventStore(database,readonly=True)
+
+    def poll(self,wallets,now=None):
+        now=time.time() if now is None else now
+        wallets=list(dict.fromkeys(wallets))
+        if len(wallets)>32 or any(not valid_mint(wallet) for wallet in wallets):
+            raise ValueError('At most 32 valid watched wallet addresses')
+        if not wallets:return dict(unavailable('no_watched_wallets'),errors={})
+        try:
+            watermark=self.store.watermark()
+            if watermark is None or not 0<=now-watermark<=30:
+                return unavailable('finalized_wallet_index_stale')
+            coverage=self.store.coverage(watermark-300,watermark)
+            if not coverage['complete']:return unavailable('finalized_wallet_coverage_incomplete')
+            with self.store.connect() as db:
+                rows=db.execute("SELECT e.payload FROM events e JOIN blocks b ON b.slot=e.slot "
+                    "WHERE e.kind='swap' AND b.issues='[]' AND e.time>=? AND e.time<=? AND e.wallet IN ("
+                    +','.join('?' for _ in wallets)+') ORDER BY e.slot DESC,e.tx_index DESC,e.event_index DESC LIMIT 1025',
+                    (watermark-300,watermark,*wallets)).fetchall()
+            if len(rows)>1024:return unavailable('finalized_wallet_sample_capacity')
+            grouped={}
+            for row in rows:
+                event=json.loads(row[0])
+                if event['direction']!='buy':continue
+                observations=grouped.setdefault(event['mint'],{})
+                observations.setdefault(event['wallet'],{'wallet':event['wallet'],'mint':event['mint'],
+                    'action':'buy','observed_at':event['block_time'],'signature':event['signature'],
+                    'slot':event['slot'],'wallet_origin':'pinned','buy_size_quote':None,
+                    'quote_units':event['quote_units'],'quote_mint':event['quote_mint'],
+                    'amount_basis':'program event; wallet net spend unavailable','source':'finalized_rpc_index'})
+            groups=[{'mint':mint,'watched_buyers':len(observations),'observations':list(observations.values()),
+                     'independent_human_verified':False} for mint,observations in sorted(grouped.items())]
+            return {'status':'bounded_sample','schema':1,'watchlist_digest':digest(wallets),'published_at':watermark,
+                'signals':groups,'candidate_mints':sorted(grouped),'errors':{},'callouts':[],'hot_tokens':[],
+                'wallet_checks':{wallet:{'status':'bounded_sample','checked_at':watermark} for wallet in wallets},
+                'automatic_trade_approval':False,'independent_human_verified':False,
+                'coverage':coverage,'scope':'indexed program trades only; not complete wallet history or training outcomes'}
+        except (OSError,sqlite3.Error,ValueError,KeyError,TypeError):
+            return unavailable('finalized_wallet_index_unavailable')
+
+    def read_context(self,wallets):return self.poll(wallets)
 
 
 def collect_once(watcher, wallets, directory, now=None, callout_source=None, hot_source=None, leaderboard_source=None):

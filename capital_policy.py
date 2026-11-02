@@ -187,7 +187,7 @@ class CapitalPolicy:
                   and (not rows or stats['samples']>0)
                   and (stats['expectancy'] is None or stats['expectancy']>0)
                   and not self.db.execute('SELECT 1 FROM capital_revocations LIMIT 1').fetchone())
-        if warming_up:unlocked=existing_limit*self.config.allocation_steps[state['allocation']['tier']]
+        if warming_up:unlocked=existing_limit*self.config.allocation_steps[self.config.allocation_min]
         maximum=max(0,min(unlocked-overhead_usd-existing_position_usd,existing_limit,equity*self.config.max_portfolio_fraction-exposure-overhead_usd,
                           liquidity_limit if liquidity_limit is not None else 0))
         if positions>=self.capacity():maximum=0.

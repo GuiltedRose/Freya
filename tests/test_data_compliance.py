@@ -15,9 +15,10 @@ from meme_learning import new_weighted_model
 class ComplianceTests(unittest.TestCase):
     def test_pump_hosts_blocked_before_transport_including_standalone_scraper(self):
         with patch('paper_sources.build_opener') as transport:
-            for host in ('frontend-api-v3.pump.fun','swap-api.pump.fun','advanced-indexer.pump.fun','api.pump.fun'):
+            for host in ('frontend-api-v3.pump.fun','swap-api.pump.fun','advanced-indexer.pump.fun','api.pump.fun','api.pump.fun.','pump%2efun'):
                 with self.assertRaises(SourceAccessBlocked):PublicSources().fetch('https://'+host+'/test')
             transport.assert_not_called()
+            with self.assertRaises(SourceAccessBlocked):PublicSources().fetch('HTTPS://PUMP.FUN/test')
         with patch('pump_narratives.build_opener') as transport:
             with self.assertRaises(SourceAccessBlocked):fetch_json('https://frontend-api-v3.pump.fun/coins')
             transport.assert_not_called()

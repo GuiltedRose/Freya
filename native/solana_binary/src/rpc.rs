@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use base64::Engine;
 
 fn bad(message: &str) -> PyErr { PyValueError::new_err(message.to_string()) }
 fn offline() -> PyErr { PyConnectionError::new_err("native transport unavailable; endpoint omitted") }
@@ -28,10 +29,12 @@ fn url(value: &str, websocket: bool, loopback: bool) -> PyResult<reqwest::Url> {
     let parsed = reqwest::Url::parse(value).map_err(|_| bad("invalid endpoint"))?;
     let secure = if websocket { "wss" } else { "https" };
     let local = if websocket { "ws" } else { "http" };
-    if parsed.host_str().is_some_and(|s|s=="pump.fun" || s.ends_with(".pump.fun")) {
+    if parsed.host_str().is_some_and(|s|s.trim_end_matches('.')=="pump.fun" || s.trim_end_matches('.').ends_with(".pump.fun")) {
         return Err(bad("unreviewed web collector denied"));
     }
-    let literal_loopback = parsed.host_str().and_then(|s| s.parse::<std::net::IpAddr>().ok()).is_some_and(|a| a.is_loopback());
+    let literal_loopback = parsed.host_str().and_then(|s| {
+        s.strip_prefix('[').and_then(|v|v.strip_suffix(']')).unwrap_or(s).parse::<std::net::IpAddr>().ok()
+    }).is_some_and(|a| a.is_loopback());
     if parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some()
         || !(parsed.scheme()==secure || loopback && literal_loopback && parsed.scheme()==local) {
         return Err(bad("TLS or opted-in literal loopback required"));
@@ -50,13 +53,14 @@ fn request(method: &str, params: &str) -> PyResult<String> {
 }
 
 type HttpReply = (u16,String,String);
+type EncodedReply = (u16,String,String,String);
 #[pyclass]
 struct NativeHttp {
     client: std::sync::Mutex<Option<reqwest::Client>>, endpoint: reqwest::Url,
     inode:u64, busy:Arc<Semaphore>, stop:tokio::sync::watch::Sender<bool>,
 }
 impl NativeHttp {
-    fn operation(&self,method:&str,params:&str)->PyResult<impl std::future::Future<Output=PyResult<HttpReply>>+Send+'static> {
+    fn operation(&self,method:&str,params:&str,compressed:bool)->PyResult<impl std::future::Future<Output=PyResult<EncodedReply>>+Send+'static> {
         boundary(self.inode)?;
         let body=request(method,params)?;
         let client=self.client.lock().map_err(|_|offline())?.as_ref().ok_or_else(offline)?.clone();
@@ -70,19 +74,21 @@ impl NativeHttp {
                 _=stop.changed()=>Err(offline()),
                 result=async {
                     let mut response=client.post(endpoint).header("Content-Type","application/json")
-                        .header("Accept-Encoding","identity").body(body).send().await.map_err(|_|offline())?;
+                        .header("Accept-Encoding",if compressed {"gzip"} else {"identity"}).body(body).send().await.map_err(|_|offline())?;
                     let status=response.status().as_u16();
                     let retry=response.headers().get("retry-after").and_then(|v|v.to_str().ok()).unwrap_or("").chars().take(256).collect::<String>();
-                    if status!=200 {return Ok((status,retry,String::new()));}
+                    if status!=200 {return Ok((status,retry,"identity".to_string(),String::new()));}
                     if response.content_length().is_some_and(|n|n>64_000_000) {return Err(bad("oversized response"));}
-                    let encoding=response.headers().get("content-encoding").and_then(|v|v.to_str().ok()).unwrap_or("identity");
-                    if encoding!="identity" {return Err(bad("native response requires identity encoding"));}
+                    let encoding=response.headers().get("content-encoding").and_then(|v|v.to_str().ok()).unwrap_or("identity").to_string();
+                    if encoding!="identity" && !(compressed && encoding=="gzip") {return Err(bad("unsupported native response encoding"));}
                     let mut bytes=Vec::new();
                     while let Some(chunk)=response.chunk().await.map_err(|_|offline())? {
                         if bytes.len()+chunk.len()>64_000_000 {return Err(bad("oversized response"));}
                         bytes.extend_from_slice(&chunk);
                     }
-                    Ok((status,retry,String::from_utf8(bytes).map_err(|_|bad("invalid response UTF8"))?))
+                    let text=if encoding=="gzip" {base64::engine::general_purpose::STANDARD.encode(bytes)}
+                        else {String::from_utf8(bytes).map_err(|_|bad("invalid response UTF8"))?};
+                    Ok((status,retry,encoding,text))
                 }=>result,
             }
         })
@@ -108,11 +114,23 @@ impl NativeHttp {
         Ok(Self {client:std::sync::Mutex::new(Some(client)),endpoint,inode:namespace_inode,busy:Arc::new(Semaphore::new(1)),stop})
     }
     fn request<'py>(&self,py:Python<'py>,method:&str,params:&str)->PyResult<Bound<'py,PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py,self.operation(method,params)?)
+        let operation=self.operation(method,params,false)?;
+        pyo3_async_runtimes::tokio::future_into_py(py,async move {
+            let (status,retry,_,text)=operation.await?; Ok((status,retry,text))
+        })
     }
     fn request_sync(&self,py:Python<'_>,method:&str,params:&str)->PyResult<HttpReply> {
         if tokio::runtime::Handle::try_current().is_ok() {return Err(PyRuntimeError::new_err("blocking RPC inside Tokio is forbidden"));}
-        let operation=self.operation(method,params)?;
+        let operation=self.operation(method,params,false)?;
+        let (status,retry,_,text)=py.allow_threads(move ||pyo3_async_runtimes::tokio::get_runtime().block_on(operation))?;
+        Ok((status,retry,text))
+    }
+    fn request_encoded<'py>(&self,py:Python<'py>,method:&str,params:&str)->PyResult<Bound<'py,PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py,self.operation(method,params,true)?)
+    }
+    fn request_encoded_sync(&self,py:Python<'_>,method:&str,params:&str)->PyResult<EncodedReply> {
+        if tokio::runtime::Handle::try_current().is_ok() {return Err(PyRuntimeError::new_err("blocking RPC inside Tokio is forbidden"));}
+        let operation=self.operation(method,params,true)?;
         py.allow_threads(move ||pyo3_async_runtimes::tokio::get_runtime().block_on(operation))
     }
     fn close(&self)->PyResult<()> {
@@ -311,6 +329,8 @@ mod tests {
     #[test] fn endpoints() {
         assert!(url("http://example.org",false,true).is_err());
         assert!(url("http://127.0.0.1:8899",false,true).is_ok());
+        assert!(url("http://[::1]:8899",false,true).is_ok());
+        assert!(url("https://pump.fun.",false,false).is_err());
         assert!(url("https://user:secret@example.org",false,false).is_err());
     }
 }

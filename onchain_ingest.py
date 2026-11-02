@@ -2,6 +2,7 @@
 import base64
 import ipaddress
 import json
+import math
 import time
 import zlib
 from urllib.error import HTTPError, URLError
@@ -50,7 +51,10 @@ class IndexRpc:
         if (parsed.scheme != 'https' and not local_http) or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('HTTPS RPC endpoint required')
         self.source = endpoint['source_id']
-        self.interval = max(.5, float(endpoint.get('interval_seconds', 2)))
+        spacing=float(endpoint.get('request_interval_seconds',endpoint.get('interval_seconds',2)))
+        if not math.isfinite(spacing) or not .5<=spacing<=3600:
+            raise ValueError('RPC request interval must be finite and 0.5..3600 seconds')
+        self.interval = spacing
         self.budget = budget or BUDGET
         self.validated = False
         self.requests = self.wire_bytes = self.decoded_bytes = 0

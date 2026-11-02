@@ -132,7 +132,11 @@ def tick(engine,sources,feed,wallets,mints,discover=True,progress=None):
     held_results=[]
     for position in positions:
         try:
-            row=sources.observation(position['mint'])
+            try:row=sources.observation(position['mint'])
+            except (OSError,ValueError,KeyError,sqlite3.Error):
+                recovery=getattr(sources,'position_observation',None)
+                if recovery is None:raise
+                row=recovery(engine,position)
             engine.store.select_position(position['mint'])
             if row['market_kind']!=position['kind'] or row['pool']!=position['pool']:
                 from meme_execution import MemeAdapter
@@ -140,9 +144,10 @@ def tick(engine,sources,feed,wallets,mints,discover=True,progress=None):
                 candidate.snapshot()
                 position.update(pool=row['pool'],kind=row['market_kind'])
                 engine.store.save('verified_migration',{'mint':row['mint'],'pool':row['pool'],'kind':row['market_kind']})
-            equity=wallet_equity(engine.rpc,engine.user,price,None,sources,engine.store.state.get('rent_accounts',[]))
+            position_price=row.get('recovery_sol_price_usd',price)
+            equity=wallet_equity(engine.rpc,engine.user,position_price,None,sources,engine.store.state.get('rent_accounts',[]))
             engine.bankroll_valuation=getattr(sources,'_bankroll_valuation',{'complete':True})
-            held_results.append(engine.prepare(row,price,equity))
+            held_results.append(engine.prepare(row,position_price,equity))
             if engine.store.state['pending']:break
         except Exception as error:
             held_results.append({'status':'held_quote_unavailable','mint':position['mint'],'error_type':type(error).__name__})
@@ -261,6 +266,7 @@ def main():
     parser.add_argument('--json',action='store_true',help='Emit JSON console records instead of readable text; status.json remains JSON either way')
     parser.add_argument('--interval',type=float,default=30,help='Rest between flat-wallet scans (default 30s); open/pending positions rest at most 15s between checks')
     parser.add_argument('--onchain-db',type=Path,help='Local finalized observations; execution requires reviewed source policies and complete current data')
+    parser.add_argument('--recovery-config',type=Path,help='Approved indexer/oracle config for independent existing-position exit quotes')
     parser.add_argument('--unified-db',type=Path,help='Active qualified model database')
     parser.add_argument('--unified-config',type=Path)
     parser.add_argument('--capital-config',type=Path,default=Path(__file__).with_name('capital_policy.example.json'))
@@ -296,6 +302,7 @@ def main():
     store=MemeLiveStore(directory,user,rules,adopt_rules=args.adopt_rules,
         learning_wallet_db=args.wallet_source_dir/'wallet_watch.sqlite',
         followed_wallets=wallets,learning_paper_db=args.learning_paper_db,cooldown_training_only=True)
+    recovery_sources=None
     try:
         # Bind mode as well as wallet/rules: never silently reuse unsigned state
         # (marks, simulated observations) as a funded live experiment.
@@ -353,13 +360,21 @@ def main():
         if args.reconcile_only:
             publish(engine.recover())
             return
-        try:
-            if args.watchlist:ensure_worker(args.watchlist,args.wallet_source_dir,args.rpc)
-        except (OSError,ValueError): pass
-        feed=SharedWalletFeed(args.wallet_source_dir)
+        if args.onchain_db:
+            from wallet_signals import IndexedWalletFeed
+            feed=IndexedWalletFeed(args.onchain_db)
+        else:
+            try:
+                if args.watchlist:ensure_worker(args.watchlist,args.wallet_source_dir,args.rpc)
+            except (OSError,ValueError): pass
+            feed=SharedWalletFeed(args.wallet_source_dir)
         if args.onchain_db:
             from onchain_market import OnchainSources
             sources=OnchainSources(args.onchain_db)
+            if args.recovery_config:
+                from position_recovery import RecoverySources
+                recovery_sources=RecoverySources(sources,args.recovery_config,args.onchain_db)
+                sources=recovery_sources
         else:
             sources=PumpMarketSources(args.evidence_dir,include_legacy_metrics=rules.entry_style!='volume_candles')
         while True:
@@ -372,6 +387,7 @@ def main():
             if not args.loop: return 0
             time.sleep(delay)
     finally:
+        if recovery_sources:recovery_sources.close()
         if orders: orders.db.close()
         store.close()
 

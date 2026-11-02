@@ -304,11 +304,13 @@ def main():
                 args.wallet_source_dir.mkdir(parents=True,exist_ok=True)
                 watchlist = args.wallet_source_dir/('watchlist-'+digest(args.watch_wallet)[:12]+'.json')
                 watchlist.write_text(json.dumps({'wallets':args.watch_wallet}))
-            try:
-                ensure_worker(watchlist,args.wallet_source_dir,args.watch_rpc)
-            except (OSError,ValueError,KeyError,TypeError):
-                pass
-            watcher = SharedWalletFeed(args.wallet_source_dir)
+            if args.onchain_db:
+                from wallet_signals import IndexedWalletFeed
+                watcher=IndexedWalletFeed(args.onchain_db)
+            else:
+                try:ensure_worker(watchlist,args.wallet_source_dir,args.watch_rpc)
+                except (OSError,ValueError,KeyError,TypeError):pass
+                watcher = SharedWalletFeed(args.wallet_source_dir)
         if args.discover:
             narratives = NarrativeStore(args.state_dir/'narratives.sqlite')
         try:

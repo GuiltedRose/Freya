@@ -94,7 +94,8 @@ def health(database, mints=(), now=None):
     if not coverage['complete']:
         blockers.append('Complete finalized hour unavailable')
     with store.connect() as db:
-        issues = [dict(row) for row in db.execute("SELECT slot,issues FROM blocks WHERE issues!='[]' ORDER BY slot DESC LIMIT 3")]
+        issues = [dict(row) for row in db.execute("SELECT slot,issues FROM blocks WHERE issues!='[]' AND time>=? ORDER BY slot DESC LIMIT 3",
+                   ((watermark if watermark is not None else now)-3600,))]
         conversions = [dict(row) for row in db.execute('SELECT mint,max(time) AS latest FROM conversions GROUP BY mint')]
         row = db.execute("SELECT payload FROM telemetry WHERE name='oracle'").fetchone() if db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='telemetry'").fetchone() else None
@@ -103,6 +104,9 @@ def health(database, mints=(), now=None):
         store.conversion(SOL,int(now))
     except ValueError as error:
         blockers.append(safe_reason(error))
+    if issues:
+        details=json.loads(issues[0]['issues'])
+        if details:blockers.append('Decoder/receipt quarantine in required hour: '+safe_reason('; '.join(details[:2])))
     markets = {}
     if not mints:
         with store.connect() as db:

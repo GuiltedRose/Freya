@@ -109,11 +109,12 @@ class SharedWalletTests(unittest.TestCase):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertFalse(ensure_worker(watchlist, self.directory))
             spawn.assert_not_called()
-        with patch.dict(os.environ, {'SOLANA_PRIVATE_KEY': 'must-not-inherit'}), patch('wallet_signals.subprocess.Popen') as spawn:
+        with patch.dict(os.environ, {'SOLANA_PRIVATE_KEY': 'must-not-inherit','CRYPTO_BOT_PROVIDER_LIMITS':str(self.directory/'providers.sqlite')}), patch('wallet_signals.subprocess.Popen') as spawn:
             self.assertTrue(ensure_worker(watchlist, self.directory))
             environment = spawn.call_args.kwargs['env']
             self.assertNotIn('SOLANA_PRIVATE_KEY', environment)
-            self.assertEqual(set(environment), {'PATH', 'LANG', 'PYTHONUNBUFFERED'})
+            self.assertEqual(set(environment), {'PATH', 'LANG', 'PYTHONUNBUFFERED','CRYPTO_BOT_PROVIDER_LIMITS'})
+            self.assertEqual(environment['CRYPTO_BOT_PROVIDER_LIMITS'],str(self.directory/'providers.sqlite'))
 
 
 if __name__ == '__main__':

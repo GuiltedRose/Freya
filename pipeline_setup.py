@@ -114,6 +114,7 @@ def configure(args,public,indexer,learning):
     print('Setup starts no services and never reads signing fields. Existing configs are backed up before replacement.')
     if automatic:
         source['source_id']='builtin-'+automatic.replace('_','-')+'-v1'
+        source.setdefault('request_interval_seconds',.5)
         evidence=('Built-in '+automatic+' operational policy: operator-selected on-chain RPC for local collection, '
                   'learning and execution; not an independent provider-rights certification. '+PUBLIC_RPC_DOCS)
         if automatic=='selfhosted':

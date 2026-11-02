@@ -113,9 +113,10 @@ class RustIndexRpc(IndexRpc):
         await asyncio.to_thread(self.budget.reserve,self.url,self.interval)
         transport=self._transport_for(inode)
         self.requests+=1
-        try: response=await transport.request(method,text)
+        encoded=getattr(type(transport),'request_encoded',None) is not None
+        try: response=await (transport.request_encoded(method,text) if encoded else transport.request(method,text))
         except (ConnectionError,ValueError) as error: self._transport_error(error)
-        return self._finish(*response,method=method)
+        return (self._finish_encoded if encoded else self._finish)(*response,method=method)
 
     def call(self,method,params):
         try: asyncio.get_running_loop()
@@ -127,9 +128,10 @@ class RustIndexRpc(IndexRpc):
         transport=self._transport_for(inode)
         if not hasattr(transport,'request_sync'): raise RuntimeError('Rebuild native RPC extension with request_sync')
         self.requests+=1
-        try: response=transport.request_sync(method,text)
+        encoded=getattr(type(transport),'request_encoded_sync',None) is not None
+        try: response=transport.request_encoded_sync(method,text) if encoded else transport.request_sync(method,text)
         except (ConnectionError,ValueError) as error: self._transport_error(error)
-        return self._finish(*response,method=method)
+        return (self._finish_encoded if encoded else self._finish)(*response,method=method)
 
     def close(self):
         with self._transport_lock:
@@ -147,6 +149,23 @@ class RustIndexRpc(IndexRpc):
         size=len(text.encode())
         self.wire_bytes+=size; self.decoded_bytes+=size
         return rpc_result(text,method,self.source,self.budget,self.url)
+
+    def _finish_encoded(self,status,retry,encoding,text,method=None):
+        if status!=200:return self._finish(status,retry,'',method=method)
+        import base64
+        from onchain_ingest import decode_rpc_body
+        try:
+            if encoding=='gzip':
+                if len(text)>85_333_336:raise ValueError('Oversized compressed response')
+                raw=base64.b64decode(text,validate=True)
+            elif encoding=='identity':raw=text.encode('utf8')
+            else:raise ValueError('Unsupported response encoding')
+            decoded=decode_rpc_body(raw,encoding)
+            body=decoded.decode('utf8')
+        except (ValueError,UnicodeError):
+            raise SourceAccessBlocked('Malformed compressed native evidence; no backend retry') from None
+        self.wire_bytes+=len(raw);self.decoded_bytes+=len(decoded)
+        return rpc_result(body,method,self.source,self.budget,self.url)
 
     def decode_binary(self,response,*,tx_index,commitment):
         from solana_binary_ingest import ingest_rpc_response

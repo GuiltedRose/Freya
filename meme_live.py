@@ -351,6 +351,7 @@ class MemeLiveEngine:
         if s['pending']: return self.recover()
         self.store.select_position(snapshot['mint'])
         position=s['position']
+        if position is None and snapshot.get('exit_only') is True:return {'status':'recovery_quote_cannot_open_position'}
         if position and snapshot['mint']!=position['mint']: return {'status':'open_position_has_priority'}
         if position is None: self.mark(equity)
         if not 0<=now-snapshot['observed_at']<=30: return {'status':'stale_market_observation'}

@@ -90,7 +90,9 @@ def decode(account,name,program):
         value=int.from_bytes(data,'little',signed=kind.startswith('i'))
         if kind=='bool' and value not in (0,1): raise ValueError('Invalid account boolean')
         return bool(value) if kind=='bool' else value
-    return {f['name']:read(f['type']) for f in types[name]['fields']}
+    result={f['name']:read(f['type']) for f in types[name]['fields']}
+    if any(raw[offset:]):raise ValueError('Unreviewed nonzero account extension')
+    return result
 
 
 def extensions(raw,kind,allowed):

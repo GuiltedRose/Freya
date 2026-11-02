@@ -40,7 +40,7 @@ def format_report(report,events=()):
         summary+=' | data: '+str(status['status'])
     lines.append(summary)
     for source,error in list(errors.items())[:3]:
-        lines.append(f"SOURCE {source} | {error.get('reason',error.get('category',error.get('error_type','unavailable')))}")
+        lines.append(f"SOURCE {source} | {error.get('reason',error.get('category',error.get('error_type',error.get('status','unavailable'))))}")
     if status.get('open_position_quote_unavailable'):
         lines.append('EXIT BLOCKED | held-position quote unavailable; position retained')
     if status.get('learning_error'):

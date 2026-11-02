@@ -228,12 +228,13 @@ in {
       description = "Single-strategy live momentum reclaim; manual authorization";
       serviceConfig = {
         EnvironmentFile = cfg.live.environmentFile;
-        LoadCredential = [ "wallet.json:${cfg.live.keypairFile}" ] ++ lib.optional cfg.learning.enable "learning.json:${cfg.learning.configFile}";
+        LoadCredential = [ "wallet.json:${cfg.live.keypairFile}" "indexer.json:${cfg.indexerConfigFile}" ] ++ lib.optional cfg.learning.enable "learning.json:${cfg.learning.configFile}";
       };
       script = ''
         unset SOLANA_PRIVATE_KEY
         export SOLANA_KEYPAIR_PATH="$CREDENTIALS_DIRECTORY/wallet.json"
         exec ${cfg.package}/bin/crypto-bot-live --execute --onchain-db ${escapeShellArg index} \
+          --recovery-config "$CREDENTIALS_DIRECTORY/indexer.json" \
           ${lib.optionalString cfg.live.manageOnly "--manage-only"} \
           --capital-config ${escapeShellArg cfg.capitalConfigFile} \
           --state-dir ${escapeShellArg "${state}/live"} --rules ${escapeShellArg cfg.paper.rulesFile} \

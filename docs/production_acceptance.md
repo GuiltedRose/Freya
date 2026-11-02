@@ -35,16 +35,18 @@ paths on the monolith using [pipeline recovery](pipeline_recovery.md).
 
 ## Run everything together on the monolith
 
-Nothing below was executed by the implementation agent. From the repository:
+See [current finalization evidence](finalization_20261102.md) for executed checks,
+remaining feed blockers and deliberately excluded node/kernel tests. From the repository:
 
 ```bash
-nix develop "path:$PWD#native-rpc" --command python validate_production.py \
+nix develop .#native-rpc --command python validate_production.py \
   --native --nix --output /tmp/crypto-bot-validation.json
 ```
 
 Choose a new output filename for each run; reports are never overwritten. The runner
 discovers every Python test module, collects failures/errors/skips, enables the opted-in
-native loopback stress suite, and then invokes the flake checks. It does not start bot,
+native loopback stress suite, and then builds the native app and offline indexer
+check, excluding NixOS VM/node/network jobs. It does not start bot,
 indexer, training or trading services. Python test sockets are restricted to loopback;
 provider accounting is temporary, signer environment variables are removed, and access
 to repository operational state/credentials is rejected. Nix may fetch build inputs.
@@ -52,7 +54,7 @@ Privileged kernel checks are excluded unless explicitly selected. For the comple
 host/kernel pass on the monolith, with no production workloads running:
 
 ```bash
-sudo nix develop "path:$PWD#native-rpc" --command python validate_production.py \
+sudo nix develop .#native-rpc --command python validate_production.py \
   --native --kernel --nix --output /tmp/crypto-bot-validation-kernel.json
 ```
 

@@ -34,7 +34,17 @@ def format_learning(record):
     if not isinstance(models,dict):return 'ML | unexpected model report; inspect learning.log'
     for family,model in models.items():
         if not isinstance(model,dict):continue
-        details.append(f"{family.upper()}: {model.get('status','unknown')}"+(' ('+model['reason']+')' if model.get('reason') else ''))
+        text=f"{family.upper()}: {model.get('status','unknown')}"+(' ('+model['reason']+')' if model.get('reason') else '')
+        if model.get('id'):text+=' candidate '+str(model['id'])[:10]
+        if 'training_evidence' in model:text+=' | evidence '+str(model['training_evidence'])
+        evaluation=model.get('historical_evaluation') or {}
+        if isinstance(evaluation,dict):
+            if isinstance(evaluation.get('brier'),(int,float)):text+=f" | historical Brier {evaluation['brier']:.3f}"
+            net=evaluation.get('test_net') or {}
+            if isinstance(net,dict) and isinstance(net.get('policy_expectancy'),(int,float)):
+                text+=f" | held-out expectancy {net['policy_expectancy']:+.4f} ({net.get('status','collecting')})"
+                if isinstance(net.get('policy_drawdown'),(int,float)):text+=f" | drawdown {net['policy_drawdown']:.4f}"
+        details.append(text)
     return safe_line('ML | '+' | '.join(details or ['batch completed']))
 
 

@@ -95,6 +95,7 @@ class AutonomyTests(unittest.TestCase):
                 store.state['neural_autonomy']=state
                 row=setup();row.pop('execution');row['market_kind']='bonding_curve'
                 engine=MemeLiveEngine({},'user',store,policy(),adapter_factory=FakeAdapter)
+                engine.neural_mode='qualified'
                 # A shadow score cannot block; the mandatory risk check still does.
                 self.assertEqual(engine.prepare(row,100,6.5,1200)['status'],'onchain_risk_unavailable')
                 state['status']='active'

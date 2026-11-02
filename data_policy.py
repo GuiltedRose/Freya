@@ -1,5 +1,5 @@
 """Data-use restrictions verified 2026-10-30; no web-host scraping fallback."""
-from urllib.parse import urlparse
+from urllib.parse import urlparse,unquote
 
 
 class SourceAccessBlocked(ValueError):
@@ -7,8 +7,10 @@ class SourceAccessBlocked(ValueError):
 
 
 def is_pump_url(value):
-    if not isinstance(value,str) or not value.startswith(('https://','http://')):return False
-    host=(urlparse(value).hostname or '').lower()
+    if not isinstance(value,str):return False
+    parsed=urlparse(value)
+    if parsed.scheme.lower() not in ('https','http'):return False
+    host=unquote(parsed.hostname or '').lower().rstrip('.')
     return host=='pump.fun' or host.endswith('.pump.fun')
 
 

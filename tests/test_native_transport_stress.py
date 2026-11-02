@@ -18,6 +18,32 @@ ENABLED=os.environ.get('SOLANA_NATIVE_LOOPBACK_STRESS')=='1' and sys.platform=='
 
 @unittest.skipUnless(ENABLED,'Explicit monolith loopback stress and native rpc-engine required')
 class NativeTransportStress(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(NativeHttp is not None and hasattr(NativeHttp,'request_encoded_sync'),'Build native gzip transport methods')
+    async def test_gzip_wire_transport_and_strict_decompression(self):
+        import gzip
+        from unittest.mock import MagicMock,patch
+        from rpc_loopback_fixture import LocalRpcServer
+        from solana_rpc_compat import RustIndexRpc
+        from data_policy import SourceAccessBlocked
+        raw=(json.dumps({'jsonrpc':'2.0','id':1,'result':123})+' '*4096).encode()
+        compressed=gzip.compress(raw)
+        with LocalRpcServer() as server:
+            server.script=[{'body':compressed,'encoding':'gzip'},
+                           {'body':compressed+b'junk','encoding':'gzip'}]
+            inode=os.stat('/proc/self/ns/net').st_ino
+            client=NativeHttp(server.url,inode,True)
+            rpc=RustIndexRpc({'url':server.url,'allow_loopback_http':True,'source_id':'fixture'},MagicMock())
+            rpc._transport=client
+            try:
+                with patch('solana_rpc_compat.check_boundary',return_value=inode):
+                    self.assertEqual(await rpc.call_async('getSlot',[]),123)
+                    self.assertEqual(rpc.wire_bytes,len(compressed))
+                    self.assertEqual(rpc.decoded_bytes,len(raw))
+                    self.assertLess(rpc.wire_bytes,rpc.decoded_bytes)
+                    with self.assertRaises(SourceAccessBlocked):await rpc.call_async('getSlot',[])
+                self.assertEqual(len(server.requests),2)
+            finally:client.close()
+
     async def test_http_format_errors_backpressure_and_cancellation(self):
         release=asyncio.Event();entered=asyncio.Event();requests=[];handlers=set()
         async def serve(reader,writer):
