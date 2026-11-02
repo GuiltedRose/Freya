@@ -46,8 +46,10 @@ retains exact owner-only backups of existing files before replacement. New path 
 optional; defaults match these filenames and `state/onchain/index.sqlite`,
 `state/paper_volume`, `state/meme_live`, and `state/ml/unified.sqlite`.
 
-Interactive first-time `--initialize` and live `--execute` launch this wizard
-automatically when config files are absent, then continue startup after setup passes.
+Interactive paper startup (including resume without `--initialize`) and live
+`--execute` launch this wizard automatically when config files are absent, then
+continue startup after setup passes. `--preflight` never opens the wizard or connects
+to RPC.
 Without a terminal, missing configuration produces `configuration_required`; paper
 initialization creates unapproved templates. `--prepare-config` still creates only
 unapproved templates and preserves existing files. Parse failures are reported without cascading

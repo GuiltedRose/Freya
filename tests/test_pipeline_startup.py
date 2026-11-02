@@ -16,6 +16,25 @@ from run_bot_pipeline import clean_environment,prepare_files,supervise
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_existing_paper_session_enters_setup_and_resumes_without_initialize(self):
+        from run_bot_pipeline import main
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);state=root/'paper';state.mkdir()
+            saved=b'preserved session fixture';(state/'paper.sqlite').write_bytes(saved)
+            indexer=root/'indexer.json';learning=root/'learning.json'
+            def setup(args,public,*templates):
+                indexer.write_text(json.dumps({'oracle':{'feeds':[{}]}}))
+                learning.write_text(json.dumps({'ledgers':[]}))
+            command=['run_bot_pipeline.py','--state-dir',str(state),'--env-file',str(root/'absent.env'),
+                '--indexer-config',str(indexer),'--learning-config',str(learning),
+                '--onchain-db',str(root/'index.sqlite'),'--unified-db',str(root/'models.sqlite')]
+            with patch('sys.argv',command),patch('sys.stdout',io.StringIO()),patch('sys.stdin.isatty',return_value=True),patch.dict(os.environ,{},clear=True),patch('pipeline_setup.configure',side_effect=setup) as configure,patch('run_bot_pipeline.preflight',return_value=[]),patch('capital_policy.load_config'),patch('run_bot_pipeline.supervise') as supervise:
+                main()
+            configure.assert_called_once()
+            supervise.assert_called_once()
+            self.assertFalse(supervise.call_args.args[0].initialize)
+            self.assertEqual((state/'paper.sqlite').read_bytes(),saved)
+
     def test_initialize_creates_missing_config_without_starting_workers_or_claiming_review(self):
         from run_bot_pipeline import main
         with tempfile.TemporaryDirectory() as directory:

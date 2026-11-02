@@ -187,9 +187,10 @@ With Nix, after configuration passes preflight:
 nix --extra-experimental-features 'nix-command flakes' run .#paper -- --initialize
 ```
 
-If runtime configs are absent in an interactive terminal, `--initialize` opens the
-same guided setup before continuing. Without a terminal it creates review templates
-and exits with `configuration_required`. The wizard reads the public `.env` endpoint,
+If runtime configs are absent in an interactive terminal, normal paper startup
+(including resume) opens guided setup before continuing. Without a terminal it exits
+with `configuration_required`; `--initialize` additionally creates review templates.
+The wizard reads the public `.env` endpoint,
 asks for source/IDL/provenance review evidence, discovers finalized deployment slots,
 checks the oracle and saves both owner-only configs with backups. It does not infer
 IDL compatibility or source permissions from a successful RPC response.
