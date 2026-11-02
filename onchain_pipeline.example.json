@@ -7,6 +7,8 @@
     "backend": "rust",
     "event_backend": "rust",
     "interval_seconds": 5,
+    "burst_requests": 10,
+    "burst_cooldown_seconds": 10,
     "network_budget": {"status_file": "/run/solana-budget-status.json"},
     "policy": {
       "storage_verified": false,

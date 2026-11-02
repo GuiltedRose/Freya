@@ -1,5 +1,7 @@
 """Shared cross-process provider pacing; never retries a transaction submission."""
 import os
+import math
+import ipaddress
 import sqlite3
 import time
 from pathlib import Path
@@ -40,14 +42,24 @@ class ProviderBudget:
         db=sqlite3.connect(self.path,timeout=30)
         try:
             db.execute('CREATE TABLE IF NOT EXISTS providers(host TEXT PRIMARY KEY,next_at REAL,blocked REAL,attempts INTEGER,denied INTEGER)')
+            db.execute("CREATE TABLE IF NOT EXISTS provider_bursts(host TEXT PRIMARY KEY,count INTEGER NOT NULL,ready_at REAL NOT NULL)")
             return db
         except BaseException:
             db.close()
             raise
 
-    def reserve(self,url,interval=0):
+    def reserve(self,url,interval=0,*,burst_requests=None,burst_cooldown_seconds=10):
         require_permitted_url(url)
         host=self.key(url);minimum=6. if host=='api.geckoterminal.com' else .5
+        if burst_requests is None and host=='solana-public-rpc':burst_requests=10
+        if burst_requests is not None:
+            if type(burst_requests) is not int or not 1<=burst_requests<=100:
+                raise ValueError('RPC burst requests must be 1..100')
+            if isinstance(burst_cooldown_seconds,bool) or not isinstance(burst_cooldown_seconds,(int,float)) or not math.isfinite(burst_cooldown_seconds) or not 1<=burst_cooldown_seconds<=3600:
+                raise ValueError('RPC burst cooldown must be 1..3600 seconds')
+            if host=='solana-public-rpc':
+                burst_requests=min(10,burst_requests)
+                burst_cooldown_seconds=max(10,burst_cooldown_seconds)
         db=self.connect()
         try:
             with db:
@@ -56,10 +68,26 @@ class ProviderBudget:
                 now=self.clock()
                 if row[3]:raise SourceAccessBlocked('Provider access denied; manual authorization review required')
                 if row[1]>now:raise ProviderBackoff(row[1]-now)
+                burst=db.execute('SELECT count,ready_at FROM provider_bursts WHERE host=?',(host,)).fetchone()
+                if burst and burst[1]>now:raise ProviderBackoff(burst[1]-now)
                 at=max(now,row[0])
+                if burst_requests is not None:
+                    count=(burst[0] if burst and not burst[1] else 0)+1
+                    ready=at+max(minimum,interval,burst_cooldown_seconds) if count>=burst_requests else 0
+                    db.execute('INSERT OR REPLACE INTO provider_bursts VALUES(?,?,?)',(host,count,ready))
                 db.execute('INSERT OR REPLACE INTO providers VALUES(?,?,?,?,?)',(host,at+max(minimum,interval),row[1],row[2],0))
         finally:db.close()
         if at>now:self.sleep(at-now)
+
+    def reserve_rpc(self,url,interval=0):
+        """Default external RPC burst cap, including wallet/live RPC clients."""
+        host=(urlparse(url).hostname or '').lower()
+        local=host=='localhost'
+        try:
+            address=ipaddress.ip_address(host)
+            local=address.is_loopback or address.is_private
+        except ValueError:pass
+        self.reserve(url,interval,burst_requests=None if local else 10)
 
     def failure(self,url,status,headers=None):
         if status not in (401,403,429,500,502,503,504):return
@@ -85,8 +113,10 @@ class ProviderBudget:
         """Observe the shared deadline without clearing a denial or cooldown."""
         db=self.connect()
         try:
-            row=db.execute('SELECT blocked FROM providers WHERE host=?',(self.key(url),)).fetchone()
-            return max(0,row[0]-self.clock()) if row else 0
+            host=self.key(url)
+            row=db.execute('SELECT blocked FROM providers WHERE host=?',(host,)).fetchone()
+            burst=db.execute('SELECT ready_at FROM provider_bursts WHERE host=?',(host,)).fetchone()
+            return max(0,(row[0] if row else 0)-self.clock(),(burst[0] if burst else 0)-self.clock())
         finally:db.close()
 
     def success(self,url):

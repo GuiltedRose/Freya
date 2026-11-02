@@ -432,6 +432,9 @@ receipt-replay results and remaining runtime checks. Those results do not establ
 sustained feed capacity, a trading edge, or acceptance of a self-hosted node.
 [Binary decoder details](docs/native_decoder.md) cover the separate binary adapter.
 
+External RPC pacing is shared across paper/live workers: see
+[burst cooldowns and operator rollout](docs/rpc_burst_pacing.md).
+
 ## Paper challenger operation
 
 Independent management experiments, bounded replay, evidence requirements and

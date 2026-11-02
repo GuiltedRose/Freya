@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, build_opener
 from rpc_contract import RpcHistoryUnavailable, RpcEvidenceError, response_value, remote_error, http_error, rpc_result, rpc_batch_result
 from data_policy import SourceAccessBlocked
-from provider_limits import BUDGET, ProviderBackoff
+from provider_limits import BUDGET, ProviderBackoff, ProviderBudget
 from pump_narratives import NoRedirect
 from wallet_watch import MAINNET, PublicRpcError
 from onchain_decode import Decoder
@@ -55,6 +55,19 @@ class IndexRpc:
         if not math.isfinite(spacing) or not .5<=spacing<=3600:
             raise ValueError('RPC request interval must be finite and 0.5..3600 seconds')
         self.interval = spacing
+        # Remote providers share proactive HTTP burst pacing across paper/live.
+        # Isolated self-hosted nodes retain existing network-budget enforcement.
+        local=False
+        try:local=ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:pass
+        remote=endpoint.get('network_mode')!='isolated' and not local
+        self.burst_requests=endpoint.get('burst_requests',10) if remote else None
+        self.burst_cooldown_seconds=endpoint.get('burst_cooldown_seconds',10)
+        if remote and (type(self.burst_requests) is not int or not 1<=self.burst_requests<=100):
+            raise ValueError('RPC burst requests must be 1..100')
+        cooldown=self.burst_cooldown_seconds
+        if remote and (isinstance(cooldown,bool) or not isinstance(cooldown,(int,float)) or not math.isfinite(cooldown) or not 1<=cooldown<=3600):
+            raise ValueError('RPC burst cooldown must be 1..3600 seconds')
         self.budget = budget or BUDGET
         self.validated = False
         self.block_batch_size=endpoint.get('block_batch_size',1)
@@ -77,7 +90,11 @@ class IndexRpc:
         return rpc_batch_result(decoded,self.source,self.budget,self.url,len(slots))
 
     def _reserve(self,method):
-        try:self.budget.reserve(self.url,self.interval)
+        try:
+            if isinstance(self.budget,ProviderBudget):
+                self.budget.reserve(self.url,self.interval,burst_requests=self.burst_requests,
+                                    burst_cooldown_seconds=self.burst_cooldown_seconds)
+            else:self.budget.reserve(self.url,self.interval)
         except ProviderBackoff as error:
             error.rpc_method=method
             raise

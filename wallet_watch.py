@@ -241,7 +241,7 @@ class PublicRpc:
             time.sleep(wait)
         self.last = time.monotonic()
         from provider_limits import BUDGET
-        BUDGET.reserve(self.url,self.interval)
+        BUDGET.reserve_rpc(self.url,self.interval)
         request = Request(self.url, data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(),
                           headers={'Content-Type': 'application/json', 'User-Agent': 'SolanaPaperWalletWatch/0.1'})
         from urllib.error import HTTPError,URLError
