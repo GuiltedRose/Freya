@@ -8,9 +8,32 @@ from onchain_ingest import IndexRpc, Ingester, follow
 from onchain_market import OnchainMarket
 
 
+def bootstrap_start(store,clients,requested=None):
+    """Choose once for an empty index; never skip an existing durable prefix."""
+    if store.next_slot() is not None:return None
+    with store.connect() as db:
+        if db.execute('SELECT 1 FROM blocks LIMIT 1').fetchone() or db.execute('SELECT 1 FROM ranges LIMIT 1').fetchone():
+            raise ValueError('Historical index has no checkpoint; explicit recovery is required')
+    slot=requested
+    if slot is None:
+        for number,rpc in enumerate(clients):
+            try:
+                rpc.validate()
+                slot=rpc.call('getSlot',[{'commitment':'finalized'}])
+            except ConnectionError:
+                if number+1==len(clients):raise
+                continue
+            break
+    if type(slot) is not int or slot<0:raise ValueError('Invalid initial finalized slot')
+    with store.connect() as db:
+        db.execute("INSERT INTO checkpoints(name,value) VALUES('next_slot',?)",(slot,))
+    return slot
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path('onchain_indexer.example.json'))
+    parser.add_argument('--config', type=Path, default=Path('onchain_pipeline.json'),help='Reviewed runtime config; examples are never activated implicitly')
+    parser.add_argument('--env-file',type=Path,default=Path('.env'),help='Only public collection settings are read; signing fields are ignored')
     parser.add_argument('--db', type=Path, default=Path('state/onchain/index.sqlite'))
     parser.add_argument('--start-slot', type=int)
     parser.add_argument('--batch-slots', type=int, default=8)
@@ -24,10 +47,25 @@ def main():
     parser.add_argument('--mint')
     parser.add_argument('--pool')
     args = parser.parse_args()
+    if args.start_slot is not None and args.start_slot<0:parser.error('Start slot must be nonnegative')
+    if not 1<=args.batch_slots<=args.max_catchup_slots<=64:parser.error('Slot batch/catch-up bounds must be 1..64')
+    if not 1<=args.interval<=3600:parser.error('Indexer interval must be 1..3600 seconds')
     if not (args.status or args.mint):
         config = json.loads(args.config.read_text())
+        if any(e.get('url')=='${SOLANA_RPC_URL}' for e in config.get('endpoints',[])):
+            from config import public_env
+            from pipeline_runtime import resolve_indexer
+            config=resolve_indexer(config,public_env(args.env_file))
         from runtime_health import validate_config
         decoder = validate_config(config)
+        from pipeline_runtime import writer_lock,check_index_target
+        check_index_target(args.db)
+        with writer_lock(args.db,'indexer',config):
+            return run(args,config,decoder,parser)
+    return run(args,None,None,parser)
+
+
+def run(args,config,decoder,parser):
     store = EventStore(args.db, readonly=bool(args.status or args.mint), retain_blocks=args.retain_blocks)
     if args.status or args.mint:
         watermark = store.watermark()
@@ -57,7 +95,7 @@ def main():
             return
         ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'),
                             decoder=decoder, oracle=config.get('oracle'))
-        start = args.start_slot if store.next_slot() is None else None
+        start = bootstrap_start(store,endpoints,args.start_slot)
         candles=None
         markets=config.get('markets',[])
         if len(markets)>32:parser.error('At most 32 explicitly configured candle markets')

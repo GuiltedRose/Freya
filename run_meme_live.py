@@ -117,7 +117,11 @@ def tick(engine,sources,feed,wallets,mints,discover=True,progress=None):
             result['position_monitoring']=monitored
             engine.store.save('pending_position_monitor',{'positions':monitored})
             return result
-    engine.store.refresh_learning_model()
+    learning_error=None
+    if not getattr(engine,'manage_only',False):
+        try:engine.store.refresh_learning_model()
+        except (OSError,ValueError,KeyError,sqlite3.Error) as error:
+            learning_error=type(error).__name__
     cooldown=engine.loss_streak_cooldown(time.time())
     if cooldown and not engine.store.all_positions():
         return {'status':'loss_streak_cooldown','risk':cooldown,'training_samples':engine.store.state.get('learning_model_live',{}).get('samples',0)}
@@ -143,6 +147,12 @@ def tick(engine,sources,feed,wallets,mints,discover=True,progress=None):
         except Exception as error:
             held_results.append({'status':'held_quote_unavailable','mint':position['mint'],'error_type':type(error).__name__})
     capacity=engine.capital_policy.capacity() if getattr(engine,'capital_policy',None) else 1
+    if getattr(engine,'manage_only',False):
+        return {'status':'management_only_entries_disabled','positions':held_results,
+                'positions_retained':len(engine.store.all_positions())}
+    if learning_error:
+        return {'status':'learning_unavailable_entries_blocked','error_type':learning_error,
+                'positions':held_results,'positions_retained':len(engine.store.all_positions())}
     if held_results and (len(engine.store.all_positions())>=capacity or engine.store.state['pending']):
         return held_results[0] if len(held_results)==1 else {'status':'portfolio_managed','positions':held_results}
     equity=wallet_equity(engine.rpc,engine.user,price,None,sources,engine.store.state.get('rent_accounts',[]))
@@ -235,8 +245,9 @@ def main():
     parser.add_argument('--rpc',default='https://api.mainnet-beta.solana.com')
     parser.add_argument('--risk-rpc',help='Optional HTTPS read-only RPC for indexed holder/trade queries; never receives signed transactions')
     parser.add_argument('--reconcile-only',action='store_true',help='Check the original pending transaction once; never scan, sign or submit a new order')
+    parser.add_argument('--manage-only',action='store_true',help='Manage existing positions/reconcile pending orders; never open new positions')
     parser.add_argument('--adopt-rules',action='store_true',help='Explicitly adopt changed rules only when flat with no unresolved orders; preserves P&L and drawdown halt')
-    parser.add_argument('--neural-mode',choices=['qualified'],default='qualified',help='Prospectively qualified neural entry veto; all risk gates remain mandatory')
+    parser.add_argument('--neural-mode',choices=['learning','qualified'],default='learning',help='Learning accepts cold starts; qualified optionally requires independent model evidence')
     parser.add_argument('--profile',choices=['current','moderate','aggressive','adaptive'],help='Shared entry-tolerance profile; dollar limits and slippage are unchanged')
     parser.add_argument('--rules',type=Path,default=Path('meme_live_rules.json'))
     parser.add_argument('--state-dir',type=Path)
@@ -307,6 +318,9 @@ def main():
                 if risk_rpc.call('getGenesisHash',[])!=MAINNET_GENESIS: raise ValueError('Risk RPC must be mainnet')
             risk_assessor=OnchainRisk(risk_rpc)
         engine=MemeLiveEngine(rpc,user,store,rules,orders,signer,risk_assessor=risk_assessor,fixed_profile=args.profile if args.profile!='adaptive' else None)
+        engine.manage_only=args.manage_only
+        store.save('operator_live_policy',{'neural_mode':args.neural_mode,
+            'paper_history_required':False})
         engine.neural_mode=args.neural_mode
         try:
             from capital_policy import attach_live,seed
@@ -323,14 +337,9 @@ def main():
             except (ValueError,OSError,sqlite3.Error) as error:
                 from runtime_health import safe_reason
                 engine.capital_error=safe_reason(error)
-        def promotion_status():
-            from evaluation_state import load
-            from exit_evaluation import live_eligibility
-            try:return live_eligibility(load(args.learning_paper_db.parent/'exit_evaluation.json')[0])
-            except (OSError,ValueError,sqlite3.Error):return {'live_eligible':False,'reason':'Promotion history unavailable; entries blocked'}
-        engine.eligibility_provider=promotion_status
         def publish(result):
-            record={'timestamp':time.time(),'mode':'live' if args.execute else 'unsigned_simulation',**result}
+            record={'timestamp':time.time(),'mode':'live' if args.execute else 'unsigned_simulation',
+                    'neural_mode':args.neural_mode,**result}
             if result.get('status') in ('started','scan_complete','holding','confirmed_buy','confirmed_sell',
                     'loss_streak_cooldown','drawdown_halted','cycle_error_no_replacement_orders'):
                 from trade_metrics import rolling_performance

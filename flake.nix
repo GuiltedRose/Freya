@@ -66,7 +66,7 @@
           else nixpkgs.lib.hasSuffix ".py" rel
             || (nixpkgs.lib.hasPrefix "vendor/" rel && nixpkgs.lib.hasSuffix ".json" rel)
             || (nixpkgs.lib.hasPrefix "tests/fixtures/onchain/" rel && nixpkgs.lib.hasSuffix ".json" rel)
-            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" ];
+            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" ];
       };
     in {
       packages = eachSystem (system:
@@ -81,12 +81,14 @@
             dontBuild = true;
             installPhase = ''
               mkdir -p $out/share/crypto-bot $out/bin
-              cp *.py meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json $out/share/crypto-bot/
+              cp *.py meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json onchain_pipeline.example.json learning_pipeline.example.json $out/share/crypto-bot/
               cp -r vendor $out/share/crypto-bot/
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-indexer \
                 --add-flags "$out/share/crypto-bot/run_onchain_indexer.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-paper \
                 --add-flags "$out/share/crypto-bot/run_paper.py"
+              makeWrapper ${python}/bin/python $out/bin/crypto-bot-pipeline \
+                --add-flags "$out/share/crypto-bot/run_bot_pipeline.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-live \
                 --add-flags "$out/share/crypto-bot/run_meme_live.py"
               makeWrapper ${python}/bin/python $out/bin/crypto-bot-unified-learning \
@@ -143,12 +145,29 @@
         paper = {
           type = "app";
           program = toString (environments.${system}.pkgs.writeShellScript "crypto-bot-paper-runner" ''
-            exec ${self.packages.${system}.native-rpc-app}/bin/crypto-bot-paper \
-              --state-dir state/paper_volume --onchain-db state/onchain/index.sqlite \
-              --discover --loop --interval 30 "$@"
+            exec ${self.packages.${system}.native-rpc-app}/bin/crypto-bot-pipeline --mode paper "$@"
           '');
         };
         paper-raw = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-paper"; };
+        live = {
+          type = "app";
+          program = toString (environments.${system}.pkgs.writeShellScript "crypto-bot-live-runner" ''
+            exec ${self.packages.${system}.native-rpc-app}/bin/crypto-bot-pipeline --mode live "$@"
+          '');
+        };
+        live-raw = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-live"; };
+        collect = {
+          type = "app";
+          program = toString (environments.${system}.pkgs.writeShellScript "crypto-bot-collection-runner" ''
+            exec ${self.packages.${system}.native-rpc-app}/bin/crypto-bot-pipeline --mode indexer "$@"
+          '');
+        };
+        data = {
+          type = "app";
+          program = toString (environments.${system}.pkgs.writeShellScript "crypto-bot-data-runner" ''
+            exec ${self.packages.${system}.native-rpc-app}/bin/crypto-bot-pipeline --mode data "$@"
+          '');
+        };
       });
       devShells = eachSystem (system:
         let inherit (environments.${system}) pkgs python;

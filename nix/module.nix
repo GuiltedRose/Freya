@@ -59,6 +59,8 @@ in {
     };
     live = {
       enable = mkEnableOption "manually started, explicitly authorized live momentum reclaim trading";
+      manageOnly = mkOption { type = types.bool; default = false; description = "Existing-position exits and pending-order reconciliation only; never opens new positions."; };
+      neuralMode = mkOption { type = types.enum [ "learning" "qualified" ]; default = "learning"; description = "Learning permits live cold starts; qualified optionally requires model qualification."; };
       environmentFile = mkOption { type = types.str; default = ""; description = "Runtime SOLANA_RPC_URL environment file, outside the Nix store."; };
       keypairFile = mkOption { type = types.str; default = ""; description = "Runtime signer file loaded through systemd credentials; never stored in Nix."; };
     };
@@ -88,6 +90,8 @@ in {
   };
   config = mkIf cfg.enable {
     assertions = [
+      { assertion = !(cfg.paper.enable || cfg.live.enable && !cfg.live.manageOnly) || cfg.learning.enable;
+        message = "Paper/live consumers require the reviewed shared learning configuration; indexer-only operation can leave learning disabled."; }
       { assertion = cfg.rpcMode == "remote" || lib.attrByPath [ "services" "crypto-bot-node" "enable" ] false config;
         message = "Selfhosted/hybrid modes require importing and enabling the reviewed selfhost-rpc module."; }
       { assertion = !cfg.challengers.enable || (cfg.challengers.configFile != null && lib.hasPrefix "/" cfg.challengers.configFile);
@@ -227,14 +231,14 @@ in {
         LoadCredential = [ "wallet.json:${cfg.live.keypairFile}" ] ++ lib.optional cfg.learning.enable "learning.json:${cfg.learning.configFile}";
       };
       script = ''
-        ${cfg.package}/bin/crypto-bot-health --db ${escapeShellArg index} --require-ready
         unset SOLANA_PRIVATE_KEY
         export SOLANA_KEYPAIR_PATH="$CREDENTIALS_DIRECTORY/wallet.json"
         exec ${cfg.package}/bin/crypto-bot-live --execute --onchain-db ${escapeShellArg index} \
+          ${lib.optionalString cfg.live.manageOnly "--manage-only"} \
           --capital-config ${escapeShellArg cfg.capitalConfigFile} \
           --state-dir ${escapeShellArg "${state}/live"} --rules ${escapeShellArg cfg.paper.rulesFile} \
           --learning-paper-db ${escapeShellArg "${state}/paper/paper.sqlite"} \
-          --wallet-source-dir ${escapeShellArg "${state}/wallet_watch"} --neural-mode qualified --loop \
+          --wallet-source-dir ${escapeShellArg "${state}/wallet_watch"} --neural-mode ${escapeShellArg cfg.live.neuralMode} --loop \
           ${lib.optionalString cfg.learning.enable "--unified-db ${escapeShellArg "${state}/ml/unified.sqlite"} --unified-config \"$CREDENTIALS_DIRECTORY/learning.json\""} \
           ${lib.optionalString (cfg.paper.watchlistFile != null) "--watchlist ${escapeShellArg cfg.paper.watchlistFile}"} \
           ${lib.concatMapStringsSep " " (mint: "--mint ${escapeShellArg mint}") cfg.paper.mints}

@@ -110,7 +110,9 @@ def evidence_stats(rows,config=None,now=None):
 
 
 class CapitalPolicy:
-    def __init__(self,db,config):
+    def __init__(self,db,config,*,paper=False,percentage_warmup=False):
+        self.paper=paper is True
+        self.percentage_warmup=self.paper or percentage_warmup is True
         self.db=db;self.config=config;self.policy_id=config.version
         self.db.executescript('''CREATE TABLE IF NOT EXISTS capital_policy(id INTEGER PRIMARY KEY,config TEXT,state TEXT);
             CREATE TABLE IF NOT EXISTS capital_outcomes(id TEXT PRIMARY KEY,at REAL,body TEXT);
@@ -178,10 +180,19 @@ class CapitalPolicy:
         if failures and basis<=0:stats.update(kelly_fraction=0.,supported=False,reason='Failed costs lack verified capital basis')
         ceiling=equity*stats['kelly_fraction']
         unlocked=ceiling*self.config.allocation_steps[state['allocation']['tier']]
+        # Start learning with a reduced existing percentage budget. This is
+        # an allocation policy, not evidence of a measured Kelly edge.
+        warming_up=(self.percentage_warmup and not stats['supported'] and not failures
+                  and stats.get('reason')=='Insufficient independent cost-adjusted outcomes'
+                  and (not rows or stats['samples']>0)
+                  and (stats['expectancy'] is None or stats['expectancy']>0)
+                  and not self.db.execute('SELECT 1 FROM capital_revocations LIMIT 1').fetchone())
+        if warming_up:unlocked=existing_limit*self.config.allocation_steps[state['allocation']['tier']]
         maximum=max(0,min(unlocked-overhead_usd-existing_position_usd,existing_limit,equity*self.config.max_portfolio_fraction-exposure-overhead_usd,
                           liquidity_limit if liquidity_limit is not None else 0))
         if positions>=self.capacity():maximum=0.
         result={'allocation_usd':maximum*ml_fraction,'hard_maximum_usd':maximum,'kelly_ceiling_usd':ceiling,
+                'sizing_mode':('paper_percentage_warmup' if self.paper else 'live_percentage_warmup') if warming_up else 'kelly',
                 'ml_fraction':ml_fraction,'equity_usd':equity,'exposure_usd':exposure,'capacity':self.capacity(),
                 'reserved_overhead_usd':overhead_usd,
                 'tiers':state,'evidence':stats,'policy':asdict(self.config),'id':str(uuid.uuid4())}
@@ -190,7 +201,7 @@ class CapitalPolicy:
 
 
 def attach_live(engine,path):
-    policy=CapitalPolicy(engine.store.db,load_config(path))
+    policy=CapitalPolicy(engine.store.db,load_config(path),percentage_warmup=getattr(engine,'neural_mode','learning')!='qualified')
     engine.capital_policy=engine.store.capital_policy=policy
     state=engine.store.state
     if 'positions' not in state:

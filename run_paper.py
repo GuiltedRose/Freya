@@ -257,7 +257,7 @@ def main():
             from capital_policy import CapitalPolicy,load_config,seed
             from meme_learning import paper_outcomes
             try:
-                session.capital_policy=CapitalPolicy(session.db,load_config(args.capital_config))
+                session.capital_policy=CapitalPolicy(session.db,load_config(args.capital_config),paper=True)
                 seed(session.capital_policy,paper_outcomes(args.state_dir/'paper.sqlite')[0])
             except (ValueError,OSError,sqlite3.Error) as error:
                 from runtime_health import safe_reason

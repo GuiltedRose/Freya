@@ -183,7 +183,9 @@ class PaperSession:
             model_decision=None
             if getattr(self,'decision_models',None) and (event.get('action')=='paper_scale' or not any(p['mint']==snapshot['mint'] for p in self.trader.all_positions())):
                 try:
-                    model_decision=self.decision_models.entry(snapshot,candidate.rules)
+                    if (event.get('sizing') or {}).get('sizing_mode')=='paper_percentage_warmup':
+                        model_decision=self.decision_models.entry(snapshot,candidate.rules,paper_warmup=True)
+                    else:model_decision=self.decision_models.entry(snapshot,candidate.rules)
                 except (OSError,ValueError,KeyError,sqlite3.Error) as error:
                     from runtime_health import safe_reason
                     model_decision={'allow':False,'status':'model_unavailable','reason':safe_reason(error)}

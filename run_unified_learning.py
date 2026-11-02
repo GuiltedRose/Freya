@@ -6,6 +6,8 @@ Does not submit transactions.
 """
 import argparse
 import json
+import sys
+import time
 from pathlib import Path
 
 from unified_observations import ObservationStore
@@ -51,6 +53,8 @@ def main():
     parser.add_argument("--pipeline-config", type=Path, help="Reviewed ledger import and bounded family training")
     parser.add_argument('--sizing-evaluation-input',type=Path)
     parser.add_argument('--capital-config',type=Path,default=Path(__file__).with_name('capital_policy.example.json'))
+    parser.add_argument('--loop',action='store_true',help='Periodic bounded learning batches, with one writer per model database')
+    parser.add_argument('--interval',type=int,default=900)
     parser.add_argument("--status", action="store_true")
     parser.add_argument(
         "--train", choices=("svm", "lstm", "rag", "all")
@@ -59,6 +63,26 @@ def main():
     parser.add_argument("--forecast-input", type=Path)
     parser.add_argument("--evaluation-input", type=Path)
     args = parser.parse_args()
+
+    if args.loop:
+        if any((args.input,args.sizing_evaluation_input,args.status,args.train,args.candidate,args.forecast_input,args.evaluation_input)):
+            parser.error('--loop cannot combine one-shot import, training, forecast or evaluation flags')
+        if not args.pipeline_config or not 30<=args.interval<=86400:
+            parser.error('--loop requires --pipeline-config and interval 30..86400')
+        from pipeline_runtime import read_json,writer_lock
+        command=['--db',str(args.db),
+                 '--pipeline-config',str(args.pipeline_config),'--capital-config',str(args.capital_config)]
+        ownership={'pipeline':read_json(args.pipeline_config),'capital':read_json(args.capital_config)}
+        with writer_lock(args.db,'learning',ownership):
+            while True:
+                current=command+([] if args.db.exists() else ['--initialize'])
+                previous=sys.argv
+                try:
+                    sys.argv=[previous[0],*current]
+                    main()
+                finally:sys.argv=previous
+                time.sleep(args.interval)
+        return
 
     store = ObservationStore(args.db, create=args.initialize)
     imported = import_jsonl(store, args.input) if args.input else 0
@@ -137,7 +161,7 @@ def main():
             store, args.candidate, outcomes, failures
         )
 
-    print(json.dumps(report, sort_keys=True, allow_nan=False))
+    print(json.dumps(report, sort_keys=True, allow_nan=False),flush=True)
 
 
 if __name__ == "__main__":

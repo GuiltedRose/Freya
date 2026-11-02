@@ -1,11 +1,24 @@
 # Crypto Bot
 
+> **Disclaimer:** This is a vibe-coded project built with AI. Its code and results
+> may contain errors. Nothing here guarantees that you will make money; you can
+> lose money, including your entire trading balance. This project is not financial
+> advice. You are responsible for reviewing, testing, and choosing whether to run it.
+
 A Python toolkit for researching and trading Solana spot markets. It combines
 persistent paper trading, public market and wallet observation, strategy
 research, and a from-scratch neural network with optional live execution.
 
 The project is experimental. Backtests, modeled paper returns, and small live
 samples do not establish profitability.
+
+Live execution does not require paper history or promotion milestones. Start with
+paper trading to collect data and assess behavior before risking real funds; this
+is a recommendation, not an activation requirement. Live still requires explicit
+`--execute` and wallet authorization. Smaller percentage sizing applies during
+initial learning, followed by supported Kelly sizing. Capital limits, source checks,
+TP/SL, emergency stops and order reconciliation remain enforced. See
+[live operation](docs/coordinated_pipeline.md#shared-services-and-live-wiring).
 
 For the native/on-chain pipeline repair, operator-only build/test commands,
 activation gates and rollback, see [pipeline recovery](docs/pipeline_recovery.md).
@@ -51,18 +64,19 @@ one-hour consecutive-loss cooldown. Paper saves its model to
 `learning.json` in its state directory; the meme runner rebuilds shared weights
 from the outcome ledgers. Its default paper source is `state/paper_volume/paper.sqlite`.
 
-Paper uses active learning decisions. Live uses prospectively qualified neural
-decisions and retains its position limit, cooldown, sizing, safety and
+Paper and live default to active learning decisions. Live retains its position
+limit, cooldown, sizing, safety and
 execution checks; neural scores never bypass them. No live process is started
 by training alone.
 
 Paper defaults to one position and never overrides a neural veto for random
 exploration. Paper fills remain hypothetical and cannot establish a live edge.
 
-Live uses `--neural-mode qualified`: a frozen candidate must pass prospective
-confirmed-live evaluation before its veto becomes active. Configured unified
-models actively gate entries; missing scores block those entries. All source,
-execution and model qualification checks remain mandatory.
+Live defaults to `--neural-mode learning` without requiring prior paper history
+or promotion milestones. An empty model configuration permits initial learning;
+configured unified models still apply their score vetoes. Operators can choose
+`--neural-mode qualified` for prospective model qualification. Source permissions,
+market freshness and execution checks remain mandatory.
 See the [qualification policy](MEME_TRADER.md#autonomous-neural-qualification)
 and [network review](research/neural_network_review.md).
 
@@ -140,27 +154,34 @@ python3 -m venv .venv
 
 ### Paper trading
 
-Paper collection reads the finalized RPC index; `.env` does not start the indexer.
-First configure the reviewed sources, deployment/schema ranges and oracle feeds
-described in [pipeline recovery](docs/pipeline_recovery.md). In a separate terminal,
-start the indexer with your completed runtime configuration (not an unreviewed
-example), then check readiness:
+The coordinated flake runner now starts the RPC indexer, periodic learner and
+paper consumer together. It reads public collection settings from `.env` while
+keeping wallet signing fields out of collection/learning processes. A public RPC
+URL alone still cannot establish source rights, deployment/schema compatibility
+or valid USD oracle data. Prepare and review that configuration first:
 
 ```bash
-.venv/bin/python run_onchain_indexer.py \
-  --config onchain_pipeline.json --db state/onchain/index.sqlite --loop
-# In another terminal; wait for fresh, complete coverage and oracle data:
-.venv/bin/python runtime_health.py --db state/onchain/index.sqlite --require-ready
+nix --extra-experimental-features 'nix-command flakes' run \
+  --reference-lock-file ./flake.lock --no-write-lock-file \
+  .#paper -- --prepare-config
+# Review the generated owner-only configs; do not simply flip their flags.
+nix --extra-experimental-features 'nix-command flakes' run \
+  --reference-lock-file ./flake.lock --no-write-lock-file \
+  .#paper -- --preflight
 ```
 
-Use the actual index path if your deployment differs; the NixOS service defaults
-to `/var/lib/crypto-bot-paper/index/index.sqlite`. An existing but empty, stale or
-incomplete index is not ready for trading. The public RPC URL alone cannot replace
-the index, its permissions or its oracle configuration.
+Read [coordinated startup](docs/coordinated_pipeline.md) for the exact configuration
+requirements, source throughput/warmup, safe shutdown and shared paper/live operation.
+Preparation never overwrites an existing config or approves a source. Preflight
+lists blockers together and exits before opening paper state or connecting to RPC.
+Paper starts with the existing percentage budget reduced by its allocation tier
+(initially 25% of that budget), then uses supported Kelly sizing as evidence grows.
+Zero means no trade; live uses the same initial percentage-sizing approach without
+requiring paper outcomes. Qualification is optional; execution risk limits remain.
 
 For a **new** paper session using the current meme rules:
 
-With Nix, after the indexer is running:
+With Nix, after configuration passes preflight:
 
 ```bash
 nix --extra-experimental-features 'nix-command flakes' run .#paper -- --initialize
@@ -171,16 +192,20 @@ illustrative initial valuation of $100/SOL. Override those values with `--balanc
 `--native-sol` and `--sol-price`. Initialization refuses an existing paper database.
 Resume with `nix run .#paper`; it loads the saved inventory without resetting it.
 The runner defaults to `state/paper_volume` and `state/onchain/index.sqlite`; both
-paths can be overridden after `--`. It discovers markets every 30 seconds. Use
+paths can be overridden after `--`. The indexer bootstraps only an empty database
+at a finalized head, then resumes its durable checkpoint. It discovers markets
+every 30 seconds. Use
 `--no-loop` for one collection cycle, or `--status` for the saved report.
 `nix run .#paper-raw -- ...` retains the direct CLI, including feed-replay mode.
-The runner does not start an indexer or approve data sources. Keep `flake.lock`
+The runner starts the data workers but never approves data sources. Keep `flake.lock`
 ignored; runner checks use `--no-write-lock-file` to preserve any local lock.
 To use an existing ignored local lock reproducibly, also pass
 `--reference-lock-file ./flake.lock` before `.#paper`. Keep that local file;
 there is no need to remove it from `.gitignore` or add it to Git.
 
-Without Nix, supply inventory explicitly as before, or use `--initialize`:
+Without Nix, use `python run_bot_pipeline.py --mode paper --initialize` for the
+same supervision. The direct paper CLI below remains available for deployments
+that already run a separately configured indexer:
 
 ```bash
 .venv/bin/python run_paper.py \

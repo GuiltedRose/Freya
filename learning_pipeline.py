@@ -9,6 +9,10 @@ from unified_learning import build_candidate, forecast, load_candidate, MAX_STEP
 
 def load_config(path):
     config = json.loads(Path(path).read_text())
+    return validate_config(config)
+
+
+def validate_config(config):
     if not isinstance(config.get('provenance'),dict):
         raise ValueError('Reviewed learning provenance required')
     rights = config.get('rights',{})
@@ -86,7 +90,7 @@ class DecisionModels:
         self.store = ObservationStore(database,create=False)
         self.config = load_config(config)
 
-    def entry(self, snapshot, rules, *, live=False):
+    def entry(self, snapshot, rules, *, live=False, paper_warmup=False,require_qualification=True):
         import uuid
         from neural_autonomy import THRESHOLD, MAX_AGE
         from unified_learning import evaluate_candidate
@@ -107,7 +111,8 @@ class DecisionModels:
         rows=[dict(json.loads(row[0]),position_id=context_id) for row in reversed(saved)]
         candidates=self.config.get('candidates',{})
         predictions={}
-        allow=set(candidates)=={'svm','lstm','rag'}
+        warming_up=not candidates and ((paper_warmup is True and not live) or (live and not require_qualification))
+        allow=warming_up or set(candidates)=={'svm','lstm','rag'}
         for family,identifier in candidates.items():
             candidate=load_candidate(self.store,identifier)
             if candidate['family']!=family:
@@ -115,7 +120,7 @@ class DecisionModels:
             if not 0 <= time.time()-candidate['created_at'] <= MAX_AGE:
                 raise ValueError('Configured model is expired or dated in the future')
             prediction=forecast(self.store,identifier,rows,context_id,'live' if live else 'paper')
-            if live:
+            if live and require_qualification:
                 outcomes,failures=self.confirmed_outcomes()
                 qualification=evaluate_candidate(self.store,identifier,outcomes,failures)
                 prediction['qualification']=qualification
@@ -124,10 +129,11 @@ class DecisionModels:
             allow=allow and ((prediction.get('retrieval') or {}).get('edge_supported') is True if family=='rag'
                              else number(score) and (score<=1-THRESHOLD if family=='svm' else score>=THRESHOLD))
             predictions[family]=prediction
-        return {'allow':bool(allow),'status':'allowed' if allow else 'model_entry_blocked',
+        return {'allow':bool(allow),'status':'models_warming_up' if warming_up else 'allowed' if allow else 'model_entry_blocked',
                 'allocation_fraction':self.config.get('allocation_fraction',1.) if allow else 0.,
                 'position_id':context_id,'models':predictions,'required_families':['svm','lstm','rag'],
-                'reason':'All configured models must supply eligible scores; live also requires prospective qualification'}
+                'qualification_required':bool(live and require_qualification),
+                'reason':'Percentage warmup; no model qualification claimed' if warming_up else 'Configured model scores must pass; qualification applies only when requested'}
 
     def confirmed_outcomes(self):
         from meme_learning import live_outcomes

@@ -25,8 +25,9 @@ it no longer takes random below-threshold entries for exploration.
 Unified models are enabled by configuring their database and reviewed candidate IDs.
 They actively veto entries rather than merely logging predictions. All three families
 are required when unified models are enabled. Scores cannot authorize transactions,
-increase sizing, override safety vetoes or bypass prospective qualification. There is
-no public paper shadow mode or unqualified live neural mode.
+increase sizing or override safety vetoes. Prospective qualification is an optional
+stricter live policy (`--neural-mode qualified`); the default learning mode permits
+live cold starts without paper history. Paper-first operation is recommended.
 
 Missing state and credentials are expected on this development host. No replacement
 wallet, balance, model, checkpoint or `.env` has been created. Configure actual runtime
@@ -86,17 +87,18 @@ For every contributing RPC/oracle source, record `execution_verified: true` and
 `execution_evidence` only after actual source/receipt validation and operator review.
 Use a new versioned source ID when changing immutable policy. Current complete
 coverage and fresh quotes are checked in addition to this review. Unknown schema
-layouts and missing conversions remain blocked. Existing ten-promotion live eligibility
-and model qualification gates also remain; do not fabricate evidence to unblock them.
+layouts and missing conversions remain blocked. Paper history and ten-promotion
+milestones do not gate live activation; never fabricate model qualification evidence.
 
 If unified decisions are enabled, include the actual `bot_live` ledger path in the
 learning configuration so confirmed receipts feed prospective evaluation. The learner
 continues importing eligible paper/live outcomes and quote sequences for retraining.
 SVM needs independent risk labels through the reviewed JSONL importer; losses are not
 automatically risk labels. A fresh installation with no qualified models must report
-the missing evidence explicitly, not call itself ready or manufacture bootstrap trades.
+the missing evidence explicitly, not call itself validated. Percentage-sized learning
+trades still require genuine strategy signals and execution evidence.
 
-After the build, test, source and qualification gates pass, the operator starts:
+After operator build, test and source checks, the operator may start live directly:
 
 ```bash
 sudo systemctl start crypto-bot-health.service

@@ -29,6 +29,16 @@ class ModelDecisionTests(unittest.TestCase):
     def candidate(self,store,identifier):
         return {'family':identifier,'created_at':time.time()-1}
 
+    def test_live_learning_accepts_empty_history_without_claiming_qualification(self):
+        self.models.config['candidates']={}
+        with patch('unified_learning.evaluate_candidate',side_effect=AssertionError('No mandatory live qualification')):
+            decision=self.models.entry(self.snapshot,policy(),live=True,require_qualification=False)
+        self.assertTrue(decision['allow'])
+        self.assertFalse(decision['qualification_required'])
+        self.assertEqual(decision['models'],{})
+        self.snapshot['observed_at']+=1
+        self.assertFalse(self.models.entry(self.snapshot,policy(),live=True,require_qualification=True)['allow'])
+
     def test_low_score_actively_vetoes_and_all_scores_can_allow_paper(self):
         with patch('learning_pipeline.load_candidate',side_effect=self.candidate), patch('learning_pipeline.forecast',return_value={'score':.2}):
             self.assertFalse(self.models.entry(self.snapshot,policy())['allow'])

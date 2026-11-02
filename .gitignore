@@ -11,4 +11,6 @@ data/live_pool.jsonl
 result
 result-*
 flake.lock
+onchain_pipeline.json
+learning_pipeline.json
 

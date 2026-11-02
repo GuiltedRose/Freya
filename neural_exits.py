@@ -67,6 +67,15 @@ def train(paths):
 
 
 def decision(model,snapshot,rules,net,cost):
+    """An unavailable optional exit model must not interrupt hard TP/SL handling."""
+    try:return _decision(model,snapshot,rules,net,cost)
+    except (ValueError,KeyError,TypeError,AttributeError,OverflowError):
+        import logging
+        logging.getLogger(__name__).warning('Neural exit model unavailable; hard exit controls remain active')
+        return None
+
+
+def _decision(model,snapshot,rules,net,cost):
     if not model or model.get('task')!='one_minute_net_continuation' or model['samples']<30 or min(model['wins'],model['losses'])<5 or model.get('trades',0)<5:return None
     if not model.get('evaluation',{}).get('approved'):return None
     if not any(chart_features(snapshot)):return

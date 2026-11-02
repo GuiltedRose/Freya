@@ -28,7 +28,10 @@ Prospective RAG promotion requires independently recorded pre-entry predictions,
 confirmed cost-adjusted live outcomes, enough independent groups and observed days,
 positive lower-bound incremental expectancy, no worse drawdown, a passing held-out
 comparison and coverage of failed-order costs. Existing model lineage/expiry checks
-and the independent ten-consecutive-promotion live gate remain mandatory.
+remain required for claiming model qualification. Paper history and ten consecutive
+promotions are not prerequisites for live activation. Default live learning uses
+reduced percentage sizing until Kelly is supported; `--neural-mode qualified` is
+an optional stricter entry policy. No qualification evidence is manufactured.
 Rejected candidates require observable baseline outcomes for evaluation: missing
 counterfactual fills are never invented. Insufficient prospective evidence stays
 collecting; synthetic replay cannot qualify a live model.
