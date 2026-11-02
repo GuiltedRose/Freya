@@ -128,6 +128,7 @@ def markets_once(session, sources, mints, discover=False, narrative_store=None, 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state-dir', type=Path, default=Path('state/paper_memes'))
+    parser.add_argument('--initialize',action='store_true',help='Create a NEW paper session: defaults to 0 virtual USDC, 0.1 SOL and illustrative $100/SOL; refuses existing state')
     parser.add_argument('--total-equity',type=float,help='Total virtual wallet USD value including native SOL; subtracts its initial valuation from USDC')
     parser.add_argument('--balance', type=float, help='Starting virtual USDC; required for a new run/reset')
     parser.add_argument('--native-sol', type=float, help='Optional virtual native SOL; enables execution-cost/reserve ledger')
@@ -139,7 +140,7 @@ def main():
     parser.add_argument('--rules', type=Path)
     parser.add_argument('--exploratory',action='store_true',help='Paper-only market/chart experiment; unknown safety stays unqualified')
     parser.add_argument('--assume-usd-costs', action='store_true', help='Explicit scenario mode without a native-SOL ledger')
-    parser.add_argument('--onchain-db', type=Path, help='Opt-in local finalized index; modeled paper only')
+    parser.add_argument('--onchain-db', type=Path, help='Existing finalized RPC index database; required for native market collection/discovery')
     parser.add_argument('--unified-db', type=Path, help='Existing reviewed unified model database; active entry vetoes')
     parser.add_argument('--unified-config', type=Path)
     parser.add_argument('--capital-config',type=Path,default=Path(__file__).with_name('capital_policy.example.json'))
@@ -152,9 +153,9 @@ def main():
     parser.add_argument('--wallet-source-dir', type=Path, default=Path('state/wallet_watch'))
     parser.add_argument('--watchlist', type=Path, help='JSON file containing a wallets array of public addresses')
     parser.add_argument('--watch-rpc', default='https://api.mainnet-beta.solana.com', help='Public HTTPS RPC; never used for transaction submission')
-    parser.add_argument('--discover', action='store_true', help='Sample pump.fun launches; migrated PumpSwap pools only')
+    parser.add_argument('--discover', action='store_true', help='Discover markets from the selected finalized RPC index')
     parser.add_argument('--evidence-dir', type=Path, help='Supplemental identity-bound proof objects named <mint>.json')
-    parser.add_argument('--loop', action='store_true')
+    parser.add_argument('--loop', action=argparse.BooleanOptionalAction,default=False)
     parser.add_argument('--interval', type=float, default=60)
     parser.add_argument('--json',action='store_true',help='Print full JSON reports instead of compact summaries')
     parser.add_argument('--status', action='store_true')
@@ -169,7 +170,23 @@ def main():
     if args.onchain_db and args.feed:
         parser.error('--onchain-db and --feed are separate source modes')
     if not (args.feed or args.onchain_db or args.status or args.reset or args.reclaim_paper_rent) and (args.mint or args.discover or args.watch_wallet):
-        parser.error('Pump web sources are disabled; select --onchain-db or a permitted --feed')
+        parser.error('Native paper collection requires --onchain-db state/onchain/index.sqlite (use your actual index path), '
+                     'or a permitted --feed for replay. Run the finalized RPC indexer first; SOLANA_RPC_URL in .env '
+                     'does not start an indexer. Legacy Pump web collectors remain disabled.')
+    if args.onchain_db and not (args.status or args.reset or args.reclaim_paper_rent) and not args.onchain_db.is_file():
+        parser.error('--onchain-db must point to an existing finalized RPC index. Start run_onchain_indexer.py '
+                     'with a reviewed --config and the same --db path first. No paper session has been opened or reset.')
+    exists=(args.state_dir/'paper.sqlite').exists()
+    if args.initialize:
+        if args.reset or args.status or args.reclaim_paper_rent or args.assume_usd_costs:
+            parser.error('--initialize is separate from reset, status, rent reclaim and USD-only scenarios')
+        if exists:
+            parser.error('Paper state already exists; omit --initialize to resume it. Existing inventory was preserved.')
+        if args.balance is None and args.total_equity is None:args.balance=0.
+        if args.native_sol is None:args.native_sol=.1
+        if args.sol_price is None:args.sol_price=100.
+    if not exists and (args.status or args.reclaim_paper_rent):
+        parser.error('No paper session exists in this directory; use --initialize to create one first')
     if not 1<=args.max_positions<=20: parser.error('Paper positions must be 1 through 20')
     if not 0<=args.loss_cooldown_seconds<=86400: parser.error('Paper cooldown must be 0 through 86400 seconds')
     if args.reset and args.reclaim_paper_rent:
@@ -210,9 +227,9 @@ def main():
     from production_strategy import validate
     if not (args.status or args.reclaim_paper_rent):
         validate(rules)
-    exists = (args.state_dir/'paper.sqlite').exists()
     if (not exists or args.reset) and args.native_sol is None and not args.assume_usd_costs:
-        parser.error('Supply --native-sol and --sol-price to match inventory, or explicitly choose --assume-usd-costs')
+        parser.error('Fresh paper session: use --initialize for documented virtual defaults, or supply '
+                     '--balance, --native-sol and --sol-price; --assume-usd-costs selects a separate USD-only scenario')
     if args.adopt_rules and (not exists or args.reset or rules is None): parser.error('--adopt-rules requires an existing run and explicit rules without reset')
     session = PaperSession(args.state_dir, None if args.reset and exists else args.balance,
                            None if args.reset and exists or args.adopt_rules or args.status or args.reclaim_paper_rent else rules,

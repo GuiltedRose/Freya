@@ -140,7 +140,15 @@
         indexer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-indexer"; };
         observer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-observer"; };
         tmux = { type = "app"; program = "${environments.${system}.pkgs.tmux}/bin/tmux"; };
-        paper = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-paper"; };
+        paper = {
+          type = "app";
+          program = toString (environments.${system}.pkgs.writeShellScript "crypto-bot-paper-runner" ''
+            exec ${self.packages.${system}.native-rpc-app}/bin/crypto-bot-paper \
+              --state-dir state/paper_volume --onchain-db state/onchain/index.sqlite \
+              --discover --loop --interval 30 "$@"
+          '');
+        };
+        paper-raw = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/crypto-bot-paper"; };
       });
       devShells = eachSystem (system:
         let inherit (environments.${system}) pkgs python;

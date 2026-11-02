@@ -140,11 +140,52 @@ python3 -m venv .venv
 
 ### Paper trading
 
+Paper collection reads the finalized RPC index; `.env` does not start the indexer.
+First configure the reviewed sources, deployment/schema ranges and oracle feeds
+described in [pipeline recovery](docs/pipeline_recovery.md). In a separate terminal,
+start the indexer with your completed runtime configuration (not an unreviewed
+example), then check readiness:
+
+```bash
+.venv/bin/python run_onchain_indexer.py \
+  --config onchain_pipeline.json --db state/onchain/index.sqlite --loop
+# In another terminal; wait for fresh, complete coverage and oracle data:
+.venv/bin/python runtime_health.py --db state/onchain/index.sqlite --require-ready
+```
+
+Use the actual index path if your deployment differs; the NixOS service defaults
+to `/var/lib/crypto-bot-paper/index/index.sqlite`. An existing but empty, stale or
+incomplete index is not ready for trading. The public RPC URL alone cannot replace
+the index, its permissions or its oracle configuration.
+
 For a **new** paper session using the current meme rules:
+
+With Nix, after the indexer is running:
+
+```bash
+nix --extra-experimental-features 'nix-command flakes' run .#paper -- --initialize
+```
+
+This explicitly creates a new virtual session with 0 USDC, 0.1 SOL and an
+illustrative initial valuation of $100/SOL. Override those values with `--balance`,
+`--native-sol` and `--sol-price`. Initialization refuses an existing paper database.
+Resume with `nix run .#paper`; it loads the saved inventory without resetting it.
+The runner defaults to `state/paper_volume` and `state/onchain/index.sqlite`; both
+paths can be overridden after `--`. It discovers markets every 30 seconds. Use
+`--no-loop` for one collection cycle, or `--status` for the saved report.
+`nix run .#paper-raw -- ...` retains the direct CLI, including feed-replay mode.
+The runner does not start an indexer or approve data sources. Keep `flake.lock`
+ignored; runner checks use `--no-write-lock-file` to preserve any local lock.
+To use an existing ignored local lock reproducibly, also pass
+`--reference-lock-file ./flake.lock` before `.#paper`. Keep that local file;
+there is no need to remove it from `.gitignore` or add it to Git.
+
+Without Nix, supply inventory explicitly as before, or use `--initialize`:
 
 ```bash
 .venv/bin/python run_paper.py \
   --state-dir state/paper_volume \
+  --onchain-db state/onchain/index.sqlite \
   --rules meme_live_rules.json \
   --balance 0 --native-sol 0.1 --sol-price 100 \
   --watchlist paper_watchlist.json --discover --loop --interval 30
@@ -160,6 +201,7 @@ Resume an existing session with its saved inventory and rules:
 
 ```bash
 .venv/bin/python run_paper.py --state-dir state/paper_volume \
+  --onchain-db state/onchain/index.sqlite \
   --watchlist paper_watchlist.json --discover --loop --interval 30
 ```
 
