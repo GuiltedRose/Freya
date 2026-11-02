@@ -9,7 +9,8 @@ def public_env(path='.env'):
     """Read only collection settings; never export signing keys to workers."""
     allowed={'SOLANA_RPC_URL','CRYPTO_BOT_INDEXER_CONFIG','CRYPTO_BOT_LEARNING_CONFIG',
              'CRYPTO_BOT_INDEX_DB','CRYPTO_BOT_UNIFIED_DB','CRYPTO_BOT_PAPER_STATE_DIR',
-             'CRYPTO_BOT_LIVE_STATE_DIR'}
+             'CRYPTO_BOT_LIVE_STATE_DIR','CRYPTO_BOT_RPC_MODE','CRYPTO_BOT_RPC_BUDGET_STATUS',
+             'CRYPTO_BOT_ORACLE_MAX_CONFIDENCE_BPS'}
     values={key:os.environ[key] for key in allowed if key in os.environ}
     path=Path(path)
     if not path.exists():return values

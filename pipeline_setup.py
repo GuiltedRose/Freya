@@ -5,9 +5,45 @@ from pathlib import Path
 import tempfile
 import uuid
 import sys
+import ipaddress
 from decimal import Decimal
 from urllib.parse import urlsplit
 from pipeline_runtime import fingerprint,preflight,read_json,resolve_indexer,writer_lock
+
+PUBLIC_MAINNET_HOSTS={'api.mainnet.solana.com','api.mainnet-beta.solana.com'}
+PUBLIC_RPC_DOCS='https://solana.com/docs/references/clusters'
+
+
+def automatic_profile(public,indexer=None):
+    endpoints=(indexer or {}).get('endpoints',[])
+    if not isinstance(endpoints,list) or any(not isinstance(row,dict) for row in endpoints):return None
+    source=endpoints[0] if endpoints else {}
+    url=source.get('url') or public.get('SOLANA_RPC_URL','')
+    if url=='${SOLANA_RPC_URL}':url=public.get('SOLANA_RPC_URL','')
+    parsed=urlsplit(url)
+    if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:return None
+    mode=public.get('CRYPTO_BOT_RPC_MODE','auto')
+    if mode not in ('auto','remote_provider','selfhosted'):raise ValueError('CRYPTO_BOT_RPC_MODE must be auto, remote_provider or selfhosted')
+    try:
+        address=ipaddress.ip_address(parsed.hostname)
+        loopback=address.is_loopback
+        local=loopback or any(address in ipaddress.ip_network(network) for network in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','fc00::/7'))
+    except ValueError:loopback=local=False
+    if mode=='selfhosted' or local:
+        if parsed.scheme!='https' and not (loopback and parsed.scheme=='http'):
+            raise ValueError('Self-hosted RPC requires HTTPS, or HTTP on a literal loopback address')
+        return 'selfhosted'
+    if (parsed.scheme=='https' and parsed.hostname in PUBLIC_MAINNET_HOSTS
+        and parsed.port in (None,443) and parsed.path in ('','/') and not parsed.query):return 'public_mainnet'
+    return None
+
+
+def template_needs_setup(indexer_path,learning_path):
+    """Only migrate generated, unapproved templates; never re-enable disabled sources."""
+    if not Path(indexer_path).is_file() or not Path(learning_path).is_file():return True
+    source=read_json(indexer_path).get('endpoints',[{}])[0]
+    return (source.get('source_id')=='reviewed-mainnet-source-v1'
+        and 'REPLACE' in source.get('policy',{}).get('evidence','').upper())
 
 
 def answer(prompt,default=None):
@@ -56,7 +92,6 @@ def save_documents(documents,originals):
 
 def configure(args,public,indexer,learning):
     """Gather operator evidence and facts separately; credentials stay unexported."""
-    if not sys.stdin.isatty():raise ValueError('--configure requires an interactive terminal; existing JSON configs remain supported for unattended deployment')
     paths=[Path(args.indexer_config),Path(args.learning_config)]
     if paths[0]==paths[1]:raise ValueError('Indexer and learning configurations need separate paths')
     originals={}
@@ -68,35 +103,58 @@ def configure(args,public,indexer,learning):
             if path==paths[0]:indexer=read_json(path)
             else:learning=read_json(path)
     source=indexer['endpoints'][0]
-    if len(indexer['endpoints'])!=1 or source.get('network_mode')!='remote_provider':
+    automatic=automatic_profile(public,indexer)
+    if not automatic and not sys.stdin.isatty():raise ValueError('Custom provider setup requires reviewed config or an interactive terminal')
+    if len(indexer['endpoints'])!=1 or (not automatic and source.get('network_mode')!='remote_provider'):
         raise ValueError('Guided setup supports one remote HTTPS provider; existing isolated/home-node policies must use their dedicated setup')
     host=urlsplit(public.get('SOLANA_RPC_URL','')).hostname
     if source.get('url')=='${SOLANA_RPC_URL}':
         if not host:raise ValueError('Set SOLANA_RPC_URL in the owner-only .env first')
         source['policy']['allowed_rpc_hosts']=[host]
     print('Setup starts no services and never reads signing fields. Existing configs are backed up before replacement.')
-    confirm('Authorize read-only mainnet RPC probes using the configured provider and its existing request limits?')
-    evidence=answer('Source permission review evidence/reference for storage, training, evaluation and oracle use (no secrets)')
-    confirm('Have you verified those uses and the remote HTTPS provider boundary are permitted?')
+    if automatic:
+        source['source_id']='builtin-'+automatic.replace('_','-')+'-v1'
+        evidence=('Built-in '+automatic+' operational policy: operator-selected on-chain RPC for local collection, '
+                  'learning and execution; not an independent provider-rights certification. '+PUBLIC_RPC_DOCS)
+        if automatic=='selfhosted':
+            source['network_mode']='isolated'
+            source['network_budget']=source.get('network_budget') or {'status_file':public.get('CRYPTO_BOT_RPC_BUDGET_STATUS','/run/solana-budget-status.json')}
+            selected=public.get('SOLANA_RPC_URL','') if source.get('url')=='${SOLANA_RPC_URL}' else source['url']
+            source['allow_loopback_http']=urlsplit(selected).scheme=='http'
+        else:
+            source['network_mode']='remote_provider'
+            if source.get('network_budget'):raise ValueError('Public RPC profile cannot replace an existing node network-budget policy')
+        print(json.dumps({'status':'automatic_setup','profile':automatic,'prompts':False}),flush=True)
+    else:
+        confirm('Authorize read-only mainnet RPC probes using the configured provider and its existing request limits?')
+        evidence=answer('Source permission review evidence/reference for storage, training, evaluation and oracle use (no secrets)')
+        confirm('Have you verified those uses and the remote HTTPS provider boundary are permitted?')
     policy=source['policy']
+    if automatic:policy['profile']={'kind':automatic,'documentation':PUBLIC_RPC_DOCS,
+        'verification_scope':'Built-in operational policy; external provider rights and IDL compatibility are not independently certified'}
     policy.update(evidence=evidence,storage_verified=True,ml_verified=True,evaluation_verified=True,
-                  usd_conversion_verified=True,oracle_data_rights_verified=True,remote_provider_verified=True)
-    if args.mode=='live' and policy.get('execution_verified') is not True:
-        execution=answer('Execution source/receipt validation review reference (no secrets)')
-        confirm('Have you reviewed source suitability for real execution? This does not authorize a trade.')
+                  usd_conversion_verified=True,oracle_data_rights_verified=True,remote_provider_verified=automatic!='selfhosted')
+    if (args.mode=='live' or automatic) and policy.get('execution_verified') is not True:
+        execution=evidence if automatic else answer('Execution source/receipt validation review reference (no secrets)')
+        if not automatic:confirm('Have you reviewed source suitability for real execution? This does not authorize a trade.')
         policy.update(execution_verified=True,execution_evidence=execution)
     source['enabled']=True
-    confidence=int(answer('Maximum oracle confidence width in basis points (100 = 1%)'))
+    confidence=int(public.get('CRYPTO_BOT_ORACLE_MAX_CONFIDENCE_BPS','100') if automatic else answer('Maximum oracle confidence width in basis points (100 = 1%)'))
     if not 0<=confidence<=10000:raise ValueError('Oracle confidence must be 0..10000 bps')
     policy['oracle_max_confidence_bps']=confidence
     oracle=indexer['oracle'];oracle['source_id']=source['source_id']
     feed=oracle['feeds'][0]
     from wallet_watch import SOL
     if feed.get('mint')!=SOL:raise ValueError('Guided setup requires an identity-bound SOL/USD feed')
-    feed['feed_id']=answer('Reviewed SOL/USD feed ID',feed['feed_id'])
-    feed['shard']=int(answer('Oracle shard',feed.get('shard',0)))
-    feed['evidence']=answer('Oracle feed/mint/USD identity review reference (no secrets)')
-    confirm('Have you reviewed this SOL/USD feed identity, denomination and source rights?')
+    if automatic:
+        from onchain_oracle import SPEC
+        if feed['feed_id']!=SPEC['sol_usd_feed_id']:raise ValueError('Automatic SOL/USD profile must match the pinned feed manifest')
+        feed['evidence']='Pinned SOL/USD feed and receiver layout; finalized account identity, owner, verification, freshness and confidence checked at runtime'
+    else:
+        feed['feed_id']=answer('Reviewed SOL/USD feed ID',feed['feed_id'])
+        feed['shard']=int(answer('Oracle shard',feed.get('shard',0)))
+        feed['evidence']=answer('Oracle feed/mint/USD identity review reference (no secrets)')
+        confirm('Have you reviewed this SOL/USD feed identity, denomination and source rights?')
     feed['reviewed']=True
     if len(oracle['feeds'])!=1:raise ValueError('Guided setup handles one SOL/USD feed; retain additional feed configuration through explicit JSON review')
     indexer=resolve_indexer(indexer,public);source=indexer['endpoints'][0]
@@ -117,8 +175,11 @@ def configure(args,public,indexer,learning):
         if Decimal(quote['confidence_bps'])>confidence:raise ValueError('Current oracle confidence exceeds selected policy')
         print(json.dumps({'finalized_slot':head,'deployments':deployments,
                           'idl_hashes':{program:spec['hash'] for program,spec in decoder.specs.items()}}))
-        compatibility=answer('Evidence/reference confirming these deployed programs match these pinned IDLs')
-        confirm('Have you verified that compatibility? RPC deployment discovery alone does not prove it.')
+        if automatic:
+            compatibility='Runtime-bound current deployment and pinned decoder hash; not an independently certified IDL/program match. Unknown layouts remain quarantined.'
+        else:
+            compatibility=answer('Evidence/reference confirming these deployed programs match these pinned IDLs')
+            confirm('Have you verified that compatibility? RPC deployment discovery alone does not prove it.')
         if args.onchain_db.exists():
             from onchain_store import EventStore
             cursor=EventStore(args.onchain_db,readonly=True).next_slot()
@@ -130,8 +191,11 @@ def configure(args,public,indexer,learning):
         if any(slot>head for slot in deployments.values()):raise ValueError('Program deployment changed after finalized head; retry setup')
         if deployments!=read_program_deployments(rpc,decoder.specs):raise ValueError('Program upgraded during setup; no config saved')
     finally:close_rpc_clients([rpc])
-    proof=answer('Learning provenance review reference for timestamped, cost-adjusted paper/live ledger records')
-    confirm('Have you verified entry/quote timestamps and realized net-outcome handling? No synthetic labels or model qualification will be created.')
+    if automatic:
+        proof='Built-in bot-ledger import policy; individual records still require timestamps, cost basis, provenance and eligibility checks; reset/archived/synthetic outcomes remain excluded'
+    else:
+        proof=answer('Learning provenance review reference for timestamped, cost-adjusted paper/live ledger records')
+        confirm('Have you verified entry/quote timestamps and realized net-outcome handling? No synthetic labels or model qualification will be created.')
     learning['rights'].update(storage_verified=True,ml_verified=True,evaluation_verified=True,evidence=evidence)
     learning['provenance'].update(verified=True,entry_timestamp_verified=True,quote_timestamp_verified=True,
                                   net_outcomes_verified=True,evidence=proof)
@@ -139,7 +203,7 @@ def configure(args,public,indexer,learning):
                          {'source':'bot_live','path':str(args.live_state/'meme_live.sqlite')}]
     issues=preflight(indexer,learning,ledger_paths=[row['path'] for row in learning['ledgers']])
     if issues:raise ValueError('Setup validation failed: '+'; '.join(issues))
-    confirm('Save both configurations? This authorizes no trading and starts no services.')
+    if not automatic:confirm('Save both configurations? This authorizes no trading and starts no services.')
     with writer_lock(paths[0],'setup',{'files':[str(path) for path in paths]}):
         backups=save_documents(list(zip(paths,[indexer,learning])),originals)
     print(json.dumps({'status':'configured','mode':args.mode,'services_started':False,'runtime_ready':False,

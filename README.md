@@ -157,14 +157,14 @@ python3 -m venv .venv
 The coordinated flake runner now starts the RPC indexer, periodic learner and
 paper consumer together. It reads public collection settings from `.env` while
 keeping wallet signing fields out of collection/learning processes. A public RPC
-URL alone still cannot establish source rights, deployment/schema compatibility
-or valid USD oracle data. Prepare and review that configuration first:
+URL selects built-in, question-free setup for official public mainnet and self-hosted
+nodes. Setup checks mainnet identity, deployments and the oracle at runtime:
 
 ```bash
 nix --extra-experimental-features 'nix-command flakes' run \
   --reference-lock-file ./flake.lock --no-write-lock-file \
   .#paper -- --configure
-# Guided setup gathers review evidence, discovers deployments and checks the oracle.
+# Optional: startup also performs built-in setup automatically when needed.
 nix --extra-experimental-features 'nix-command flakes' run \
   --reference-lock-file ./flake.lock --no-write-lock-file \
   .#paper -- --preflight
@@ -172,7 +172,7 @@ nix --extra-experimental-features 'nix-command flakes' run \
 
 Read [coordinated startup](docs/coordinated_pipeline.md) for the exact configuration
 requirements, source throughput/warmup, safe shutdown and shared paper/live operation.
-Preparation never overwrites an existing config or approves a source. Preflight
+Setup backs up existing configurations before replacement. Preflight
 lists blockers together and exits before opening paper state or connecting to RPC.
 Paper starts with the existing percentage budget reduced by its allocation tier
 (initially 25% of that budget), then uses supported Kelly sizing as evidence grows.
@@ -187,13 +187,15 @@ With Nix, after configuration passes preflight:
 nix --extra-experimental-features 'nix-command flakes' run .#paper -- --initialize
 ```
 
-If runtime configs are absent in an interactive terminal, normal paper startup
-(including resume) opens guided setup before continuing. Without a terminal it exits
-with `configuration_required`; `--initialize` additionally creates review templates.
-The wizard reads the public `.env` endpoint,
-asks for source/IDL/provenance review evidence, discovers finalized deployment slots,
-checks the oracle and saves both owner-only configs with backups. It does not infer
-IDL compatibility or source permissions from a successful RPC response.
+Normal paper startup, including resume, automatically prepares missing configs or
+generated unapproved templates for built-in profiles, with no questions and no terminal
+required. `SOLANA_RPC_URL` selects official public mainnet, literal loopback or private
+node addresses. For your own node at a DNS hostname set `CRYPTO_BOT_RPC_MODE=selfhosted`.
+Node namespace/bandwidth enforcement remains mandatory; public mainnet uses the
+remote-provider path. Custom third-party providers retain explicit setup.
+These are operational defaults, not a certification of provider rights, model quality
+or IDL compatibility. Actual layout, deployment-change, oracle and source-data checks
+remain active. Setup saves owner-only configuration files with backups.
 
 Live has the same setup and supervision; paper history is optional:
 
@@ -207,7 +209,7 @@ nix --extra-experimental-features 'nix-command flakes' run \
   .#live -- --execute
 ```
 
-Interactive first-time `--execute` also opens guided setup if configs are missing.
+First-time `--execute` uses the same automatic built-in setup if configs are missing.
 Setup alone never loads a signer or starts trading. Live execution requires a local
 signing source; collection and paper workers do not receive it.
 

@@ -129,7 +129,11 @@ def main():
     learning_required=args.mode!='indexer' and not args.manage_only
     configuration_paths=[args.indexer_config]+([args.learning_config] if learning_required else [])
     missing=[str(candidate) for candidate in configuration_paths if not candidate.is_file()]
-    if missing and sys.stdin.isatty() and args.mode in ('paper','live') and not args.preflight:
+    from pipeline_setup import automatic_profile,template_needs_setup
+    candidate=read_json(args.indexer_config) if args.indexer_config.is_file() else None
+    automatic=automatic_profile(public,candidate)
+    setup_needed=bool(missing) or (automatic and template_needs_setup(args.indexer_config,args.learning_config))
+    if setup_needed and (automatic or sys.stdin.isatty()) and args.mode in ('paper','live') and not args.preflight:
         if args.initialize and (args.paper_state/'paper.sqlite').exists():parser.error('Paper state exists; omit --initialize to resume; nothing was reset')
         from pipeline_setup import configure
         configure(args,public,*template_documents(args))

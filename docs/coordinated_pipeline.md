@@ -37,8 +37,8 @@ nix --extra-experimental-features 'nix-command flakes' run \
   .#paper -- --configure
 ```
 
-The interactive wizard gathers explicit source, oracle, IDL-compatibility and ledger
-provenance evidence. It uses the existing paced, read-only native RPC client to
+Built-in profiles for official public mainnet and self-hosted nodes require no
+questionnaire or terminal. They use the existing paced, read-only native RPC client to
 discover mainnet finalized deployment slots and validate the oracle account/layout,
 freshness and confidence. It never loads signing fields or starts services.
 It saves `onchain_pipeline.json` and `learning_pipeline.json` with mode 0600 and
@@ -46,15 +46,30 @@ retains exact owner-only backups of existing files before replacement. New path 
 optional; defaults match these filenames and `state/onchain/index.sqlite`,
 `state/paper_volume`, `state/meme_live`, and `state/ml/unified.sqlite`.
 
-Interactive paper startup (including resume without `--initialize`) and live
-`--execute` launch this wizard automatically when config files are absent, then
-continue startup after setup passes. `--preflight` never opens the wizard or connects
-to RPC.
-Without a terminal, missing configuration produces `configuration_required`; paper
-initialization creates unapproved templates. `--prepare-config` still creates only
-unapproved templates and preserves existing files. Parse failures are reported without cascading
-errors about fields in a configuration that could not be loaded. A valid endpoint
-and wallet key alone cannot supply the review evidence listed below.
+Paper startup, including resume, and live `--execute` automatically configure
+built-in profiles when files are missing or still generated unapproved templates.
+`--preflight` stays offline and never runs setup. Custom third-party providers use
+the explicit review wizard; without a terminal they require supplied configuration.
+`--prepare-config` still creates only unapproved templates and preserves existing
+files. Parse failures are reported without cascading missing-field errors.
+
+`SOLANA_RPC_URL` selects the exact official HTTPS mainnet endpoints (including the
+legacy mainnet-beta hostname) or literal loopback/private self-hosted addresses.
+For your own node with a DNS hostname, set `CRYPTO_BOT_RPC_MODE=selfhosted`.
+Self-hosted setup retains enforced namespaces and bandwidth status from
+`CRYPTO_BOT_RPC_BUDGET_STATUS` (default `/run/solana-budget-status.json`). It never
+creates or resets a bandwidth ledger. Public mainnet does not use that node budget.
+HTTP remains restricted to literal loopback; remote node connections require HTTPS.
+Live's separate signer/RPC configuration still requires HTTPS.
+Oracle confidence defaults to 100 basis points, configurable through
+`CRYPTO_BOT_ORACLE_MAX_CONFIDENCE_BPS`. This is a rejection threshold, not an accuracy claim.
+
+Built-in profile metadata explicitly distinguishes operational policy from
+independent rights or IDL-compatibility certification. Only observed deployment slots
+and pinned hashes are bound; unknown layouts remain quarantined and upgrades block
+ingestion. Individual outcomes still need record-level provenance and eligibility.
+Public RPC is rate-limited and not a production availability guarantee; see the
+[official endpoint documentation](https://solana.com/docs/references/clusters).
 
 The same wizard is available through `.#live -- --configure`; live startup is
 `.#live -- --execute`, without a paper prerequisite. Setup never authorizes signing.
@@ -76,7 +91,7 @@ chmod 600 onchain_pipeline.json learning_pipeline.json
 The `<ID>` markers are placeholders, not literal shell input. Re-run `--preflight`
 before restarting the selected runner. Keep the backups until acceptance completes.
 
-The actual remaining operator inputs are:
+For custom providers and historical imports, explicit review still covers:
 
 * Source storage, stream if used, ML/evaluation and oracle permissions/evidence for
   the selected provider. Remote providers explicitly require `remote_provider`

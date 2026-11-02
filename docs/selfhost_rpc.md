@@ -172,6 +172,13 @@ bound node. This is a reserve alarm, not a guaranteed write-rate bound between
 checks. It never erases history to recover space; investigate/provision storage
 before manually restarting the node and its guard.
 
+The CLI paper/live runners use a built-in self-hosted profile without setup
+questions. Literal loopback/private addresses are detected automatically; for an
+owned node at a DNS hostname set `CRYPTO_BOT_RPC_MODE=selfhosted` in `.env`.
+The namespace and bandwidth status checks still apply before RPC access; setting
+this mode never creates or resets a bandwidth ledger. See
+[coordinated startup](coordinated_pipeline.md#first-configuration).
+
 `services.crypto-bot-paper.rpcMode` selects `remote` (default), `selfhosted` or
 `hybrid`. The offline configuration preflight requires the enabled endpoint list
 to match: remote-only, literal-loopback-only, or both. Selfhosted/hybrid require
