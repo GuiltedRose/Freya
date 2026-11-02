@@ -1,8 +1,8 @@
 # Coordinated collection, paper, learning and live operation
 
-This startup integration is **implemented but unexecuted**. The operator must run
-the new tests and deployment checks. Earlier component-test results do not validate
-these changes or establish profitability/readiness of a real market pipeline.
+See [ingestion acceptance](ingestion_repair_20261102.md) for executed checks and
+bounded runtime evidence. Sustained complete market windows and genuine paper
+trades remain separate operator acceptance; passing tests do not establish profit.
 
 ## What starts
 

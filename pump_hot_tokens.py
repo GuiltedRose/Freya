@@ -1,11 +1,9 @@
-"""Anonymous Pump hot/movers discovery, never an entry approval.
+"""Saved Pump hot/movers parsing, never online discovery or entry approval.
 
 The trending route currently reports board='movers'; keep that served label.
 Other chains/programs, old reports, and ambiguous identities are excluded.
 """
-import time
 from meme_evidence import number
-from paper_sources import PublicSources
 from pump_narratives import valid_mint
 
 HOT_TOKENS_URL='https://advanced-indexer.pump.fun/boards/trending?limit=20'
@@ -48,14 +46,3 @@ def eligible_hot_tokens(rows,now):
             result.append(dict(row,kol_identities_verified=False,automatic_trade_approval=False));seen.add(mint)
         except (TypeError,KeyError,ValueError): continue
     return result
-
-
-class HotTokens:
-    def __init__(self,fetch=None): self.fetch=fetch or PublicSources().fetch
-    def poll(self,now=None):
-        payload=self.fetch(HOT_TOKENS_URL)
-        now=time.time() if now is None else now
-        rows,rejected=parse_hot_tokens(payload,now)
-        return {'status':'partial_schema' if rejected else 'ok','hot_tokens':rows,'board':payload['board'],
-                'observed_at':now,'source_url':HOT_TOKENS_URL,'rejected_records':rejected,
-                'limitation':'Provider-selected popularity, not independent buyer quality, profitability or bundle safety'}

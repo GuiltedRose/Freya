@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from solders.pubkey import Pubkey
-from pump_hot_tokens import parse_hot_tokens,eligible_hot_tokens,HOT_TOKENS_URL,HotTokens
+from pump_hot_tokens import parse_hot_tokens,eligible_hot_tokens,HOT_TOKENS_URL
 from wallet_signals import rank_candidate_mints,read_signals,digest,collect_once
 from trend_pullback import social_interest
 from meme_dip import DipRules
@@ -58,12 +58,8 @@ class HotTokenTests(unittest.TestCase):
             self.assertEqual(read['hot_tokens'],[])
             self.assertEqual(read['signals'],[])
             self.assertFalse(read['automatic_trade_approval'])
-    def test_hot_source_failure_does_not_erase_existing_wallet_feed(self):
+    def test_rpc_collector_has_no_web_source_attachment(self):
         class Watcher:
-            def poll(self,wallets,now=None): return {'status':'bounded_sample','wallet_checks':{},'signals':[],'candidate_mints':['existing'],'errors':{}}
-        class Failed:
-            def poll(self,now=None): raise ConnectionError()
+            def poll(self,wallets,now=None):raise AssertionError('Retired attachment must be rejected before polling')
         with tempfile.TemporaryDirectory() as root:
-            result=collect_once(Watcher(),[WALLET],root,now=1001,hot_source=Failed())
-            self.assertEqual(result['candidate_mints'],['existing']);self.assertEqual(result['hot_tokens'],[])
-            self.assertIn('hot_token_source',result)
+            with self.assertRaises(TypeError):collect_once(Watcher(),[WALLET],root,now=1001,hot_source=object())

@@ -1,9 +1,9 @@
-# Observer rollout and unified ML operations — UNEXECUTED
+# Observer rollout and unified ML operations
 
-The operator runs everything below. No build, tests, deployment, network requests,
-model training or benchmark was executed here. No existing wallet, transaction,
-training ledger, weights or promotion history was opened or modified. Services
-and controls are implemented but cannot be called validated or deployed yet.
+The commands below are operator actions, not automatic activation. Current test
+and ingestion evidence is recorded in [ingestion acceptance](ingestion_repair_20261102.md).
+NixOS service activation, self-hosted node operation and real model performance
+remain separate acceptance requirements.
 
 ## Implementation
 
@@ -67,8 +67,9 @@ nix build --offline .#checks.x86_64-linux.solana-network-lifecycle
 nix flake show --offline
 ```
 
-Run the remaining startup/history/recovery suites in rpc_production_hardening.md
-and rpc_backend_completion_matrix.md. Inspect every skip. Offline/cache failure is
+Use [production acceptance](production_acceptance.md) for the aggregate startup,
+history and recovery checks and [RPC transport](rust_rpc_engine.md) for its contracts.
+Inspect every skip. Offline/cache failure is
 a gate: approve a bounded artifact transfer explicitly rather than removing isolation.
 Capture build output/import path, test counts, A/B results and runtime logs as operator
 evidence. Prior test passes are not measurements for these new ML/service changes.

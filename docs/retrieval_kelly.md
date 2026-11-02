@@ -1,8 +1,9 @@
 # Retrieval expectancy, capital ceilings and independent tiers
 
 Momentum reclaim remains the only production entry strategy. Discovery/candles
-continue through the native RPC pipeline. This implementation is unexecuted: the
-operator must run all tests, builds, source validation and activation.
+continue through the native RPC pipeline. See [ingestion acceptance](ingestion_repair_20261102.md)
+for executed checks. Real model-performance validation and activation remain
+operator-controlled; synthetic tests do not demonstrate a trading edge.
 
 ## Evidence and retrieval
 

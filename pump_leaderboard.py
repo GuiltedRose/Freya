@@ -1,7 +1,5 @@
-"""Top daily Pump leaderboard wallets: bounded discovery, not profit validation."""
+"""Saved Pump leaderboard parsing; no online collector or profit validation."""
 import math
-import time
-from paper_sources import PublicSources
 from pump_narratives import valid_mint
 
 LEADERBOARD_URL='https://frontend-api-v3.pump.fun/pnl-leaderboard?period=daily&limit=10'
@@ -45,13 +43,3 @@ def parse_leaderboard(payload,now):
 def effective_wallets(pinned,leaders,now):
     discovered=eligible_leaderboard_wallets(leaders,now)
     return list(dict.fromkeys(list(pinned)+[row['wallet'] for row in discovered]))[:32]
-
-
-class Leaderboard:
-    def __init__(self,fetch=None): self.fetch=fetch or PublicSources().fetch
-    def poll(self,now=None):
-        payload=self.fetch(LEADERBOARD_URL);now=time.time() if now is None else now
-        wallets,rejected=parse_leaderboard(payload,now)
-        return {'status':'partial_schema' if rejected else 'ok','leaderboard_wallets':wallets,
-                'period':'daily','period_label':payload.get('periodLabel'),'source_url':LEADERBOARD_URL,
-                'rejected_records':rejected,'limitation':'Provider PnL can include unrealized positions; rank is not verified profit or human identity'}

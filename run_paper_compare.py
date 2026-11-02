@@ -1,4 +1,4 @@
-"""Compare three paper portfolios using one recorded/live observation stream.
+"""Compare three paper portfolios using one recorded observation stream.
 
 No .env, wallet loading, signing or transaction submission. Same shared inputs,
 starting inventory, fees, slippage, reserves and exits for all three profiles.
@@ -11,50 +11,7 @@ import sqlite3
 import time
 from meme_dip import DipRules
 from paper_compare import Comparison,profiles
-from pump_market import ModeledPumpSources
-from pump_narratives import ROOT,valid_mint
-from paper_sources import source_error,UnsupportedMarket
-from wallet_signals import SharedWalletFeed,load_watchlist,ensure_worker,rank_candidate_mints
 from meme_evidence import number
-
-
-def market_cycle(comparison,sources,feed,wallets,mints=(),progress=None):
-    errors={};skipped={};processed=0;seen=set()
-    def observe(mint):
-        nonlocal processed
-        if mint in seen: return
-        seen.add(mint)
-        if progress: progress(mint)
-        try:
-            row=sources.observation(mint)
-            context=feed.read_context(wallets)
-            row['research_context']={'source_status':context.get('status','unknown'),
-                'hot_tokens':[c for c in context.get('hot_tokens',[]) if c['mint']==mint],
-                'hot_token_source':context.get('hot_token_source',{}),'callouts':[c for c in context.get('callouts',[]) if c['mint']==mint],
-                'wallet_signals':[g for g in context.get('signals',[]) if g['mint']==mint]}
-            if comparison.process(row) is not None:
-                processed+=1
-                comparison.publish({'status':'collecting_shared_data','last_mint':mint,'observations_added_this_cycle':processed})
-        except UnsupportedMarket: skipped[mint]='unsupported market'
-        except Exception as error: errors[mint]=source_error(error)
-    # Exit quotes for the UNION of held mints precede discovery and entries.
-    held=list(dict.fromkeys(s.trader.position['mint'] for s in comparison.sessions.values() if s.trader.position))
-    for mint in held: observe(mint)
-    context=feed.poll(wallets);ranked=rank_candidate_mints(context)
-    discovered=[]
-    try: discovered=[r['mint'] for r in sources.discover()]
-    except Exception as error: errors['discovery']=source_error(error)
-    pinned=list(dict.fromkeys(list(mints)+ranked[:2]))[:10]
-    remaining=[m for m in dict.fromkeys(ranked+discovered) if m not in pinned and m not in seen]
-    row=comparison.db.execute("SELECT value FROM metadata WHERE key='cursor'").fetchone()
-    cursor=json.loads(row[0]) if row else 0
-    count=min(10-len(pinned),len(remaining))
-    queue=pinned+([remaining[(cursor+i)%len(remaining)] for i in range(count)] if remaining else [])
-    with comparison.db:
-        comparison.db.execute("INSERT OR REPLACE INTO metadata VALUES('cursor',?)",(json.dumps((cursor+count)%len(remaining) if remaining else 0),))
-    for mint in queue: observe(mint)
-    return {'status':'incomplete' if errors else 'ok','observations_added':processed,'sources':errors,'skipped':skipped,
-            'candidate_mints':queue,'held_mints':held,'wallet_source_status':context.get('status','unknown')}
 
 
 def replay(comparison,feed=None,database=None,run_id=None):
@@ -101,9 +58,6 @@ def main():
     group.add_argument('--feed',type=Path,help='Replay completed JSONL observations identically across profiles')
     group.add_argument('--replay-db',type=Path,help='Replay a recorded paper.sqlite run; never overwrites it')
     parser.add_argument('--run-id')
-    parser.add_argument('--watchlist',type=Path,default=Path('paper_watchlist.json'))
-    parser.add_argument('--wallet-source-dir',type=Path,default=Path('state/wallet_watch'))
-    parser.add_argument('--mint',action='append',default=[])
     parser.add_argument('--loop',action='store_true')
     parser.add_argument('--interval',type=float,default=30)
     parser.add_argument('--status',action='store_true')
@@ -111,7 +65,6 @@ def main():
     parser.add_argument('--json',action='store_true')
     args=parser.parse_args()
     if not 10<=args.interval<=3600: parser.error('Interval must be 10 through 3600 seconds')
-    if any(not valid_mint(m) for m in args.mint) or len(args.mint)>5: parser.error('At most five valid explicit mints')
     if args.run_id and not args.replay_db: parser.error('--run-id requires --replay-db')
     if args.bankroll_usd is not None and (args.balance is not None or args.native_sol is not None): parser.error('Use total all-SOL bankroll OR explicit balances')
     if args.status:
@@ -120,16 +73,13 @@ def main():
         report=json.loads(report_path.read_text())
         print(json.dumps(report,indent=2) if args.json else display(report))
         return
+    if not args.feed and not args.replay_db:parser.error('Comparison requires --feed or --replay-db; legacy web collection was removed')
     exists=(args.state_dir/'manifest.json').exists()
-    sources=ModeledPumpSources()
     native,price,balance=args.native_sol,args.sol_price,args.balance
     if args.bankroll_usd is not None:
         number(args.bankroll_usd,0.01)
         if price is None and not exists:
-            if args.feed or args.replay_db: parser.error('Historical replay needs explicit --sol-price for the START of that period')
-            quote=sources.fetch(ROOT+'/sol-price')
-            if quote.get('stale') is not False or not 0<=time.time()-number(quote['asOfTimestamp'])/1000<=120: parser.error('Fresh SOL valuation unavailable')
-            price=number(quote['solPrice'],1e-15)
+            parser.error('Historical replay needs explicit --sol-price for the START of that period')
         if exists and price is None:
             initial=json.loads((args.state_dir/'manifest.json').read_text())['initial']
             price=initial['sol_price']
@@ -148,15 +98,10 @@ def main():
     try:
         if args.status:
             report=comparison.publish({'status':'status_only'});print(json.dumps(report,indent=2) if args.json else display(report));return
-        wallets=load_watchlist(args.watchlist);feed=SharedWalletFeed(args.wallet_source_dir)
-        if not args.feed and not args.replay_db:
-            try: ensure_worker(args.watchlist,args.wallet_source_dir)
-            except (OSError,ValueError): pass
-        comparison.publish({'status':'starting_shared_sources'})
+        comparison.publish({'status':'starting_recorded_replay'})
         print(json.dumps({'mode':'paired_paper_only','status':'started','profiles':list(comparison.sessions)}) if args.json else 'Paper comparison started: '+', '.join(comparison.sessions)+'. Shared data; no real trades.',flush=True)
-        progress=None if args.json else lambda mint: print('Collecting once for all profiles: '+mint,flush=True)
         while True:
-            status=replay(comparison,args.feed,args.replay_db,args.run_id) if args.feed or args.replay_db else market_cycle(comparison,sources,feed,wallets,args.mint,progress)
+            status=replay(comparison,args.feed,args.replay_db,args.run_id)
             report=comparison.publish(status);print(json.dumps(report) if args.json else display(report),flush=True)
             if not args.loop: break
             time.sleep(args.interval)

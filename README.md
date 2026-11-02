@@ -13,7 +13,7 @@ The project is experimental. Backtests, modeled paper returns, and small live
 samples do not establish profitability.
 
 Current acceptance status and remaining market-feed blockers are recorded in
-[runtime finalization](docs/finalization_20261102.md). Passing tests or starting
+[ingestion acceptance](docs/ingestion_repair_20261102.md). Passing tests or starting
 the dashboard does not establish that current on-chain event layouts are supported.
 
 Live execution does not require paper history or promotion milestones. Start with
@@ -136,6 +136,8 @@ prohibit AI training/evaluation. Existing histories are retained pending rights
 review. The replacement uses finalized native Solana RPC with source permissions
 and shared rate limits. The optional qualified live mode retains its ten-consecutive-
 promotion gate; ingestion does not qualify models or authorize live orders.
+Retired web polling wrappers are removed; saved-data parsers and shared native
+paper-cost helpers remain. Historical comparisons require `--feed` or `--replay-db`.
 See [audit evidence and source inventory](research/learning_source_audit_2026-10-30.md).
 
 For Nix development, separate server services and current throughput limits, see
@@ -348,7 +350,7 @@ chat, logs, and issue reports. Live execution can lose funds.
 - [Meme trader guide](MEME_TRADER.md): configuration, execution scope, paper workflows, and learning policy.
 - [Meme strategy review](research/meme_strategy_review.md): strategy research and limitations.
 - [Neural-network review](research/neural_network_review.md): architecture, adaptation, and verification.
-- [Project roadmap](ROADMAP.md): implementation history and remaining work.
+- [Production acceptance](docs/production_acceptance.md): strategy, checks and operating requirements.
 
 ## Nix development and isolated deployment checks
 

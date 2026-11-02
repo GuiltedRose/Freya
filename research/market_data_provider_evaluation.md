@@ -26,9 +26,10 @@ profitability. Missing source rights or market evidence must continue to block u
 
 ## Repository requirements: minute observations versus evaluation
 
-`run_paper.py`, `run_meme_live.py` and `run_paper_compare.py` currently instantiate
-`PumpMarketSources`/`ModeledPumpSources`. Their disabled sources supply discovery,
-SOL/USD, token/pool prices, activity, candles and optional holder/ATH context.
+Historical dependency inventory: Pump web polling has been removed. Current native
+paper sources reuse the conservative modeling helpers; `run_paper_compare.py`
+accepts recorded feeds/databases only. The retired collector previously supplied
+discovery, SOL/USD, prices, activity, candles and optional holder/ATH context.
 `wallet_snapshot.py` also depends on the old SOL-price route.
 
 - `volume_candles.py`: fresh market observation (30 seconds), verified 3+ completed

@@ -1,0 +1,56 @@
+{
+  "kind": "legacy_collector_cleanup_validation",
+  "base_commit": "e722e64e43b027b9ddc3d95ed69b407eabb15c1b",
+  "removed": [
+    "Pump hot-token/leaderboard/callout network collector classes",
+    "Collector-only callout SQLite writer",
+    "Pump web market observation implementation",
+    "Optional retired web attachments in wallet collector",
+    "Obsolete online comparison path and flags"
+  ],
+  "retained": [
+    "Saved-data parsers and eligibility checks",
+    "Native paper quote/rent modeling",
+    "Pinned-wallet RPC collection",
+    "Recorded feed/database comparison replay",
+    "Explicit fail-closed compatibility error for removed market collection"
+  ],
+  "python_native_loopback": {
+    "tests": 605,
+    "failures": 0,
+    "errors": 0,
+    "skips": [],
+    "omitted": [
+      "test_solana_network_kernel"
+    ],
+    "passed": true,
+    "complete": false
+  },
+  "report": "/tmp/freya-legacy-cleanup-validation-r1.json",
+  "cli_help_passed": [
+    "run_paper.py",
+    "run_meme_live.py",
+    "run_paper_compare.py",
+    "wallet_signals.py"
+  ],
+  "external_rpc_requests": 0,
+  "funded_services_started": false,
+  "operational_state_deleted_or_reset": false,
+  "source_hashes": {
+    "pump_market.py": "097e83a94c7a4464fbad262b5576b56f4ecbb11810c0fb1cba44a40052056212",
+    "pump_callouts.py": "bca4fbf06cf6f3f636971afeac1bd72a4210430b0351226aed5ef8502275ad33",
+    "pump_hot_tokens.py": "b0ff5318300c1ab47a19f1c1192a9f541dacc89962dde101aca0418ef24ad1b0",
+    "pump_leaderboard.py": "ddeb1a8b1aeaa8368fae0f4a3ee3d182aa8c9c61771a321fbcce20fb86d6e2bb",
+    "wallet_signals.py": "f53046caec5729f9048f41f50bed114cb73ec7786009563edd89bc02169574ca",
+    "run_paper_compare.py": "b2c5ada4c2b8c11b67512e3ecbf9b2eeb429856e1e8812b460a23dc38b8a8ac7",
+    "run_paper.py": "72bec6f811538ef6af067925eb3560bbd674c9a766ee4b33fcf2c7e69a75c3f9",
+    "run_meme_live.py": "fa4804c3369dc6c3ea4e98c5444b5f70472929d1506e246550813d73f2506c22"
+  },
+  "excluded": [
+    "Self-hosted RPC startup",
+    "NixOS/kernel tests",
+    "Funded/live execution",
+    "New Nix build (no native or package dependency changes)"
+  ],
+  "production_readiness_claimed": false
+}

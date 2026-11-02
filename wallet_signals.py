@@ -203,44 +203,19 @@ class IndexedWalletFeed:
     def read_context(self,wallets):return self.poll(wallets)
 
 
-def collect_once(watcher, wallets, directory, now=None, callout_source=None, hot_source=None, leaderboard_source=None):
+def collect_once(watcher, wallets, directory, now=None):
+    """Collect pinned-wallet RPC evidence; retired web collectors cannot attach."""
     from paper_sources import source_error
-    from pump_leaderboard import effective_wallets
-    leaderboard_report={}
-    leaders=[]
-    if leaderboard_source is not None:
-        try:
-            leaderboard_report=leaderboard_source.poll(now=now)
-            leaders=leaderboard_report['leaderboard_wallets']
-        except Exception as error: leaderboard_report=source_error(error)
-    effective=effective_wallets(wallets,leaders,time.time() if now is None else now)
+    effective=list(dict.fromkeys(wallets))[:32]
     try:
         if hasattr(watcher,'set_followed_wallets'):
             watcher.set_followed_wallets(wallets)
-        report = watcher.poll(effective, now=now)
+        report=watcher.poll(effective,now=now)
     except Exception as error:
-        report = dict(unavailable('incomplete'), wallet_checks={}, errors={'collector': source_error(error)})
-    if callout_source is not None:
-        try:
-            social=callout_source.poll(effective,now=now)
-            report['callouts']=social.pop('callouts')
-            report['callout_source']=social
-        except Exception as error:
-            report['callouts']=[]
-            report['callout_source']=source_error(error)
-            report.setdefault('errors',{})['callouts']=source_error(error)
-    if hot_source is not None:
-        try:
-            hot=hot_source.poll(now=now)
-            report['hot_tokens']=hot['hot_tokens']
-            report['hot_token_source']={k:v for k,v in hot.items() if k!='hot_tokens'}
-        except Exception as error:
-            report['hot_tokens']=[]
-            report['hot_token_source']=source_error(error)
-    report['disabled_sources']={'pump_web':'Undocumented web access unapproved; Developer API disallows AI training/evaluation'} if not any((callout_source,hot_source,leaderboard_source)) else {}
-    report['leaderboard_wallets']=leaders
-    report['leaderboard_source']=leaderboard_report
-    report['effective_wallet_count']=len(effective)
+        report=dict(unavailable('incomplete'),wallet_checks={},errors={'collector':source_error(error)})
+    report.update(callouts=[],hot_tokens=[],leaderboard_wallets=[],leaderboard_source={},
+                  effective_wallet_count=len(effective),
+                  disabled_sources={'pump_web':'Undocumented web access unapproved; Developer API disallows AI training/evaluation'})
     report.update(schema=1, watchlist_digest=digest(wallets), published_at=time.time() if now is None else now)
     directory = Path(directory)
     temporary = directory/'status.tmp'
@@ -283,11 +258,10 @@ def main():
         migrate_legacy_cache(args.state_dir)
         from wallet_watch import WalletWatcher, PublicRpc
         watcher = WalletWatcher(args.state_dir/'wallet_watch.sqlite', PublicRpc(args.rpc))
-        social=hot=leaderboard=None  # Saved-wallet RPC remains; Pump-host collectors disabled.
         try:
             while True:
                 wallets = load_watchlist(args.watchlist)
-                report = collect_once(watcher, wallets, args.state_dir,callout_source=social,hot_source=hot,leaderboard_source=leaderboard)
+                report = collect_once(watcher,wallets,args.state_dir)
                 print(json.dumps({'status': report['status'], 'candidate_mints': report['candidate_mints']}), flush=True)
                 if not args.loop:
                     return 0

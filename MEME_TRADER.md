@@ -386,15 +386,16 @@ policy: use a fresh `--state-dir` or an explicit archived reset for a new policy
 The shared-data paper experiment runs the three fixed profiles **plus a fourth
 portfolio using the per-coin selector**. All start with identical independent
 virtual inventory and receive the exact same durable observation stream in the
-same order. Each market snapshot is fetched once; union-held exit quotes are
-prioritized. A journal recovers partial fan-out without duplicate paper fills.
+same order. This historical comparison tool now accepts only recorded `--feed`
+or `--replay-db` input; its retired web collection path has been removed. A journal
+recovers partial fan-out without duplicate paper fills.
 There is no `.env` read, signer, submission, or automatic live promotion.
 
 ```bash
-# New forward experiment: each portfolio starts with $6.50 modeled entirely as SOL.
-.venv/bin/python run_paper_compare.py --bankroll-usd 6.50 --loop
-# Resume the same experiment without resetting inventory or rules.
-.venv/bin/python run_paper_compare.py --loop
+# Reuse a reviewed recorded observation feed; provide the period's starting SOL price.
+.venv/bin/python run_paper_compare.py --feed observations.jsonl --bankroll-usd 6.50 --sol-price STARTING_SOL_USD
+# Resume the same replay without resetting inventory or rules.
+.venv/bin/python run_paper_compare.py --feed observations.jsonl
 # Read the saved report without launching any funded trader.
 .venv/bin/python run_paper_compare.py --status
 # Historical replay: choose the starting period's SOL valuation, not today's.
@@ -917,7 +918,9 @@ python3 run_paper.py --balance 10 --native-sol 0.006 --sol-price 100 --discover 
 python3 run_paper.py --mint EXACT_SOLANA_MINT --evidence-dir /path/to/proofs --loop
 ```
 
-Pump.fun is now the primary paper market source (`PumpMarketSources`), in
+Historical implementation: Pump web collection has since been removed. Current
+paper/live collection uses native RPC; the saved parsers and modeling helpers remain.
+The earlier `PumpMarketSources` design is described below for historical context, in
 addition to discovery, watched wallets and Hot Callouts. The adapter reads the
 same anonymous endpoints observed in Pump's public web client:
 

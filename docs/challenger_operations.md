@@ -1,8 +1,8 @@
 # Independent paper experiments and node operation
 
-All changes are unexecuted. No profitability, measured RAM usage, successful node
-bootstrap or production readiness is established. Run the checks yourself before
-activation. Momentum reclaim remains the only production entry strategy; these
+See [ingestion acceptance](ingestion_repair_20261102.md) for executed checks.
+Profitability, sustained node resource usage and self-hosted bootstrap are not
+established by those tests. Complete the relevant operator checks before activation. Momentum reclaim remains the only production entry strategy; these
 management experiments have no live execution adapter or live authorization.
 
 ## Implementation and evidence boundaries

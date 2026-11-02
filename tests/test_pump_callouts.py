@@ -1,9 +1,7 @@
 import copy
 from datetime import datetime, timezone
-from pathlib import Path
-import tempfile
 import unittest
-from pump_callouts import HotCallouts, eligible_callouts, parse_hot_callouts
+from pump_callouts import eligible_callouts, parse_hot_callouts
 
 MINT = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
 WALLET = '11111111111111111111111111111111'
@@ -46,19 +44,13 @@ class HotCalloutTests(unittest.TestCase):
         rows, _ = parse_hot_callouts(payload(), 1100)
         self.assertEqual(eligible_callouts(rows, 1250), [])
 
-    def test_ids_deduplicate_and_cannot_change_mint_or_author(self):
-        with tempfile.TemporaryDirectory() as root:
-            data = payload()
-            data['coins'].append(copy.deepcopy(data['coins'][0]))
-            source = HotCallouts(Path(root)/'callouts.sqlite', lambda _: data)
-            report = source.poll([WALLET], now=1100)
-            self.assertEqual(len(report['callouts']), 1)
-            data['coins'][0]['coinMint'] = OTHER
-            data['coins'] = data['coins'][:1]
-            report = source.poll([WALLET], now=1110)
-            self.assertEqual(report['rejected_records'], 1)
-            self.assertEqual(report['callouts'], [])
-            source.db.close()
+    def test_saved_callout_ids_are_deduplicated_without_a_collector_database(self):
+        data=payload()
+        data['coins'].append(copy.deepcopy(data['coins'][0]))
+        rows,rejected=parse_hot_callouts(data,1100,[WALLET])
+        self.assertEqual(len(rows),1)
+        self.assertEqual(len(eligible_callouts(rows+rows,1100,[WALLET])),1)
+        self.assertFalse(rows[0]['automatic_trade_approval'])
 
     def test_missing_wallet_is_not_anonymous_identity_proof(self):
         data = payload()

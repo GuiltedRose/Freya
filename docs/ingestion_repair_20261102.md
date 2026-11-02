@@ -1,9 +1,10 @@
 # Ingestion repair and acceptance
 
 The software defects found in the investigated ingestion path are repaired. This
-is **not paper production acceptance**: the public endpoint throttled sustained
-collection, so complete fresh windows, observed paper trades and resulting learning
-have not been demonstrated. Historical reports are preserved; current evidence is
+is **not paper production acceptance**: the public endpoint throttled during the
+investigation, so complete fresh windows, observed paper trades and resulting
+learning remain unverified. Historical validation results are retained in JSON;
+current evidence is
 in [the repair validation report](validation_ingestion_20261102.json).
 
 ## Root causes and repairs
@@ -83,8 +84,10 @@ tests. All owned acceptance services were stopped.
 
 Sustained requests received HTTP 429. The test therefore did not establish ingestion
 throughput sufficient to keep up, complete candle windows, observed paper entries
-and exits, or learning from new completed outcomes. This is a provider-capacity
-blocker, not an absence of a naturally qualifying signal. The public RPC is
+and exits, or learning from new completed outcomes. Investigation traffic was
+heavier than normal usage: these results do not prove a steady-state capacity
+problem or permanent block. Honor Retry-After, then evaluate an isolated normal
+run before deciding whether the endpoint is sufficient. The public RPC is
 [rate-limited, with limits subject to change](https://solana.com/docs/references/clusters).
 Use a permitted source with sufficient history and sustained full-block capacity;
 never clear cooldowns, rotate endpoints to evade limits, skip slots, substitute

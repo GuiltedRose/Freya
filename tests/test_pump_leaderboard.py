@@ -39,33 +39,18 @@ class LeaderboardTests(unittest.TestCase):
         self.assertEqual(merged,[PINNED,LEADER])
         pinned=[str(Pubkey.new_unique()) for _ in range(32)]
         self.assertEqual(effective_wallets(pinned,rows,1001),pinned)
-    def test_collector_fixture_polls_discovered_wallet_but_reader_disables_unapproved_leaderboard(self):
-        rows,_=parse_leaderboard(payload(),1001);received=[]
-        class Board:
-            def poll(self,now=None): return {'leaderboard_wallets':rows,'status':'ok'}
+    def test_rpc_collector_only_polls_deduplicated_pinned_wallets(self):
+        received=[]
         class Watcher:
             def poll(self,wallets,now=None):
                 received.extend(wallets)
-                return {'status':'bounded_sample','wallet_checks':{LEADER:{'status':'bounded_sample','checked_at':1001}},
-                    'errors':{},'signals':[{'mint':MINT,'observations':[{'wallet':LEADER,'mint':MINT,'action':'buy','observed_at':1001}]}]}
+                return {'status':'bounded_sample','signals':[],'wallet_checks':{},'errors':{}}
         with tempfile.TemporaryDirectory() as root:
-            collect_once(Watcher(),[PINNED],root,now=1001,leaderboard_source=Board())
-            self.assertEqual(received,[PINNED,LEADER])
-            read=read_signals([PINNED],root,now=1002)
-            # Cached leaderboard membership cannot authorize an unpinned wallet.
-            self.assertEqual(read['signals'],[])
-            self.assertEqual(read['leaderboard_wallets'],[])
-            self.assertNotIn(MINT,read['candidate_mints'])
-            self.assertFalse(read['automatic_trade_approval'])
-            report=json.loads((Path(root)/'status.json').read_text());report['wallet_checks'][LEADER]['status']='unavailable'
-            (Path(root)/'status.json').write_text(json.dumps(report))
-            self.assertEqual(read_signals([PINNED],root,now=1002)['signals'],[])
-    def test_board_failure_preserves_pinned_watchlist(self):
-        received=[]
-        class Board:
-            def poll(self,now=None): raise ConnectionError()
-        class Watcher:
-            def poll(self,wallets,now=None): received.extend(wallets);return {'status':'bounded_sample','signals':[],'wallet_checks':{},'errors':{}}
+            report=collect_once(Watcher(),[PINNED,PINNED],root,now=1001)
+            self.assertEqual(received,[PINNED])
+            self.assertEqual(report['leaderboard_wallets'],[])
+            self.assertIn('pump_web',report['disabled_sources'])
+
+    def test_retired_leaderboard_attachment_cannot_add_wallets(self):
         with tempfile.TemporaryDirectory() as root:
-            report=collect_once(Watcher(),[PINNED],root,now=1001,leaderboard_source=Board())
-            self.assertEqual(received,[PINNED]);self.assertEqual(report['leaderboard_wallets'],[])
+            with self.assertRaises(TypeError):collect_once(object(),[PINNED],root,leaderboard_source=object())

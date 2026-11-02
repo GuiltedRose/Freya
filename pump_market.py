@@ -1,17 +1,15 @@
-"""Pump-owned market feeds used by its web client; anonymous, no wallet login.
+"""Saved candle parsing and shared conservative paper execution assumptions.
 
-OHLCV is explicitly price_usd at 1m. The ATH/pullback uses separately labeled
-USD market capitalization, never market cap relabeled as a token price.
+Live Pump web collection is retired. OnchainPaperSources overrides market and SOL
+valuation access while retaining the modeled execution/rent helpers below.
 """
 import time
 from pathlib import Path
-from urllib.parse import quote
 from meme_evidence import number
-from paper_sources import PublicSources, source_error, UnsupportedMarket
-from pump_narratives import ROOT, valid_mint
+from paper_sources import PublicSources
+from data_policy import SourceAccessBlocked
+from pump_narratives import ROOT
 
-CHAIN='solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp'
-SWAP='https://swap-api.pump.fun/v1/coins/'
 
 
 def pump_history(payload,mint,pool,url,now):
@@ -35,91 +33,12 @@ def pump_history(payload,mint,pool,url,now):
 
 
 class PumpMarketSources(PublicSources):
-    modeled_quotes_only=False
-
-    def __init__(self,*args,include_legacy_metrics=True,**kwargs):
-        super().__init__(*args,**kwargs)
-        self.include_legacy_metrics=include_legacy_metrics
     def observation(self,mint,now=None,pool=None):
-        if not valid_mint(mint) or pool is not None and not valid_mint(pool):
-            raise ValueError('Invalid mint or pool')
-        url=ROOT+'/coins-v3/'+quote(mint,safe='')+'?includeLiveStreamInfo=false'
-        coin=self.fetch(url)
-        if coin['mint']!=mint or coin.get('chain_id') not in (None,'solana',CHAIN):
-            raise ValueError('Pump coin identity mismatch')
-        selected=coin.get('pool_address') or coin.get('pump_swap_pool') or coin.get('bonding_curve')
-        if not valid_mint(selected) or pool is not None and pool!=selected:
-            raise ValueError('Pump market identity changed; reconcile before using another pool')
-        pool=selected
-        program=coin.get('program')
-        if program!='pump':
-            raise UnsupportedMarket('Unsupported Pump market program')
-        if self.modeled_quotes_only and coin.get('quote_mint') not in ('11111111111111111111111111111111','So11111111111111111111111111111111111111112','EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'):
-            raise UnsupportedMarket('Paper execution supports SOL/USDC quotes only')
-        candle_url=ROOT+'/candles/'+CHAIN+'/'+quote(mint,safe='')+'?res=1m&measure=price_usd&count=13'
-        activity_url=SWAP+mint+'/market-activity?program=pump'
-        ath_url=SWAP+mint+'/ath?currency=USD&program=pump'
-        holders_url=ROOT+'/token-holders/'+mint+'/count'
-        data,errors={},{}
-        # Each auxiliary failure leaves the current quote available for held exits.
-        auxiliary=[('candles',candle_url),('activity',activity_url)]
-        if self.include_legacy_metrics: auxiliary += [('ath',ath_url),('holders',holders_url)]
-        for label,source in auxiliary:
-            try: data[label]=self.fetch(source)
-            except Exception as error: errors[label]=source_error(error)
-        now=int(time.time()) if now is None else now
-        snapshot={'mint':mint,'pool':pool,'observed_at':now,
-                  'symbol':coin.get('symbol')[:80] if isinstance(coin.get('symbol'),str) else None,
-                  'price_usd':number(float(coin['price_usd']),1e-15),
-                  'market_source_url':url,'market_source':'pump.fun','market_program':program,
-                  'market_kind':'pumpswap' if coin.get('complete') is True else 'bonding_curve',
-                  'quote_mint':coin.get('quote_mint'),'token_program':coin.get('token_program'),'fixed_cost_per_side_usd':self.fixed_cost,
-                  'buy_volume_window_seconds':3600,'source_errors':errors}
-        for target,key in (('market_cap_usd','market_cap_usd'),('liquidity_usd','canonical_pool_liquidity_usd')):
-            try: snapshot[target]=number(float(coin[key]),1e-15)
-            except (KeyError,TypeError,ValueError) as error: errors[target]=source_error(error)
-        try:
-            if 'candles' in data:
-                snapshot['candle_history']=pump_history(data['candles'],mint,pool,candle_url,now)
-        except (KeyError,TypeError,ValueError) as error: errors['candles']=source_error(error)
-        try:
-            if 'activity' in data:
-                hour=data['activity']['1h']
-                snapshot.update(buy_volume_usd=number(hour['buyVolumeUSD']),
-                                sell_volume_usd=number(hour['sellVolumeUSD']),
-                                buy_volume_coverage_pct=100,
-                                buy_volume_coverage_basis='Pump provider-reported one-hour aggregate',
-                                market_activity=data['activity'],trades_source_url=activity_url)
-        except (KeyError,TypeError,ValueError) as error: errors['activity']=source_error(error)
-        try:
-            if 'ath' in data:
-                snapshot.update(ath_market_cap_usd=number(data['ath']['athMarketCap'],1e-15),
-                                ath_source_kind='pump_provider',ath_checked_at=now,ath_source_url=ath_url,
-                                ath_history_complete_since_launch=False)
-        except (KeyError,TypeError,ValueError) as error: errors['ath']=source_error(error)
-        try:
-            if 'holders' in data:
-                holders=data['holders']
-                if holders['mint']!=mint or holders['chain']!='solana':
-                    raise ValueError('Holder count identity mismatch')
-                snapshot['holder_count']=number(holders['holderCount'])
-        except (KeyError,TypeError,ValueError) as error: errors['holders']=source_error(error)
-        if self.evidence_dir:
-            import json
-            path=self.evidence_dir/(mint+'.json')
-            if path.exists():
-                proof=json.loads(path.read_text())
-                if proof['mint']!=mint or proof['pool']!=pool:
-                    raise ValueError('Supplemental proof identity mismatch')
-                # Market values/history/ATH are never overridden by proof files.
-                for key in ('token_safety_passed','safety_checked_at','evidence','execution'):
-                    if key in proof: snapshot[key]=proof[key]
-        return snapshot
+        raise SourceAccessBlocked('Legacy Pump web market collection was removed; use finalized on-chain data or a permitted replay feed')
 
 
 class ModeledPumpSources(PumpMarketSources):
-    """Explicit exploratory-paper assumptions, never live execution evidence."""
-    modeled_quotes_only=True
+    """Shared conservative paper assumptions, never live execution evidence."""
 
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)

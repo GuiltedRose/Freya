@@ -1,130 +1,84 @@
-# Experimental Rust RPC engine — UNTESTED
+# Native RPC transport and compatibility
 
-No builds, tests, dependency downloads, requests, benchmarks or deployments ran.
-Python remains the default; no unsafe operations were introduced (`deny(unsafe_code)`).
+Rust owns bounded HTTP/WebSocket transport and generic Borsh field extraction.
+Python owns source/deployment checks, transaction context, market normalization,
+checkpoints, candles and learning. See [ingestion repair](ingestion_repair_20261102.md)
+for executed validation and [production acceptance](production_acceptance.md) for
+the remaining runtime acceptance requirements. No profitability is implied.
 
-## Reviewable migration boundaries
+## Interfaces and limits
 
-1. **Transport:** feature-gated `native/solana_binary/src/rpc.rs` adds Tokio,
-   reqwest/rustls, bounded WebSocket transport and the PyO3 async-runtime bridge.
-   Read-only method allowlist, no redirects/proxies, TLS or explicit literal
-   loopback, 30-second HTTP deadline, 64MB response cap, 2MB WS message/frame cap,
-   bounded write buffers, one in-flight operation per client, no response cache.
-   Busy calls fail instead of building an unbounded queue. Runtime uses two worker
-   threads/two blocking threads with explicit stack sizing. These are component
-   limits, not an aggregate process RAM guarantee. Identity responses only; gzip
-   from servers despite that request is rejected rather than decoded unboundedly.
-2. **Compatibility:** `solana_rpc_compat.make_rpc` preserves IndexRpc's call,
-   validate, source and telemetry contracts. `backend=python` is default;
-   `auto` conservatively selects Python. `rust` is explicit and requires the
-   feature-enabled extension; absence does not silently switch implementations.
-   Existing Ingester performs provider failover ONLY for transport failures,
-   applies program deployment/version checks and commits durable prefixes.
-   Existing shared ProviderBudget governs backoff/Retry-After. Malformed response
-   envelopes/access denials are terminal, not backend/provider fallback triggers.
-   `call_async` is available to async callers; synchronous call is for existing
-   ingestion workers and rejects use inside an active event loop.
-3. **Subscriptions:** explicit `ws_backend` (defaulting to `backend`) selects a
-   connector for the existing validated SubscriptionSession/StreamHints pipeline.
-   Acknowledgments, bounded reconnect/backoff, dedup, durable gap notifications
-   and finalized catch-up remain Python-owned. Rust handles bounded socket I/O,
-   not a second competing subscription/recovery loop. Authorization/429 handshake
-   denials persist provider state and stop for review. Silent WS idleness currently
-   triggers a bounded 30-second receive timeout; production tuning remains pending.
-4. **Processing/storage:** real binary decoder is reused by an offline RPC replay
-   summarizer and `RustIndexRpc.decode_binary`. JSON blocks still pass through the
-   established Pump/PumpSwap decoder and EventStore. Native Borsh event fields and compact projection are now experimental; see
-   [optimization pass](rust_rpc_optimization.md). Full native transaction-context
-   validation, normalization and event storage are NOT implemented.
-   No equivalent validated native IDL/upgrade evidence exists yet; unknown layouts
-   retain their existing quarantine. This is a transport migration, not completed
-   end-to-end Rust indexing, independent verification or production readiness.
+`solana_rpc_compat.make_rpc` preserves `IndexRpc.call`, `validate`, source identity
+and telemetry. `backend=python` and conservative `auto` use Python; explicit `rust`
+requires the feature-enabled extension and never silently substitutes a backend.
+Both paths enforce the same read-only RPC/result contract. Native Borsh extraction
+does not independently authorize a market observation or transaction.
 
-## Network authorization and persistent state
+Native HTTP uses one persistent Tokio runtime, releases the GIL for synchronous
+calls and reuses its connection pool. `call_async` serves async consumers;
+synchronous calls inside a running asyncio loop are rejected. Closing a client
+cancels its active work and drops its pool without tearing down other clients.
+Concurrent operations fail bounded backpressure rather than queueing indefinitely.
 
-All live network operations require approved Linux isolation. Native transport
-checks its current network namespace inode before opening/using sockets. Python
-also checks fresh root-owned `/run/solana-budget-status.json`, whose matching inode,
-expiry and optional-budget flag are published by the existing root controller.
-It is read-only authorization telemetry, not the accounting database. The private
-monthly ledger remains root-owned and outside the Nix store. The module supplies
-coreutils for the controller's namespace-stat operation. Kernel quotas/shaping,
-120GB normal cap, 150GB ceiling and 5GB margin remain authoritative and unchanged.
-This code cannot attest nft rules against a malicious host administrator; service
-inventory, namespace isolation and existing kernel/VM validation remain required.
+The transport permits TLS or explicitly opted-in literal loopback, rejects HTTP
+redirects/environment proxies, and enforces bounded requests, 30-second HTTP and
+15-second connect deadlines. Response bodies and decompressed output are capped
+at 64 MB. Gzip is negotiated and strictly decompressed; unknown encodings,
+truncation, trailing compressed data and overflow are rejected. Body-byte telemetry
+is not total ISP/kernel traffic accounting. Full blocks can be batched in pairs;
+response IDs must be complete and unique before contiguous commits proceed.
 
-Configuration additions on an explicitly reviewed source:
+WebSocket send/receive halves have independent bounds; frames/messages are capped
+at 2 MB. A quiet connection uses a 20-second idle ping and 10-second liveness wait.
+Close interrupts pending work. Python's validated subscription/session layer owns
+acknowledgments, deduplication, durable hints/gaps, reconnect and finalized catch-up;
+Rust does not create a second recovery loop.
 
-```json
-{
-  "backend": "rust",
-  "ws_backend": "rust",
-  "network_budget": {"status_file": "/run/solana-budget-status.json"}
-}
-```
+## Source permission, history and failover
 
-Source URLs, source IDs, storage/stream rights and mint/program configuration stay
-as in existing local/public/hybrid files. No source is enabled automatically.
-The controller removes status on cleanup; stale status (>5 seconds), wrong inode,
-normal-budget exhaustion or expiration denies native I/O. Optional collection never
-uses reserve automatically. Each network session still needs explicit manual
-startup and a charged grant. A status file is not permission to create a different
-namespace or bypass the systemd boundary. Losing the controller is fail-closed,
-subject to the documented kernel-lease/ISP limitations.
+Public remote-provider mode requires its reviewed HTTPS/source policy. Self-hosted
+isolated mode additionally requires the fresh root-owned namespace/budget status.
+The inode, expiry and budget permission must match before native I/O. Existing
+kernel quotas, reserves, leases and accounting remain authoritative. See
+[self-hosted RPC](selfhost_rpc.md) and [network lifecycle](nixos_network_lifecycle.md).
+Live native transport on platforms without the required enforcement remains denied;
+portable parsing/offline availability is separate.
 
-Live Rust transport on macOS is deliberately denied because this repository has
-no equivalent approved kernel-boundary implementation there. Portable parsing,
-offline replay and native packaging remain declared on all four platforms. No
-platform build has been demonstrated. No credentials/production databases touched.
+All real indexer adapters probe `getFirstAvailableBlock` before and after obtaining
+the produced-slot manifest. Pruned/unavailable history cannot resemble skipped
+slots or advance the checkpoint. `minimumLedgerSlot` is diagnostic, not proof that
+full blocks remain available. RPC manifests are provider evidence, not independent
+consensus verification. Explicit approved transport/history failover resumes the
+existing durable prefix; malformed evidence, unsupported versions and denied
+sources do not trigger a backend substitution or checkpoint jump.
 
-## Dependencies and exact operator commands
+Optional WebSocket failover uses top-level `stream_failover: true` with at most
+four uniquely identified enabled endpoints. Each requires reviewed storage/stream
+policy, an explicit approved `ws_url`, matching network budget and successful
+mainnet validation. Transport/reconnect exhaustion may switch to the next approved
+source with explicit state/counters. Malformed notifications, authorization,
+throttling and mismatched budgets stop rather than switching to evade a restriction.
 
-Cargo.toml adds exact direct versions of Tokio, reqwest, tungstenite, futures,
-serde_json, base64 and pyo3-async-runtimes. The existing Cargo.lock is now STALE
-and must be regenerated/reviewed; no transitive hashes or download results were
-fabricated. Keep all new source/packaging/lock files tracked for git-backed flakes.
-The existing pinned nixpkgs supplies maturin via maturinBuildHook. Optional native
-package builds remain blocked until the lock resolves all new features.
+Provider pacing, Retry-After and denials persist across restarts. Local cooldown
+checks do not consume actual network-retry attempts. Cancellation records a gap;
+unexpected listener exit and final-batch errors cannot be reported as success.
 
-```bash
-nix develop
-cargo generate-lockfile --manifest-path native/solana_binary/Cargo.toml
-# Review and git-add Cargo.lock and new source/packaging files.
-nix build .#native-rpc .#native-rpc-app
-nix develop .#native-rpc
-cargo test --locked --features rpc-engine --manifest-path native/solana_binary/Cargo.toml
-python -m unittest discover -s tests -p 'test_solana_rpc_*.py'
-python -m unittest discover -s tests -p 'test_solana_binary*.py'
-python -m unittest discover -s tests -p 'test_onchain_indexer.py'
-python -m unittest discover -s tests -p 'test_onchain_stream_candles.py'
-python -m unittest discover -s tests -p 'test_solana_network_lifecycle.py'
-nix build .#checks.x86_64-linux.solana-network-lifecycle
-nix flake show
-```
+## Build, verification and measurement
 
-The existing kernel smoke tests remain separately opt-in/server-only. Offline
-compatibility tests mock all native I/O; Rust tests cover request restrictions,
-URL policy and backpressure without networking. The existing indexer/stream tests
-cover checkpoint failover and bounded reconnect. End-to-end Rust HTTP/WS integration,
-Rust cancellation/resource cleanup under actual sockets, and sustained memory
-pressure remain UNVERIFIED and need isolated server fixtures before deployment.
+Use the pinned Cargo.lock; ordinary builds do not require regenerating it. Stage
+new public source files for Git-backed flakes, while keeping private state and the
+ignored local flake.lock out of Git. Use [production acceptance](production_acceptance.md)
+for aggregate checks and [pipeline recovery](pipeline_recovery.md) for deployment.
+Node/kernel tests are separately selected operator actions.
 
-```bash
-python benchmark_solana_rpc_replay.py /isolated/authentic-base64-rpc-response.json
-```
+`benchmark_rpc_transport.py --allow-loopback` measures identical local Python/Rust
+HTTP fixtures, connection reuse and process RSS. It is not WAN or full-ingestion
+performance. `benchmark_solana_rpc_replay.py ORIGINAL_CAPTURE.json` measures offline
+RPC/base64/binding work using authentic binary captures. It cannot turn JSON-only
+captures into original wire evidence. Unsupported instrumentation remains explicitly
+unavailable; do not infer allocation improvements or profitability from these tools.
 
-Identical hashed original RPC captures are replayed in separate Python/Rust worker
-processes, serial document batches 1/8. Metrics cover RPC JSON parsing, base64 wire
-parsing, status/order summary and Python binding—not network latency, decompression,
-program-event decoding or storage. It reports throughput, document median/p95,
-mean transaction time and process peak RSS. Allocation counts are null because no
-reliable cross-language instrumentation is installed. Existing JSON-only captures
-are unsupported rather than re-serialized into binary or used to invent a speedup.
-No authentic binary workload, live transport performance or full Rust pipeline
-speedup has been demonstrated.
-
-
-For the latest sync/runtime, HTTP pool shutdown, WebSocket heartbeat and actual
-socket validation work, see [RPC transport completion](rpc_transport_completion.md).
-That pass supersedes the earlier asyncio.run-per-sync-call and fixed idle timeout
-behavior. It has not been executed by the coding agent.
+To roll back, stop owned workers, select a reviewed compatible application/config
+revision and preserve the same databases, model history, archives and accounting.
+Never roll a bandwidth ledger back with a software generation, zero a quota, erase
+quarantine or move the checkpoint to the latest tip to make recovery appear healthy.

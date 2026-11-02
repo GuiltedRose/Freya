@@ -294,9 +294,9 @@ def main():
             sources=OnchainPaperSources(args.onchain_db,args.evidence_dir)
         elif session.trader.rules.evidence_mode=='market_only':
             from pump_market import ModeledPumpSources
-            sources=ModeledPumpSources(args.evidence_dir,include_legacy_metrics=session.trader.rules.entry_style!='volume_candles')
+            sources=ModeledPumpSources(args.evidence_dir)
         else:
-            sources=PumpMarketSources(args.evidence_dir,include_legacy_metrics=session.trader.rules.entry_style!='volume_candles')
+            sources=PumpMarketSources(args.evidence_dir)
         if args.watch_wallet:
             from wallet_signals import SharedWalletFeed, ensure_worker, digest
             watchlist = args.watchlist

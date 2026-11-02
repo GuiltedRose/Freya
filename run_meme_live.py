@@ -376,7 +376,7 @@ def main():
                 recovery_sources=RecoverySources(sources,args.recovery_config,args.onchain_db)
                 sources=recovery_sources
         else:
-            sources=PumpMarketSources(args.evidence_dir,include_legacy_metrics=rules.entry_style!='volume_candles')
+            sources=PumpMarketSources(args.evidence_dir)
         while True:
             try: result=tick(engine,sources,feed,wallets,args.mint,not args.no_discover,progress=publish)
             except Exception as error:

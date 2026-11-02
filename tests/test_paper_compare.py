@@ -99,3 +99,17 @@ class ComparisonTests(unittest.TestCase):
                 main()
             self.assertIn('PAIRED PAPER COMPARISON',stream.getvalue())
         finally: comparison.close()
+
+
+class RecordedComparisonCliTests(unittest.TestCase):
+    def test_missing_replay_input_is_rejected_before_creating_state(self):
+        import io
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+        from run_paper_compare import main
+        with tempfile.TemporaryDirectory() as directory:
+            state=Path(directory)/'new-comparison'
+            with patch('sys.argv',['run_paper_compare.py','--state-dir',str(state)]),redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:main()
+            self.assertEqual(stopped.exception.code,2)
+            self.assertFalse(state.exists())

@@ -11,6 +11,16 @@ position, cooldown and live-order authorization controls remain enforced.
 Paper defaults to one position, a one-hour loss cooldown and active neural vetoes;
 it no longer takes random below-threshold entries for exploration.
 
+## What production acceptance means
+
+Acceptance requires reliable paper operation through discovery, fresh complete
+market data/candles, reclaim evaluation, genuine paper entries and exits, durable
+eligible outcomes and learning when evidence is sufficient. Monitoring and restart
+must preserve balances, positions, checkpoints and model history. Paper and live
+share strategy/tools/models with mode-specific controls; funded signing/fills and
+live reconciliation require separate operator-controlled acceptance. Passing tests
+or starting the dashboard alone does not prove this pipeline or profitability.
+
 ## Components and actual decisions
 
 | Component | Input | Decision role |
@@ -35,8 +45,8 @@ paths on the monolith using [pipeline recovery](pipeline_recovery.md).
 
 ## Run everything together on the monolith
 
-See [current finalization evidence](finalization_20261102.md) for executed checks,
-remaining feed blockers and deliberately excluded node/kernel tests. From the repository:
+See [ingestion acceptance](ingestion_repair_20261102.md) for executed checks,
+remaining validation and deliberately excluded node/kernel tests. From the repository:
 
 ```bash
 nix develop .#native-rpc --command python validate_production.py \

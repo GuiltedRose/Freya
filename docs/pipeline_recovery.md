@@ -1,20 +1,21 @@
 # Market pipeline recovery
 
-Implementation is unexecuted. No build, test, model training, RPC, indexer, or
-activation was run by the implementation agent. Run the following on the monolith.
-Existing wallets, ledgers, model files and checkpoints have not been changed.
+Use this guide for operator-controlled recovery, preserving wallets, ledgers,
+models and checkpoints. Current checks and their limits are recorded in
+[ingestion acceptance](ingestion_repair_20261102.md).
 
 ## Prerequisites that cannot be inferred
 
 * Reviewed RPC storage rights, and separate ML/evaluation/oracle rights where used.
   Keep unverified flags false. Pump web collectors remain disabled. On-chain
   discovery supplies market leads, not social narratives or human-buyer proof.
-* Authoritative Pump and PumpSwap IDLs matching the deployed versions. The recorded
-  unknown eight-byte event tails remain quarantined. Do not trim bytes or add guessed
-  fields. Put `pump.json`, `pump_amm.json`, and their `.manifest.json` files in a
-  readable directory outside the Nix store, such as `/etc/crypto-bot/schemas`.
-  Each manifest needs the original `program`, exact file `sha256`, `reviewed: true`,
-  and `evidence` identifying the authoritative source, version and review.
+* Authoritative schemas matching the deployed versions. The bundled SDK schemas
+  include the previously missing quote-transfer-fee field; use the coordinated
+  runner's `--configure` to recheck existing deployment pins. Never trim unknown
+  bytes or silently promote old quarantine. A custom schema directory must contain
+  `pump.json`, `pump_amm.json` and their manifests, readable by the service user.
+  Each custom manifest requires the original `program`, exact `sha256`,
+  `reviewed: true` and source/version/review `evidence`.
 * `reviewed_program_versions` maps each program address to nonoverlapping records:
   `from_slot`, `through_slot`, `deployment_slot`, and the matching `idl_hash`.
   Bounds are inclusive; the observed deployment must match. An upgrade closes the
