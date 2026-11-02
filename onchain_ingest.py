@@ -70,6 +70,7 @@ class IndexRpc:
             raise ValueError('RPC burst cooldown must be 1..3600 seconds')
         self.budget = budget or BUDGET
         self.validated = False
+        self._opener = None
         self.block_batch_size=endpoint.get('block_batch_size',1)
         if type(self.block_batch_size) is not int or not 1<=self.block_batch_size<=2:
             raise ValueError('Block HTTP batch size must be 1 or 2')
@@ -113,7 +114,8 @@ class IndexRpc:
         request = Request(self.url, data=json.dumps(payload,allow_nan=False).encode(),
                           headers={'Content-Type': 'application/json', 'Accept-Encoding': 'gzip', 'User-Agent': 'SolanaOnchainIndex/1'})
         try:
-            with build_opener(NoRedirect).open(request, timeout=30) as response:
+            if self._opener is None:self._opener=build_opener(NoRedirect)
+            with self._opener.open(request, timeout=30) as response:
                 raw = response.read(64_000_001)
                 encoding = response.headers.get('Content-Encoding', 'identity').lower()
         except HTTPError as error:

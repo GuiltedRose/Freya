@@ -172,13 +172,23 @@ class RustIndexRpc(IndexRpc):
 
     def _finish_encoded(self,status,retry,encoding,text,method=None,batch_count=None):
         if status!=200:return self._finish(status,retry,'',method=method)
+        # Native identity replies are already UTF-8-validated strings. Keep the
+        # original text for JSON validation instead of encoding/decoding it twice.
+        if encoding=='identity':
+            try:size=len(text.encode('utf8'))
+            except (UnicodeError,AttributeError):
+                raise SourceAccessBlocked('Malformed native identity evidence; no backend retry') from None
+            if size>64_000_000:
+                raise SourceAccessBlocked('Oversized native identity evidence; no backend retry')
+            self.wire_bytes+=size;self.decoded_bytes+=size
+            if batch_count is not None:return rpc_batch_result(text,self.source,self.budget,self.url,batch_count)
+            return rpc_result(text,method,self.source,self.budget,self.url)
         import base64
         from onchain_ingest import decode_rpc_body
         try:
             if encoding=='gzip':
                 if len(text)>85_333_336:raise ValueError('Oversized compressed response')
                 raw=base64.b64decode(text,validate=True)
-            elif encoding=='identity':raw=text.encode('utf8')
             else:raise ValueError('Unsupported response encoding')
             decoded=decode_rpc_body(raw,encoding)
             body=decoded.decode('utf8')

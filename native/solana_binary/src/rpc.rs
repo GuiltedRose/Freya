@@ -94,7 +94,10 @@ impl NativeHttp {
                     if response.content_length().is_some_and(|n|n>64_000_000) {return Err(bad("oversized response"));}
                     let encoding=response.headers().get("content-encoding").and_then(|v|v.to_str().ok()).unwrap_or("identity").to_string();
                     if encoding!="identity" && !(compressed && encoding=="gzip") {return Err(bad("unsupported native response encoding"));}
-                    let mut bytes=Vec::new();
+                    // Bound eager allocation even when a peer advertises a large body.
+                    // Normal block responses avoid repeatedly growing from zero.
+                    let capacity=response.content_length().unwrap_or(0).min(1_048_576) as usize;
+                    let mut bytes=Vec::with_capacity(capacity);
                     while let Some(chunk)=response.chunk().await.map_err(|_|offline())? {
                         if bytes.len()+chunk.len()>64_000_000 {return Err(bad("oversized response"));}
                         bytes.extend_from_slice(&chunk);
