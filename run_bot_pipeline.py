@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 from config import public_env
-from pipeline_runtime import attached,check_index_target,preflight,read_json,resolve_indexer
+from pipeline_runtime import attached,check_index_target,paper_state_directory,preflight,read_json,resolve_indexer
 from runtime_health import safe_reason
 
 ROOT=Path(__file__).resolve().parent
@@ -100,7 +100,8 @@ def main():
     args.learning_config=path(args.learning_config,'CRYPTO_BOT_LEARNING_CONFIG','learning_pipeline.json')
     args.onchain_db=path(args.onchain_db,'CRYPTO_BOT_INDEX_DB','state/onchain/index.sqlite')
     args.unified_db=path(args.unified_db,'CRYPTO_BOT_UNIFIED_DB','state/ml/unified.sqlite')
-    args.paper_state=path(args.paper_state_dir,'CRYPTO_BOT_PAPER_STATE_DIR','state/paper_volume')
+    paper_explicit=args.state_dir if args.mode=='paper' and args.state_dir else args.paper_state_dir
+    args.paper_state=paper_state_directory(paper_explicit,public.get('CRYPTO_BOT_PAPER_STATE_DIR'))
     args.live_state=path(args.live_state_dir,'CRYPTO_BOT_LIVE_STATE_DIR','state/meme_live')
     if args.state_dir:
         if args.mode=='paper':args.paper_state=args.state_dir.resolve()

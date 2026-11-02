@@ -14,6 +14,16 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
+def paper_state_directory(explicit=None,configured=None):
+    """Share defaults without moving, merging or abandoning legacy paper state."""
+    if explicit or configured:return Path(explicit or configured).resolve()
+    current=Path('state/paper_volume');legacy=Path('state/paper_memes')
+    present=[directory for directory in (current,legacy) if (directory/'paper.sqlite').is_file()]
+    if len(present)>1:
+        raise ValueError('Paper sessions exist in both state/paper_volume and state/paper_memes; select --state-dir explicitly. Nothing was moved or reset')
+    return (present[0] if present else current).resolve()
+
+
 def read_json(path):
     with Path(path).open('rb') as stream:data=stream.read(1_000_001)
     if len(data)>1_000_000:raise ValueError('Configuration exceeds size limit')

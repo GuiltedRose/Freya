@@ -9,6 +9,24 @@ from paper_runtime import PaperSession
 
 
 class StartupTests(unittest.TestCase):
+    def test_shared_default_preserves_legacy_and_requires_explicit_choice_when_both_exist(self):
+        from pipeline_runtime import paper_state_directory
+        import os
+        previous=Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                self.assertEqual(paper_state_directory(),Path('state/paper_volume').resolve())
+                legacy=Path('state/paper_memes');legacy.mkdir(parents=True)
+                (legacy/'paper.sqlite').write_bytes(b'preserved fixture')
+                self.assertEqual(paper_state_directory(),legacy.resolve())
+                current=Path('state/paper_volume');current.mkdir(parents=True)
+                (current/'paper.sqlite').write_bytes(b'independent fixture')
+                with self.assertRaises(ValueError):paper_state_directory()
+                self.assertEqual(paper_state_directory(current),current.resolve())
+                self.assertEqual((legacy/'paper.sqlite').read_bytes(),b'preserved fixture')
+                self.assertEqual((current/'paper.sqlite').read_bytes(),b'independent fixture')
+            finally:os.chdir(previous)
     def reject_before_session(self,arguments):
         stderr=io.StringIO()
         with patch('sys.argv',['run_paper.py',*arguments]),patch('sys.stderr',stderr),patch('run_paper.PaperSession') as session:

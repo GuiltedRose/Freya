@@ -215,6 +215,10 @@ illustrative initial valuation of $100/SOL. Override those values with `--balanc
 `--native-sol` and `--sol-price`. Initialization refuses an existing paper database.
 Resume with `nix run .#paper`; it loads the saved inventory without resetting it.
 The runner defaults to `state/paper_volume` and `state/onchain/index.sqlite`; both
+the direct paper CLI and coordinated runner use the same paper-directory selection.
+If only the older `state/paper_memes/paper.sqlite` exists, they reuse it without
+moving data. If both paper directories contain sessions, select `--state-dir`
+explicitly; sessions are never merged or reset automatically. Both
 paths can be overridden after `--`. The indexer bootstraps only an empty database
 at a finalized head, then resumes its durable checkpoint. It discovers markets
 every 30 seconds. Use

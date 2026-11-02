@@ -127,7 +127,7 @@ def markets_once(session, sources, mints, discover=False, narrative_store=None, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--state-dir', type=Path, default=Path('state/paper_memes'))
+    parser.add_argument('--state-dir', type=Path,help='Paper state directory; defaults to state/paper_volume, or the sole existing legacy session')
     parser.add_argument('--initialize',action='store_true',help='Create a NEW paper session: defaults to 0 virtual USDC, 0.1 SOL and illustrative $100/SOL; refuses existing state')
     parser.add_argument('--total-equity',type=float,help='Total virtual wallet USD value including native SOL; subtracts its initial valuation from USDC')
     parser.add_argument('--balance', type=float, help='Starting virtual USDC; required for a new run/reset')
@@ -165,6 +165,10 @@ def main():
     parser.add_argument('--learning-live-db',type=Path,default=Path('state/meme_live/meme_live.sqlite'),help='Read-only confirmed bot outcomes for shared neural training')
     parser.add_argument('--reset', action='store_true', help='Archive current paper run and start fresh; never touches live state')
     args = parser.parse_args()
+    from pipeline_runtime import paper_state_directory
+    import os
+    try:args.state_dir=paper_state_directory(args.state_dir,os.environ.get('CRYPTO_BOT_PAPER_STATE_DIR'))
+    except ValueError as error:parser.error(str(error))
     if (args.unified_db is None) != (args.unified_config is None):
         parser.error('--unified-db and --unified-config must be supplied together')
     if args.onchain_db and args.feed:
@@ -186,7 +190,8 @@ def main():
         if args.native_sol is None:args.native_sol=.1
         if args.sol_price is None:args.sol_price=100.
     if not exists and (args.status or args.reclaim_paper_rent):
-        parser.error('No paper session exists in this directory; use --initialize to create one first')
+        parser.error('No paper session exists in '+str(args.state_dir)+'; use --initialize with this same --state-dir to create one first. '
+                     'A session in another directory is separate and has not been moved or reset')
     if not 1<=args.max_positions<=20: parser.error('Paper positions must be 1 through 20')
     if not 0<=args.loss_cooldown_seconds<=86400: parser.error('Paper cooldown must be 0 through 86400 seconds')
     if args.reset and args.reclaim_paper_rent:
