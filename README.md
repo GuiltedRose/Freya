@@ -1,4 +1,4 @@
-# Crypto Bot
+# Freya — Solana trading bot
 
 > **Disclaimer:** This is a vibe-coded project built with AI. Its code and results
 > may contain errors. Nothing here guarantees that you will make money; you can
@@ -7,7 +7,8 @@
 
 A Python toolkit for researching and trading Solana spot markets. It combines
 persistent paper trading, public market and wallet observation, strategy
-research, and a from-scratch neural network with optional live execution.
+research, neural entry/exit models, and configurable SVM, LSTM and historical
+retrieval decisions with optional live execution.
 
 The project is experimental. Backtests, modeled paper returns, and small live
 samples do not establish profitability.
@@ -20,7 +21,9 @@ Live execution does not require paper history or promotion milestones. Start wit
 paper trading to collect data and assess behavior before risking real funds; this
 is a recommendation, not an activation requirement. Live still requires explicit
 `--execute` and wallet authorization. Smaller percentage sizing applies during
-initial learning, followed by supported Kelly sizing. Capital limits, source checks,
+initial learning, followed by evidence-supported fractional Kelly sizing. Kelly
+limits allocation; it does not establish a trading edge or prevent all losses.
+Capital limits, source checks,
 TP/SL, emergency stops and order reconciliation remain enforced. See
 [live operation](docs/coordinated_pipeline.md#shared-services-and-live-wiring).
 
@@ -44,7 +47,7 @@ the existing capped network environment; it remains unbuilt and manually activat
 | Paper trading | `run_paper.py`, `run_paper_compare.py` | Simulates trades with virtual balances, modeled costs, persistent state, and strategy comparisons. |
 | Meme trading | `run_meme_live.py` | Evaluates Pump momentum/pullback/reclaim setups. Defaults to unsigned simulation; `--execute` enables real transactions. |
 | Observation | `pump_market.py`, `wallet_watch.py`, `wallet_signals.py` | Collects market data and public activity from saved wallets. Observations provide research context rather than copying positions. |
-| Research and learning | `meme_learning.py`, `neural_network.py`, `exit_evaluation.py`, `neural_autonomy.py` | Evaluates strategy candidates, trains neural weights, and qualifies frozen models before they influence entries. |
+| Research and learning | `meme_learning.py`, `neural_network.py`, `exit_evaluation.py`, `neural_autonomy.py` | Trains neural weights and evaluates frozen entry/exit candidates; qualification depends on the selected mode. |
 | Manual-wallet research | `run_manual_research.py` | Archives wallet receipts separately from bot performance. |
 
 The project now focuses on meme-coin momentum/pullback setups and neural exit
@@ -68,19 +71,29 @@ one-hour consecutive-loss cooldown. Paper saves its model to
 `learning.json` in its state directory; the meme runner rebuilds shared weights
 from the outcome ledgers. Its default paper source is `state/paper_volume/paper.sqlite`.
 
-Paper and live default to active learning decisions. Live retains its position
-limit, cooldown, sizing, safety and
+Paper and live default to active learning decisions. Live retains its capital-tier
+position limits, cooldown, sizing, safety and
 execution checks; neural scores never bypass them. No live process is started
 by training alone.
 
-Paper defaults to one position and never overrides a neural veto for random
-exploration. Paper fills remain hypothetical and cannot establish a live edge.
+Paper starts at one position and a one-hour consecutive-loss cooldown, with no
+random exploration overriding neural vetoes. Allocation and concurrency unlock
+independently under the versioned capital policy; its configured capacity ceiling
+is 20, subject to existing exposure, safety and freshness limits. Paper fills remain
+hypothetical and cannot establish a live edge.
 
 Live defaults to `--neural-mode learning` without requiring prior paper history
 or promotion milestones. An empty model configuration permits initial learning;
 configured unified models still apply their score vetoes. Operators can choose
 `--neural-mode qualified` for prospective model qualification. Source permissions,
 market freshness and execution checks remain mandatory.
+SVM, LSTM and historical retrieval (RAG) are active entry vetoes only when their
+unified database and reviewed candidate IDs are configured. Enabling unified
+decisions requires all three families; missing required evidence blocks entries.
+Retrieval uses eligible historical outcomes and cost-adjusted expectancy. It does
+not generate trading advice through a language model. See
+[model decision roles](docs/production_acceptance.md#components-and-actual-decisions).
+
 See the [qualification policy](MEME_TRADER.md#autonomous-neural-qualification)
 and [network review](research/neural_network_review.md).
 
@@ -153,7 +166,10 @@ blocks entries and learning eligibility.
 
 ## Getting started
 
-Use Python 3.10 or later. From the repository directory:
+Use Python 3.10 or later. Nix commands below require Nix with flakes enabled.
+Examples using `--reference-lock-file ./flake.lock` assume an existing reviewed local
+lock; if none exists, omit that option (the examples still prohibit lock writes).
+From the repository directory:
 
 ```bash
 python3 -m venv .venv
@@ -192,8 +208,15 @@ For a **new** paper session using the current meme rules:
 With Nix, after configuration passes preflight:
 
 ```bash
-nix --extra-experimental-features 'nix-command flakes' run .#paper -- --initialize
+nix --extra-experimental-features 'nix-command flakes' run \
+  --reference-lock-file ./flake.lock --no-write-lock-file \
+  .#paper -- --initialize
 ```
+
+This explicitly creates a new virtual session with 0 USDC, 0.1 SOL and an
+illustrative initial valuation of $100/SOL. Override those values with `--balance`,
+`--native-sol` and `--sol-price`. Initialization refuses an existing paper database.
+Resume with `nix run .#paper`; it loads the saved inventory without resetting it.
 
 Normal paper startup, including resume, automatically prepares missing configs or
 generated unapproved templates for built-in profiles, with no questions and no terminal
@@ -221,10 +244,6 @@ First-time `--execute` uses the same automatic built-in setup if configs are mis
 Setup alone never loads a signer or starts trading. Live execution requires a local
 signing source; collection and paper workers do not receive it.
 
-This explicitly creates a new virtual session with 0 USDC, 0.1 SOL and an
-illustrative initial valuation of $100/SOL. Override those values with `--balance`,
-`--native-sol` and `--sol-price`. Initialization refuses an existing paper database.
-Resume with `nix run .#paper`; it loads the saved inventory without resetting it.
 The runner defaults to `state/paper_volume` and `state/onchain/index.sqlite`; both
 the direct paper CLI and coordinated runner use the same paper-directory selection.
 If only the older `state/paper_memes/paper.sqlite` exists, they reuse it without
@@ -233,7 +252,8 @@ explicitly; sessions are never merged or reset automatically. Both
 paths can be overridden after `--`. The indexer bootstraps only an empty database
 at a finalized head, then resumes its durable checkpoint. It discovers markets
 every 30 seconds. Use
-`--no-loop` for one collection cycle, or `--status` for the saved report.
+`--no-loop` for one paper scan (the supervised data workers may collect multiple
+cycles), or `--status` for the saved pipeline report without starting workers.
 `nix run .#paper-raw -- ...` retains the direct CLI, including feed-replay mode.
 The runner starts the data workers but never approves data sources. Keep `flake.lock`
 ignored; runner checks use `--no-write-lock-file` to preserve any local lock.
@@ -241,8 +261,10 @@ To use an existing ignored local lock reproducibly, also pass
 `--reference-lock-file ./flake.lock` before `.#paper`. Keep that local file;
 there is no need to remove it from `.gitignore` or add it to Git.
 
-Without Nix, use `python run_bot_pipeline.py --mode paper --initialize` for the
-same supervision. The direct paper CLI below remains available for deployments
+Without Nix, use `.venv/bin/python run_bot_pipeline.py --mode paper --initialize`
+for the same supervision after installing dependencies and configuring the selected
+backend; a Rust backend also requires the native extension. Omit `--initialize`
+to resume. The direct paper CLI below remains available for deployments
 that already run a separately configured indexer:
 
 ```bash
@@ -280,22 +302,23 @@ Export outcome summaries and neural weights:
 .venv/bin/python meme_learning.py --paper-db state/paper_volume/paper.sqlite
 ```
 
-Paper defaults to `--max-positions 4 --loss-cooldown-seconds 0`. Up to eight
-slots are supported, subject to the shared spendable bankroll and costs. Use
-`--max-positions 1 --loss-cooldown-seconds 3600` for a single-position paper trial
-with the live-length cooldown. These options never change live limits.
+Paper CLI defaults are `--max-positions 1 --loss-cooldown-seconds 3600`.
+Production runs also apply `capital_policy.example.json`: capacity starts at one
+and grows only through independently earned concurrency tiers. The CLI accepts
+1–20 positions, but changing that option alone does not unlock capital-policy tiers.
+Paper options never change live limits. See [capital policy](docs/retrieval_kelly.md).
 The console shows trades, equity, positions, training counts and current blockers.
 Use `--json` for full console reports. Full recorded observations and network
 inputs remain in the journals and reports; display formatting does not filter
 training data.
 
-Reports and journals stay in the selected state directory. By default, exhausted or drawdown-halted paper runs archive
-and refill to `max($6, confirmed milestone × 0.85)` when flat. Milestones
-($10, $25, $50, $100, $250, $500, $1,000, …) persist across runs and use
-settled starting capital plus realized trading P&L, excluding temporary marks. `--no-auto-reset` keeps
-them stopped instead. Offline `--feed` replay does not auto-reset. See the
-[paper guide](MEME_TRADER.md#persistent-paper-runner-restart-and-reset) for
-explicit resets, other cost models, and rule changes.
+Reports and journals stay in the selected state directory. Capital-managed
+production runs do **not** automatically refill exhausted or drawdown-halted paper
+balances. Archived reset outcomes remain available subject to current eligibility
+rules; virtual funding is never trading profit. See the
+[paper guide](MEME_TRADER.md#persistent-paper-runner-restart-and-reset) for explicit
+resets, cost models and rule changes. Back up the entire state directory before
+operator changes; never overwrite current journals with an older backup.
 
 ### Unsigned simulation
 
@@ -314,7 +337,8 @@ and simulates transactions without submitting them. It needs no private key or
 
 Review [MEME_TRADER.md](MEME_TRADER.md) and [.env.example](.env.example) before
 using real funds. Create an owner-only `.env` from the example if one does not
-already exist. Configure an HTTPS `SOLANA_RPC_URL` and exactly one signing source:
+already exist. Configure a permitted `SOLANA_RPC_URL` (HTTPS for remote providers; explicit
+loopback/self-hosted settings follow the deployment guide) and exactly one signing source:
 `SOLANA_KEYPAIR_PATH` or `SOLANA_PRIVATE_KEY`.
 
 The example includes the public mainnet RPC URL, which is safe to publish.
@@ -372,11 +396,18 @@ controls remain necessary for household priority and ISP-level accounting.
 
 ## Development and support
 
-Run the test suite with:
+Run validation manually on the operator host. The Python-only suite is:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
 ```
+
+For native packaging and the protected aggregate validation command, use
+[production acceptance](docs/production_acceptance.md#run-everything-together-on-the-monolith).
+For service prerequisites, activation, monitoring, recovery and rollback, follow
+[pipeline recovery](docs/pipeline_recovery.md) and
+[self-hosted RPC](docs/selfhost_rpc.md). Stop live services before rollback and
+retain all newer orders, outcomes, checkpoints and unresolved signatures.
 
 Use focused tests for behavior changes. Review changes to execution limits and
 preserve outcome journals when investigating failures.
@@ -387,13 +418,15 @@ without credentials or private state.
 
 Licensed under the [GNU Affero General Public License v3](LICENSE).
 
-Optional [Rust binary decoding](docs/native_decoder.md) preserves the Python/JSON
-pipeline. Native packaging requires a reviewed Cargo.lock; validation and benchmark
-commands are documented there. No performance measurements are available yet.
-
-The [experimental Rust RPC transport](docs/rust_rpc_engine.md) is explicitly
-selectable; Python remains the default. Native event decoding/storage is unfinished,
-and all new transport/packaging code requires monolith validation.
+The [Rust RPC transport](docs/rust_rpc_engine.md) provides bounded HTTP/WebSocket
+transport and generic Borsh extraction. Python retains source/deployment admission,
+normalization, storage, checkpoints, candles and learning. Explicit Rust selection
+requires the native extension; it does not silently substitute Python. Default
+packaging and coordinated native-RPC apps have different backend requirements.
+See [ingestion acceptance](docs/ingestion_repair_20261102.md) for recorded build and
+receipt-replay results and remaining runtime checks. Those results do not establish
+sustained feed capacity, a trading edge, or acceptance of a self-hosted node.
+[Binary decoder details](docs/native_decoder.md) cover the separate binary adapter.
 
 ## Paper challenger operation
 
