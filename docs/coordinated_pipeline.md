@@ -46,6 +46,13 @@ retains exact owner-only backups of existing files before replacement. New path 
 optional; defaults match these filenames and `state/onchain/index.sqlite`,
 `state/paper_volume`, `state/meme_live`, and `state/ml/unified.sqlite`.
 
+Provider pacing state is stored outside the installed package. Setup and workers
+share `CRYPTO_BOT_PROVIDER_LIMITS` when exported; otherwise they reuse an existing
+ledger alongside the index, then a legacy `./state/provider_limits.sqlite`, or
+create the ledger alongside the index if neither exists. Standalone clients default
+to `./state/provider_limits.sqlite`, never a path beneath `/nix/store`. Existing
+cooldowns and denial records are retained; no ledger is deleted or reset.
+
 Paper startup, including resume, and live `--execute` automatically configure
 built-in profiles when files are missing or still generated unapproved templates.
 `--preflight` stays offline and never runs setup. Custom third-party providers use

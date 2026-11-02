@@ -164,7 +164,8 @@ def configure(args,public,indexer,learning):
     from onchain_oracle import capture_sol,decode_sol
     check_boundary(source)
     decoder=Decoder(backend=source.get('event_backend','python'),schema_directory=indexer.get('schema_directory'))
-    rpc=make_rpc(source)
+    from provider_limits import ProviderBudget,provider_limits_path
+    rpc=make_rpc(source,budget=ProviderBudget(provider_limits_path(args.onchain_db)))
     try:
         print('Checking finalized mainnet deployments and the oracle through paced read-only RPC...',flush=True)
         rpc.validate()

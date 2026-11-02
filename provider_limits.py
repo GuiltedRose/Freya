@@ -14,9 +14,20 @@ class ProviderBackoff(ValueError):
         super().__init__('Provider cooldown active')
 
 
+def provider_limits_path(index_db=None):
+    """Runtime data belongs outside the package; reuse existing pacing history."""
+    configured=os.environ.get('CRYPTO_BOT_PROVIDER_LIMITS')
+    if configured:return Path(configured).resolve()
+    legacy=Path.cwd()/'state/provider_limits.sqlite'
+    if index_db is None:return legacy
+    selected=Path(index_db).resolve().parent/'provider_limits.sqlite'
+    if selected.exists():return selected
+    return legacy if legacy.exists() else selected
+
+
 class ProviderBudget:
     def __init__(self,path=None,clock=None,sleep=None):
-        self.path=Path(path or os.environ.get('CRYPTO_BOT_PROVIDER_LIMITS') or Path(__file__).parent/'state/provider_limits.sqlite')
+        self.path=Path(path).resolve() if path is not None else provider_limits_path()
         self.clock=clock or time.time;self.sleep=sleep or time.sleep
 
     def key(self,url):

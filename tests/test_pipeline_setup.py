@@ -78,6 +78,25 @@ class SetupTests(unittest.TestCase):
                 else:self.assertNotIn('network_budget',saved['endpoints'][0])
                 rpc.call.assert_called_once_with('getSlot',[{'commitment':'finalized'}])
 
+    def test_rate_limit_state_is_runtime_relative_and_reuses_existing_ledgers(self):
+        from provider_limits import ProviderBudget,provider_limits_path
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with patch.dict('os.environ',{},clear=True),patch('provider_limits.Path.cwd',return_value=root):
+                self.assertEqual(ProviderBudget().path,root/'state/provider_limits.sqlite')
+                index=root/'state/onchain/index.sqlite'
+                selected=index.parent/'provider_limits.sqlite'
+                self.assertEqual(provider_limits_path(index),selected)
+                legacy=root/'state/provider_limits.sqlite';legacy.parent.mkdir(parents=True)
+                legacy.write_bytes(b'preserved pacing history')
+                self.assertEqual(provider_limits_path(index),legacy)
+                selected.parent.mkdir();selected.write_bytes(b'preserved worker pacing')
+                self.assertEqual(provider_limits_path(index),selected)
+                self.assertEqual(legacy.read_bytes(),b'preserved pacing history')
+                with patch.dict('os.environ',{'CRYPTO_BOT_PROVIDER_LIMITS':str(legacy)}):
+                    self.assertEqual(provider_limits_path(index),legacy)
+                    self.assertEqual(ProviderBudget().path,legacy)
+
     def test_declining_setup_creates_no_configuration_or_rpc_client(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

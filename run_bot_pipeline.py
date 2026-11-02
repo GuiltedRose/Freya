@@ -211,7 +211,8 @@ def supervise(args,extra,indexer,learning):
     directory=state/'pipeline'/args.mode;directory.mkdir(parents=True,exist_ok=True)
     children={};streams=[];stopping=False;startup_error=None
     environment=clean_environment()
-    environment['CRYPTO_BOT_PROVIDER_LIMITS']=str(args.onchain_db.parent/'provider_limits.sqlite')
+    from provider_limits import provider_limits_path
+    environment['CRYPTO_BOT_PROVIDER_LIMITS']=str(provider_limits_path(args.onchain_db))
     def interrupt(*_):
         nonlocal stopping
         stopping=True
