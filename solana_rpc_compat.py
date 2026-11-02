@@ -27,6 +27,31 @@ def check_boundary(endpoint):
     policy=endpoint.get('policy',{})
     if policy.get('storage_verified') is not True or not policy.get('evidence'):
         raise SourceAccessBlocked('Reviewed source storage policy required')
+    mode=endpoint.get('network_mode','isolated')
+    if mode not in ('isolated','remote_provider'):
+        raise SourceAccessBlocked('Unknown RPC network mode')
+    if mode=='remote_provider':
+        import ipaddress
+        from urllib.parse import urlsplit
+        parsed=urlsplit(endpoint['url']);host=parsed.hostname
+        if (endpoint.get('source_kind')!='solana_rpc' or policy.get('remote_provider_verified') is not True
+            or endpoint.get('network_budget') or parsed.scheme!='https' or not host or parsed.username or parsed.password
+            or host.lower().rstrip('.')=='localhost' or host.lower().rstrip('.').endswith(('.localhost','.local'))):
+            raise SourceAccessBlocked('Explicit reviewed remote HTTPS provider without a node budget required')
+        try:address=ipaddress.ip_address(host)
+        except ValueError:address=None
+        if address is not None and not address.is_global:
+            raise SourceAccessBlocked('Local/private nodes cannot use remote-provider mode')
+        ws=endpoint.get('ws_url')
+        if ws:
+            websocket=urlsplit(ws)
+            if websocket.scheme!='wss' or websocket.hostname!=host or websocket.username or websocket.password:
+                raise SourceAccessBlocked('Remote WebSocket must use the same reviewed TLS provider')
+        require_permitted_url(endpoint['url'])
+        inode=os.stat('/proc/self/ns/net').st_ino
+        if endpoint.get('approved_namespace_inode',inode)!=inode:
+            raise SourceAccessBlocked('Configured namespace mismatch')
+        return inode
     import time
     from pathlib import Path
     path=Path(endpoint.get('network_budget',{}).get('status_file','/run/solana-budget-status.json'))

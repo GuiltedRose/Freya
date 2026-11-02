@@ -212,6 +212,9 @@ using real funds. Create an owner-only `.env` from the example if one does not
 already exist. Configure an HTTPS `SOLANA_RPC_URL` and exactly one signing source:
 `SOLANA_KEYPAIR_PATH` or `SOLANA_PRIVATE_KEY`.
 
+The example includes the public mainnet RPC URL, which is safe to publish.
+Wallet secrets and provider URLs containing API keys must remain private.
+
 Create `.env` without overwriting an existing configuration, then edit it locally:
 
 ```bash

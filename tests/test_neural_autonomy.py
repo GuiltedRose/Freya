@@ -64,7 +64,7 @@ class AutonomyTests(unittest.TestCase):
         for row in rows:row['net_pnl_usd']=-1.
         result=advance(state,trained(),rows,{},2*86400)
         self.assertEqual(result['status'],'collecting')
-        self.assertEqual(result['reason'],'two losses or nonpositive last five closes')
+        self.assertEqual(result['reason'],'Two consecutive losses or nonpositive last five closes')
         self.assertTrue(entry_decision(result,{})['allow'])
 
     def test_negative_results_fail_and_old_in_sample_labels_cannot_qualify(self):

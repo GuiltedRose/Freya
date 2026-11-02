@@ -38,8 +38,8 @@ class IncrementalTests(unittest.TestCase):
         session=PaperSession(Path(self.helper.temp.name)/'paper',6,DipRules(evidence_mode='market_only',entry_style='volume_candles'))
         try:
             with patch('onchain_market.time.time',return_value=3600), patch('pump_market.time.time',return_value=3600), patch('paper_sources.build_opener') as http:
-                observed=OnchainPaperSources(self.store.path).observation(fixtures.MINT,now=3600)
-                self.assertIsNotNone(session.process(observed))
+                with self.assertRaisesRegex(ValueError,'older than 30 seconds'):
+                    OnchainPaperSources(self.store.path).observation(fixtures.MINT,now=3600)
                 self.assertFalse(http.called)
                 self.assertEqual(session.trader.all_positions(),[])
         finally:session.close()

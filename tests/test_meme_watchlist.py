@@ -72,7 +72,7 @@ class WatchlistTests(unittest.TestCase):
             def poll(self,wallets): return {}
             def read_context(self,wallets): return {'status':'bounded_sample','callouts':[],'signals':[]}
         state={'position':None,'pending':None,'halted':False,'realized_pnl_usd':0}
-        engine=SimpleNamespace(store=SimpleNamespace(db=self.db,state=state,save=lambda *args:None,refresh_learning_model=Mock()),
+        engine=SimpleNamespace(store=SimpleNamespace(db=self.db,state=state,all_positions=lambda:[],save=lambda *args:None,refresh_learning_model=Mock()),
                                rules=self.rules,execute=False,rpc=None,user="user",mark=lambda equity:None,
                                loss_streak_cooldown=lambda now:None,
                                prepare=lambda *args:copy.deepcopy(self.result))

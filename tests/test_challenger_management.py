@@ -130,6 +130,8 @@ class PersistenceTests(unittest.TestCase):
         from challenger_lab import decode_snapshot,MAX_SNAPSHOT
         payload=zstandard.ZstdCompressor().compress(b' '*(MAX_SNAPSHOT*2))
         with self.assertRaises(ValueError):decode_snapshot(payload)
+        expected={'padding':'a'*40000}
+        self.assertEqual(decode_snapshot(zstandard.ZstdCompressor().compress(json.dumps(expected).encode())),expected)
 
     def test_lab_is_isolated_immutable_and_crashed_leases_expire(self):
         with tempfile.TemporaryDirectory() as directory:

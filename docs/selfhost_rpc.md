@@ -2,7 +2,10 @@
 
 The flake now exports `nixosModules.selfhost-rpc` and `lib.mkAgavePackage`.
 This is a real non-voting Agave replay-node service, separate from the Rust RPC
-client/indexer. Nothing was built, tested, initialized or started here.
+client/indexer. The pinned Agave package has now built on Arch through Nix, and
+its executable/version/argument checks passed. A temporary isolated local test
+validator reached RPC health `ok` and was stopped. Production-validator startup
+was blocked by this host's OS limits; no mainnet bootstrap was performed.
 
 The service follows the official [Agave RPC setup](https://docs.anza.xyz/operations/setup-an-rpc-node):
 non-voting, private RPC advertisement, full RPC operations and transaction history.
@@ -11,6 +14,12 @@ RPC binds to **127.0.0.1:8899 inside the existing isolated namespace**, with WS 
 This does not expose RPC to the host/public internet or restore Pump collectors.
 
 ## Transfer policy
+
+This is a **self-hosted-node policy for bandwidth-limited connections**, including
+home connections. It is not an allowance imposed by Solana's remote RPC service
+and is not a requirement for remote-only collection, paper trading or learning.
+The shipped conservative profile below is useful to other low-bandwidth operators;
+it does not establish that their connection can sustain mainnet replay.
 
 * **120 GB normal collection allowance** per explicit billing cycle.
 * **150 GB absolute policy ceiling**, decimal: 150,000,000,000 bytes, total RX+TX.
@@ -31,6 +40,43 @@ transfer before a host firewall drops them. An upstream/provider-enforced transf
 cap is required if **150 GB must be guaranteed at the ISP billing meter**, including
 unsolicited traffic. The existing report continues to declare that limitation.
 Do not call local cutoff settings proof that the ISP can never bill an overage.
+
+### Choosing a mode on a limited connection
+
+| Mode | Traffic and enforcement |
+| --- | --- |
+| Remote provider | Requests/responses to an existing RPC service; retain provider pacing, backoff and source permissions. No self-hosted-node billing ledger is required. |
+| Self-hosted node | Includes bootstrap, snapshots, gossip, repair and ongoing replay. Use the isolated quota/lease controller and real billing-cycle accounting. |
+| Hybrid | The node retains its full budget policy. Consumers in its shared namespace also share its WAN quota; loopback RPC is local. Remote endpoints still have independent provider limits. |
+
+For remote Rust transport, explicitly set endpoint `network_mode` to
+`remote_provider`, `source_kind` to `solana_rpc`, and supply reviewed policy
+`remote_provider_verified: true` alongside existing storage rights/evidence.
+Use HTTPS and same-host WSS. Local/private literal addresses, local-node source
+kinds and conflicting node budgets are rejected. Omitting the mode retains the
+isolated-node boundary checks; existing node configurations are not exempted.
+`solana_observer.example.json` is a disabled remote template; its permission flags
+remain false until reviewed. The node templates keep their existing restrictions.
+
+The Nix paper module's `rpcMode = "remote"` does not attach its processes to the
+self-hosted-node budget service. Enabling the node module still enables enforcement
+for the node itself. Nix changes remain untested here.
+
+Before choosing self-hosting, account for the ISP's **actual** cycle dates and any
+other household traffic sharing its cap. The node ledger measures granted node
+traffic, not unrelated devices; budget less for the node if the ISP cap covers the
+whole home. Do not initialize accounting as zero partway through a cycle without
+establishing prior use. Compression trades CPU/I/O for smaller snapshot archives;
+it cannot guarantee that bootstrap or ongoing replay will fit a 150 GB allowance.
+Use a remote provider when the connection cannot sustain the node, instead of
+disabling cutoffs, automatically releasing reserves or repeatedly restarting it.
+
+Solana documents the public mainnet endpoint and its
+[provider limits](https://solana.com/docs/references/clusters), and explicitly does
+not recommend public endpoints for production applications. It can be considered
+for bounded supervised evaluation; a maintained production deployment needs an
+appropriately provisioned, permitted RPC service. A remote endpoint is not proof
+of sufficient finalized history, current observations or oracle coverage.
 
 ## Declarative host configuration
 
@@ -57,7 +103,8 @@ operator must generate and retain `flake.lock` before deployment; the overlay in
 is not reproducibly pinned until that lock is recorded. Review the official cluster
 [version floor](https://github.com/anza-xyz/agave/wiki/feature-gate-tracker-schedule)
 before building a release. The package and its native dependencies remain
-**unbuilt and unverified here**. Other systems can use remote RPC; the packaged
+**built and checked at CLI/local-fixture level only**. The NixOS service still needs
+operator activation testing. Other systems can use remote RPC; the packaged
 Agave node currently targets x86_64-linux.
 
 Configure `services.crypto-bot-node` with `enable`, that `package`, external
@@ -142,10 +189,39 @@ default to 48G high / 56G maximum with no swap; these protect host headroom and 
 not assert that the declared 64 GB monolith can replay mainnet. State/snapshot disk
 capacity, current release requirements and sustainable replay must still be checked.
 
-The node registers its bounded peer range (default 8000–8020 TCP/UDP) with the
+The node registers its bounded peer range (default 8000–8026 TCP/UDP) with the
 existing network controller. Private RPC/WS ports cannot be part of that range.
 Upstream NAT/firewall reachability and the public endpoint remain operator
 prerequisites. The module does not weaken Agave port checks or discard corrupt WAL.
+
+### OS prerequisites found during the startup check
+
+The pinned Agave CLI requires a dynamic-port range spanning at least 26 ports;
+the original 8000–8020 default was rejected. The module now defaults to 8000–8026
+and rejects smaller spans. The package also declares `agave-validator` as its
+main executable so `nix run .#agave-node` resolves the correct binary.
+
+Agave's [OS checks](https://github.com/anza-xyz/agave/blob/v4.3.0/core/src/system_monitor_service.rs)
+require socket-buffer maxima of at least 134217728 bytes and `vm.max_map_count`
+of at least 1000000. The enabled NixOS node module now supplies these as
+`boot.kernel.sysctl` defaults and sets a 2000000000-byte systemd memory-lock limit.
+These source changes were not activated on this Arch host. Explicit host settings
+can override the defaults; smaller values will still fail Agave's checks.
+
+On a non-NixOS host, an administrator must review/apply equivalent OS settings
+and launch the process with the required limits. Read current values first:
+
+```bash
+sysctl net.core.rmem_max net.core.wmem_max vm.max_map_count
+ulimit -l
+```
+
+Do not add `--no-os-network-limits-test` just to obtain a passing startup. The
+isolated smoke test observed a 4194304-byte receive-buffer maximum and an
+8388608-byte memory-lock allowance. Raising them was not permitted here, so the
+production executable correctly stopped. `net.core.netdev_max_backlog` was also
+unavailable inside the private namespace; upstream treats that particular metric
+as report-only, whereas insufficient recommended limits are startup failures.
 
 Use `solana_observer.local.example.json` as the local collector template. Keep its
 permission flags false until reviewed, set the enabled endpoint to literal loopback,

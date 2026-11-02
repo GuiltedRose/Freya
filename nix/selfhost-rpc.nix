@@ -33,7 +33,7 @@ in {
     entrypoints = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; };
     knownValidators = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; };
     peerPortStart = lib.mkOption { type = lib.types.port; default = 8000; };
-    peerPortEnd = lib.mkOption { type = lib.types.port; default = 8020; };
+    peerPortEnd = lib.mkOption { type = lib.types.port; default = 8026; };
     memoryHigh = lib.mkOption { type = lib.types.str; default = "48G"; };
     memoryMax = lib.mkOption { type = lib.types.str; default = "56G"; };
     snapshotCompressionLevel = lib.mkOption { type = lib.types.ints.between 1 19; default = 15; };
@@ -57,6 +57,13 @@ in {
     capacityReviewed = lib.mkOption { type = lib.types.bool; default = false; description = "Operator has reviewed storage, RAM, release requirements and peer bandwidth; not proof of successful replay."; };
   };
   config = lib.mkIf cfg.enable {
+    # Agave's startup checks remain enabled. Apply its documented host minima
+    # declaratively; operators' explicit host settings still take precedence.
+    boot.kernel.sysctl = {
+      "net.core.rmem_max" = lib.mkDefault 134217728;
+      "net.core.wmem_max" = lib.mkDefault 134217728;
+      "vm.max_map_count" = lib.mkDefault 1000000;
+    };
     assertions = [
       { assertion = cfg.package != pkgs.emptyDirectory; message = "No bundled Agave package for this host; provide a reviewed compatible node package."; }
       { assertion = cfg.capacityReviewed; message = "Review actual replay resources before enabling the node; no runtime measurements are inferred."; }
@@ -64,8 +71,8 @@ in {
       { assertion = lib.hasPrefix "/" cfg.identityFile && !(lib.hasPrefix "/nix/store/" cfg.identityFile); message = "Node identity must be an external runtime secret."; }
       { assertion = cfg.stateDirectory != "/" && lib.hasPrefix "/" cfg.stateDirectory && !(lib.hasPrefix "/nix/store/" cfg.stateDirectory)
           && !(lib.hasInfix "/../" cfg.stateDirectory); message = "Node state must be a dedicated external persistent directory."; }
-      { assertion = cfg.peerPortStart >= 1024 && cfg.peerPortEnd >= cfg.peerPortStart && cfg.peerPortEnd-cfg.peerPortStart <= 255
-          && !(cfg.peerPortStart <= 8900 && cfg.peerPortEnd >= 8899); message = "Bounded unprivileged peer range must exclude private RPC/WS ports."; }
+      { assertion = cfg.peerPortStart >= 1024 && cfg.peerPortEnd-cfg.peerPortStart >= 26 && cfg.peerPortEnd-cfg.peerPortStart <= 255
+          && !(cfg.peerPortStart <= 8900 && cfg.peerPortEnd >= 8899); message = "Agave needs a peer range spanning at least 26 ports; keep it unprivileged, bounded and separate from private RPC/WS ports."; }
     ];
     services.solana-budget-isolation = {
       enable = true;
@@ -93,6 +100,7 @@ in {
         PrivateTmp = true;
         UMask = "0077";
         LimitNOFILE = 1000000;
+        LimitMEMLOCK = 2000000000;
         MemoryHigh = cfg.memoryHigh;
         MemoryMax = cfg.memoryMax;
         MemorySwapMax = 0;

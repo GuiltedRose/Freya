@@ -109,8 +109,10 @@ in {
           && !(lib.hasPrefix "/nix/store/" cfg.live.keypairFile) && !(lib.hasPrefix "/nix/store/" cfg.live.environmentFile));
         message = "Live activation requires explicit external runtime environment and signer paths."; }
     ];
-    services.solana-budget-isolation.enable = true;
-    services.solana-budget-isolation.services = [ "crypto-bot-indexer" ] ++ lib.optional cfg.paper.enable "crypto-bot-paper" ++ lib.optional cfg.live.enable "crypto-bot-live";
+    services.solana-budget-isolation = mkIf (cfg.rpcMode != "remote") {
+      enable = true;
+      services = [ "crypto-bot-indexer" ] ++ lib.optional cfg.paper.enable "crypto-bot-paper" ++ lib.optional cfg.live.enable "crypto-bot-live";
+    };
     users.groups.crypto-bot-paper = {};
     users.users.crypto-bot-paper = {
       isSystemUser = true;

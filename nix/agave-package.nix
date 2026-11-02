@@ -9,7 +9,10 @@ rustPlatform.buildRustPackage ({
   cargoBuildFlags = [ "--package" "agave-validator" "--package" "solana-keygen" ];
   PROTOC = "${pkgs.protobuf}/bin/protoc";
   doCheck = false; # Operator runs upstream validation on the provisioned node host.
-  meta.platforms = [ "x86_64-linux" ];
+  meta = {
+    platforms = [ "x86_64-linux" ];
+    mainProgram = "agave-validator";
+  };
 } // (if cargoHash != null then { inherit cargoHash; } else {
   cargoLock = { lockFile = "${src}/Cargo.lock"; allowBuiltinFetchGit = true; };
 }))

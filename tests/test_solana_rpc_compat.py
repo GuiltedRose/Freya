@@ -14,6 +14,26 @@ ENDPOINT={'url':'https://example.invalid','source_id':'fixture','backend':'rust'
 
 
 class CompatTests(unittest.TestCase):
+    def test_explicit_remote_provider_retains_rights_and_skips_only_node_session(self):
+        endpoint=dict(ENDPOINT,network_mode='remote_provider',source_kind='solana_rpc',
+            policy={'storage_verified':True,'remote_provider_verified':True,'evidence':'reviewed remote fixture'})
+        with patch('os.stat',return_value=SimpleNamespace(st_ino=1)),patch('pathlib.Path') as paths:
+            self.assertEqual(check_boundary(endpoint),1)
+            paths.assert_not_called()
+        for change in ({'url':'http://127.0.0.1:8899'},{'url':'https://127.0.0.1'},
+                       {'url':'https://10.0.0.1'},{'network_budget':{'ledger':'preserve-me'}},
+                       {'policy':{'storage_verified':True,'evidence':'unapproved remote'}},
+                       {'ws_url':'ws://example.invalid'},{'source_kind':'local_rpc'}):
+            with self.assertRaises(SourceAccessBlocked):check_boundary(dict(endpoint,**change))
+
+    def test_remote_provider_still_uses_shared_provider_pacing(self):
+        rpc=self.rpc()
+        rpc.endpoint=dict(ENDPOINT,network_mode='remote_provider',source_kind='solana_rpc',
+            policy={'storage_verified':True,'remote_provider_verified':True,'evidence':'reviewed fixture'})
+        with patch('os.stat',return_value=SimpleNamespace(st_ino=1)):
+            self.assertEqual(rpc.call('getSlot',[]),99)
+        rpc.budget.reserve.assert_called_once_with(rpc.url,rpc.interval)
+
     def rpc(self):
         budget=MagicMock()
         rpc=RustIndexRpc(ENDPOINT,budget)

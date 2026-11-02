@@ -293,6 +293,7 @@ def paper_outcomes(path):
             corrected=any(_paper_correction(json.loads(row[2])) for row in rows)
             for sequence,at,event_raw,snapshot_raw in rows:
                 event=json.loads(event_raw);snapshot=json.loads(snapshot_raw)
+                if not isinstance(snapshot,dict):snapshot={}
                 if snapshot.get('synthetic') is True and snapshot.get('mint') in opened:
                     opened[snapshot['mint']]['training_eligible']=False
                 if event['action']=='paper_buy':

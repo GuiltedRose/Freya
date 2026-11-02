@@ -25,7 +25,7 @@ def identity(value):return hashlib.sha256(encoded(value)).hexdigest()
 def decode_snapshot(payload):
     import zstandard
     if payload is None or len(payload)>66560:raise ValueError('Compressed history exceeds frame budget')
-    with zstandard.ZstdDecompressor(max_window_size=8192).stream_reader(payload) as stream:
+    with zstandard.ZstdDecompressor(max_window_size=8*1024*1024).stream_reader(payload) as stream:
         raw=stream.read(MAX_SNAPSHOT+1)
     if len(raw)>MAX_SNAPSHOT:raise ValueError('Decompressed history exceeds snapshot budget')
     return json.loads(raw)

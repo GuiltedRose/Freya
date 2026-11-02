@@ -10,3 +10,5 @@ data/live_pool.jsonl
 **/target/
 result
 result-*
+flake.lock
+

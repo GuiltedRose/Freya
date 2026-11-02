@@ -35,7 +35,8 @@ class KernelBudgetTests(unittest.TestCase):
 
     def install(self, amount, lifetime):
         rules=firewall({'id':'a'*32,'bytes':amount,'cycle_end':time.time()+lifetime})
-        self.command('ip','netns','exec',self.names[1],'nft','-f','-',input=rules)
+        result=self.command('ip','netns','exec',self.names[1],'nft','-f','-',input=rules,check=False)
+        self.assertEqual(result.returncode,0,result.stderr)
 
     def ping(self, count):
         return self.command('ip','netns','exec',self.names[0],'ping','-n','-c',str(count),

@@ -39,6 +39,9 @@ def validate_config(config):
         if endpoint.get('backend') == 'rust':
             from solana_rpc_compat import native_module
             native_module()
+        if endpoint.get('network_mode')=='remote_provider':
+            from solana_rpc_compat import check_boundary
+            check_boundary(endpoint)
     decoder = Decoder(backend=endpoints[0].get('event_backend','python'),
                       schema_directory=config.get('schema_directory'))
     versions = config.get('reviewed_program_versions',{})

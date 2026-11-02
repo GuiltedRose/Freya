@@ -200,6 +200,13 @@ class OnchainPaperSources(ModeledPumpSources):
         row.update(observed_at=now, price_as_of=price_time, index_as_of=watermark)
         return row
 
+    def observation(self,mint,now=None,pool=None):
+        row=super().observation(mint,now,pool)
+        execution=row['execution']
+        row['fixed_cost_per_side_usd']=execution['network_fee_sol']*execution['sol_price_usd']
+        execution['fee_assumption_source']='Conservative paper cost assumption; finalized local RPC observations, no executable quote'
+        return row
+
     def fetch(self, url):
         return self.local.fetch(url)
 

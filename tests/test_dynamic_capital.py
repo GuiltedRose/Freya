@@ -130,7 +130,8 @@ class CapitalTests(unittest.TestCase):
                 store.state['pending'].update(owner_position_id='owned-B',input_units=10,minimum=0,
                     sol_price_usd=100,base_account='base-B',quote_account='quote-B')
                 orders.reconcile=lambda key:'confirmed'
-                engine.rpc=SimpleNamespace(call=lambda *args:{'meta':{'err':None},'blockTime':1100})
+                engine.rpc=SimpleNamespace(call=lambda *args:{'meta':{'err':None},'blockTime':1100,
+                    'transaction':{'signatures':['original-signature']}})
                 fill=dict(base_delta=-10,quote_delta=0,native_delta=2_000_000_000,fee_lamports=0,
                           own_account_rent_delta=0,net_cash_lamports=2_000_000_000)
                 with patch('meme_live.receipt_fill',return_value=fill):
@@ -168,6 +169,7 @@ class CapitalTests(unittest.TestCase):
                 for i in range(20):
                     row=copy.deepcopy(setup())
                     row.update(mint='Mint'+str(i),pool='Pool'+str(i),observed_at=1200+i)
+                    row['liquidity_usd']=1_000_000
                     row['candle_history'].update(mint=row['mint'],pool=row['pool'])
                     row['execution'].update(mint=row['mint'],pool=row['pool'],observed_at=row['observed_at'])
                     self.assertEqual(session.process(row)['action'],'paper_buy')

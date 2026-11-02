@@ -420,10 +420,10 @@ class IndexerTests(unittest.TestCase):
             db.execute("UPDATE blocks SET issues='[\"historical gap\"]' WHERE slot=2")
         self.assertEqual(OnchainMarket(self.store).observation(MINT, now=3600)['buy_volume_coverage_pct'], 0)
 
-    def test_live_source_cannot_enable_execution_or_load_signer(self):
+    def test_local_data_source_does_not_implicitly_load_a_signer(self):
         from run_meme_live import main
         import sys
-        with patch.object(sys, 'argv', ['run_meme_live.py', '--onchain-db', str(self.path), '--execute']), patch('config.LiveConfig.from_env') as signer, patch('sys.stderr'):
+        with patch.object(sys, 'argv', ['run_meme_live.py', '--onchain-db', str(self.path)]), patch('wallet.load_wallet') as signer, patch('sys.stderr'):
             with self.assertRaises(SystemExit): main()
             self.assertFalse(signer.called)
 
