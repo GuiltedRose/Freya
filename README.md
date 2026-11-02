@@ -1,5 +1,9 @@
 # Freya — Solana trading bot
 
+<p align="center">
+  <img src="Assets/Freya.png" alt="Freya project artwork" width="420">
+</p>
+
 > **Disclaimer:** This is a vibe-coded project built with AI. Its code and results
 > may contain errors. Nothing here guarantees that you will make money; you can
 > lose money, including your entire trading balance. This project is not financial
