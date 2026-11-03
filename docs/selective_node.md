@@ -235,3 +235,144 @@ but external regression compatibility is untested. Next milestone: demonstrate
 bounded real gossip, then implement authenticated shred acquisition with durable
 gap tracking before any market-data integration. No whole-system resource usage
 has been measured.
+
+## Phase 3: shred acquisition and receipt dependency
+
+The native engine now has `--peer acquire CONFIG STATE_DIRECTORY`: bounded UDP
+reception from 1–4 explicitly configured sender sockets, with 1–4 explicit slots
+and operator-reviewed leader public keys. It parses/sanitizes Agave Merkle data
+shreds, checks shred version and leader signatures, durably stores raw shreds,
+detects duplicates/conflicts, records missing indices, and uses Agave `Shredder`
+and `BlockComponent` decoding to reconstruct ordered transactions. A slot needs
+all data indices from zero through a unique terminal shred. Incomplete slots
+never produce a complete handoff. Restart rescans the durable files; configuration
+changes cannot silently reinterpret them. Conflicts stop acquisition and remain
+quarantined. No automatic deletion or historical retention pruning is performed.
+
+**This is a passive acquisition path, not autonomous cluster synchronization.**
+Gossip does not cause validators to send a spy their shreds. An explicitly
+configured, authorized shred transmitter and reachable UDP port are prerequisites;
+no transmitter, port forwarding or additional budget is created here. Active
+repair requests, ping handling, erasure recovery, automatic leader schedules,
+fork choice, PoH verification and independent finality are not implemented.
+Consequently Phase 3's complete native pipeline remains unfinished and unverified.
+
+### Can receipts avoid replaying the entire blockchain?
+
+**Yes, full-history replay is not necessary; transaction messages alone are still
+insufficient.** Inspection of the pinned Agave source establishes:
+
+- [`entry.rs`](https://github.com/anza-xyz/agave/blob/825efd18292aff6ffcf9daa0f7612f21b3531a72/entry/src/entry.rs)
+  carries hashes and ordered transactions, without execution receipts.
+- [`transaction_status_service.rs`](https://github.com/anza-xyz/agave/blob/825efd18292aff6ffcf9daa0f7612f21b3531a72/rpc/src/transaction_status_service.rs)
+  builds receipt metadata from committed execution, balances, logs, inner
+  instructions, fees and loaded addresses.
+- [`process_blockstore_from_root`](https://github.com/anza-xyz/agave/blob/825efd18292aff6ffcf9daa0f7612f21b3531a72/ledger/src/blockstore_processor.rs)
+  starts at an existing root bank; snapshot startup is supported. A reviewed
+  recent snapshot plus complete forward replay can therefore generate subsequent
+  receipts without replaying genesis history. Older receipts are not reconstructed
+  merely by loading that snapshot.
+
+| Approach | Required dependency | Practical implication |
+| --- | --- | --- |
+| Native shreds alone | Transactions and configured leader identity | No success, CPI logs, historical balances or execution fees; cannot supply Freya receipts |
+| Recent snapshot + forward Agave replay | Complete bank/account state, programs, features and subsequent ledger | Avoids genesis replay; retains substantial state, snapshot bandwidth and replay CPU; 64 GiB coexistence is unproven |
+| Native acquisition + finalized RPC | Reviewed provider's full block execution receipts | Implemented adapter; avoids local execution/state costs but retains provider trust, availability and quotas |
+
+Replaying only Pump transactions is not a supported shortcut: other transactions
+can change accounts, address tables, programs and runtime dependencies needed by
+later execution. Account snapshots alone also cannot reconstruct past CPI logs
+or per-transaction pre/post balances. No lightweight receipt protocol independent
+of execution or an execution-data provider has been implemented or demonstrated.
+The selected strategy is finalized RPC reconciliation while the remaining
+acquisition infrastructure becomes self-hosted. Snapshot replay remains an option
+for a future measured implementation, not a proven low-memory solution.
+
+### Local handoff and V3 integration
+
+Each reconstructed slot writes `SLOT/handoff.json` with schema
+`freya-native-slot-v1`, ordered transaction messages/signatures, parent, configured
+leader, completeness and explicit absent execution metadata/unverified finality.
+These files belong to the native process, never the indexer's database.
+
+Optional `"native_handoff": "/absolute/native/acquisition/state"` in the existing
+indexer/observer configuration enables **strict reconciliation**. The adapter
+requires a reconstructed, nonconflicting slot and exact ordered signature/parent
+agreement with the existing finalized full-block RPC request. Missing receipts or
+native evidence stop that prefix. Existing decoders, historical oracle, candle,
+source-policy and market-admission rules still run; receipt authority remains the
+reviewed RPC source. This matches transaction identifiers/order, not independent
+message execution, consensus or replay. No extra RPC calls are introduced.
+A small provenance record is committed atomically in `native_reconciliations`
+with the existing index transaction, even when raw-block retention is disabled.
+
+Leave this optional key absent for normal external/automatic operation. Enabling
+it requires a **separate reviewed index database** and an acquisition window
+covering its configured start; it is not an automatic production-source switch.
+For gaps/skipped slots, the existing finalized RPC manifest remains authoritative.
+Removing the optional key restores external-only ingestion with the saved cursor;
+never reset or edit either checkpoint. Trading/ML never consumes native messages
+as receipts, and `native_ready` remains false.
+
+### Operator configuration and commands
+
+Example acquisition configuration (replace every placeholder with reviewed data):
+
+```json
+{
+  "listen": "0.0.0.0:REPLACE_PORT",
+  "senders": ["REPLACE_PUBLIC_IPV4:REPLACE_SENDER_PORT"],
+  "slots": [{"slot": 0, "leader": "REPLACE_LEADER_PUBLIC_KEY"}],
+  "shred_version": 0,
+  "duration_seconds": 20,
+  "max_namespace_bytes": 250000,
+  "max_shreds_per_slot": 1024
+}
+```
+
+The placeholders fail closed. Slots/leaders must be reviewed for that exact
+network/window; leader signatures do not prove the configured schedule is correct.
+Maximum raw storage per window is approximately 32 MiB (4 × 4096 × 2048 bytes),
+plus decoded JSON, checkpoints and temporary files. The adapter caps a handoff at
+32 MiB. The existing 2 GiB process/service limit is containment, not a measured
+working set. Acquisition stops on its duration/traffic bounds and never renews a
+lease. No on-disk evidence is pruned, so keep each explicit window bounded.
+
+Prerequisites: build commands above, collector UID, private config, active reviewed
+network isolation, and a separately authorized transmitter/reachable UDP port.
+The current 16 kB/s caps and finite budget lease may prevent slot completion;
+there is no bypass. No new network permissions are granted by this change.
+
+```nix
+services.freya-node.peerOperation = "acquire";
+services.freya-node.peerDiscoveryConfig = "/absolute/private/acquire.json";
+# networkMode remains "isolated"; retain the existing budget and service inventory.
+```
+
+Use the prior NixOS build/switch commands only after reviewing port/transmitter
+permissions. Then the operator may run:
+
+```bash
+sudo systemctl start freya-peer-discovery.service
+nix run --no-write-lock-file .#node -- --peer status /dev/null /var/lib/freya-node/acquire
+```
+
+To validate the receipt boundary only:
+
+```bash
+python -m unittest tests.test_native_receipt_handoff
+```
+
+Six focused fixture tests passed during implementation at the user's explicit
+request: missing metadata, matched receipt attribution, ordering mismatch, parent
+mismatch, incomplete/conflicting data and symlink rejection. They do not establish
+native-network operation, Rust compilation, full decoder correctness or readiness.
+No Rust/Nix build, broader regression, service or network diagnostic ran.
+
+Rollback: stop `freya-peer-discovery.service`, remove the optional `native_handoff`
+key from the reviewed indexer configuration, restore `peerOperation = "discover"`
+(or remove the diagnostic config), and apply the previous reviewed NixOS generation.
+Preserve both state directories, identity, raw/conflicting shreds, databases and
+provider ledger. Existing discovery state remains at `peer`; acquisition uses
+`acquire`. Next milestone is operator compilation and bounded real acquisition,
+then active Agave-compatible repair and sustained receipt-reconciled indexing.

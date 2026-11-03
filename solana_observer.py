@@ -81,7 +81,8 @@ def prepare(config, database, resume=False):
                 raise SourceAccessBlocked('Stream backups require reviewed rights and the same network budget')
         endpoint={**endpoint,'stream_sources':[dict(row) for row in endpoints]}
     return Ingester(store,clients,config.get('reviewed_program_versions'),
-                    decoder=decoder,oracle=config.get('oracle')),endpoint,candles
+                    decoder=decoder,oracle=config.get('oracle'),
+                    native_handoff=config.get('native_handoff')),endpoint,candles
 
 
 async def observe(config, database, start_slot=None, resume=False, batch=8, interval=5, max_cycles=None):

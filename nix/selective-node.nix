@@ -1,6 +1,9 @@
 # Private selective-data bridge. No service is automatically activated.
 { config, lib, pkgs, package, ... }:
-let cfg = config.services.freya-node; in {
+let
+  cfg = config.services.freya-node;
+  peerState = "${cfg.stateDirectory}/${if cfg.peerOperation == "discover" then "peer" else "acquire"}";
+in {
   imports = [ ./solana-network-isolation.nix ];
   options.services.freya-node = {
     enable = lib.mkEnableOption "Freya selective acquisition (not an independent validator)";
@@ -14,6 +17,10 @@ let cfg = config.services.freya-node; in {
     peerDiscoveryConfig = lib.mkOption {
       type = lib.types.nullOr lib.types.str; default = null;
       description = "Private absolute discovery configuration; enables a manual, bounded diagnostic only.";
+    };
+    peerOperation = lib.mkOption {
+      type = lib.types.enum [ "discover" "acquire" ]; default = "discover";
+      description = "Manual diagnostic operation; acquisition requires an explicitly authorized UDP sender/port.";
     };
   };
   config = lib.mkIf cfg.enable {
@@ -29,7 +36,7 @@ let cfg = config.services.freya-node; in {
       enable = true; services = [ "freya-node" ] ++ lib.optional (cfg.peerDiscoveryConfig != null) "freya-peer-discovery";
     };
     systemd.tmpfiles.rules = [ "d ${cfg.stateDirectory} 0700 ${cfg.user} ${cfg.group} -" ]
-      ++ lib.optional (cfg.peerDiscoveryConfig != null) "d ${cfg.stateDirectory}/peer 0700 ${cfg.user} ${cfg.group} -";
+      ++ lib.optional (cfg.peerDiscoveryConfig != null) "d ${peerState} 0700 ${cfg.user} ${cfg.group} -";
     systemd.services.freya-peer-discovery = lib.mkIf (cfg.peerDiscoveryConfig != null) {
       description = "Bounded Freya native gossip discovery; no trading admission";
       wantedBy = []; restartIfChanged = false; stopIfChanged = true;
@@ -40,11 +47,11 @@ let cfg = config.services.freya-node; in {
         ProtectHome = true; PrivateTmp = true; CapabilityBoundingSet = "";
         MemoryAccounting = true; MemoryHigh = "1G"; MemoryMax = "2G"; MemorySwapMax = 0;
         TasksMax = 128; LimitNOFILE = 128; RuntimeMaxSec = 52; TimeoutStopSec = 3;
-        ReadWritePaths = [ "${cfg.stateDirectory}/peer" ];
+        ReadWritePaths = [ peerState ];
       };
       script = ''
-        exec ${package}/bin/freya-node --peer discover "$CREDENTIALS_DIRECTORY/peer.json" \
-          ${lib.escapeShellArg "${cfg.stateDirectory}/peer"}
+        exec ${package}/bin/freya-node --peer ${cfg.peerOperation} "$CREDENTIALS_DIRECTORY/peer.json" \
+          ${lib.escapeShellArg peerState}
       '';
     };
     systemd.services.freya-node = {

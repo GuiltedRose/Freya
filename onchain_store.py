@@ -31,6 +31,8 @@ class EventStore:
                     raw_hash TEXT NOT NULL, transactions INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS block_times ON blocks(time);
                 CREATE TABLE IF NOT EXISTS raw_blocks(slot INTEGER PRIMARY KEY, raw BLOB NOT NULL, raw_hash TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS native_reconciliations(
+                    slot INTEGER PRIMARY KEY, source TEXT NOT NULL, evidence TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS transactions(
                     signature TEXT PRIMARY KEY, slot INTEGER NOT NULL, tx_index INTEGER NOT NULL,
                     raw BLOB NOT NULL, raw_hash TEXT NOT NULL);
@@ -153,6 +155,14 @@ class EventStore:
                 row = db.execute('SELECT raw_hash FROM blocks WHERE slot=?', (slot,)).fetchone()
                 if row and row[0] != digest:
                     raise ValueError('Conflicting finalized block')
+                if '_native_reconciliation' in block:
+                    evidence = canonical(block['_native_reconciliation'])
+                    old = db.execute('SELECT source,evidence FROM native_reconciliations WHERE slot=?',
+                                     (slot,)).fetchone()
+                    if old and tuple(old) != (source, evidence):
+                        raise ValueError('Conflicting native reconciliation provenance')
+                    db.execute('INSERT OR IGNORE INTO native_reconciliations VALUES(?,?,?)',
+                               (slot, source, evidence))
                 if self.retain_blocks:
                     db.execute('INSERT OR IGNORE INTO raw_blocks VALUES(?,?,?)',
                                (slot, zlib.compress(canonical(block).encode()), digest))

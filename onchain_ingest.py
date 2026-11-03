@@ -200,13 +200,14 @@ def read_program_deployments(rpc,programs):
 
 
 class Ingester:
-    def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None):
+    def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None, native_handoff=None):
         if not endpoints:
             raise ValueError('At least one explicitly authorized RPC required')
         self.store, self.endpoints = store, endpoints
         self.decoder = decoder or Decoder(backend=getattr(endpoints[0],'event_backend','python'))
         self.versions = versions or {}
         self.oracle = oracle
+        self.native_handoff = native_handoff
         self.oracle_last_attempt = 0
         for rpc in endpoints:
             self.store.policy(rpc.source)
@@ -279,6 +280,9 @@ class Ingester:
                     for slot,block in zip(selected,blocks):
                         if not block or not isinstance(block.get('transactions'), list):
                             raise ValueError('Missing finalized block; durable prefix preserved')
+                        if self.native_handoff is not None:
+                            from native_handoff import reconcile
+                            block['_native_reconciliation'] = reconcile(self.native_handoff, slot, block)
                         events, issues, relevant = [], self.version_issues(slot, deployments), []
                         for tx_index, tx in enumerate(block['transactions']):
                             try:

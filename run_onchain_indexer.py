@@ -103,7 +103,8 @@ def run(args,config,decoder,parser):
             print(json.dumps(import_sol(store, capture_sol(endpoints[0]))))
             return
         ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'),
-                            decoder=decoder, oracle=config.get('oracle'))
+                            decoder=decoder, oracle=config.get('oracle'),
+                            native_handoff=config.get('native_handoff'))
         start = bootstrap_start(store,endpoints,args.start_slot)
         candles=None
         markets=config.get('markets',[])

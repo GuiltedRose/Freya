@@ -5,6 +5,7 @@ let
     cp -r ${src} $out
     chmod -R u+w $out
     cp ${../native/freya_node/src/peer.rs} $out/gossip/src/freya_peer.rs
+    cp ${../native/freya_node/src/acquisition.rs} $out/gossip/src/acquisition.rs
     python - "$out" <<'PY'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -34,7 +35,7 @@ PY
   '';
 in rustPlatform.buildRustPackage {
   pname = "freya-peer";
-  version = "0.2.0";
+  version = "0.3.0";
   src = source;
   cargoLock = { lockFile = "${source}/Cargo.lock"; allowBuiltinFetchGit = true; };
   cargoBuildFlags = [ "--package" "solana-gossip" "--features" "agave-unstable-api" "--bin" "freya-peer" ];
