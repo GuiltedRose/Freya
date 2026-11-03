@@ -25,19 +25,46 @@ pub(super) fn raw(path: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new(); file.read_to_end(&mut bytes)?; Ok(bytes)
 }
 pub(super) fn checked(bytes: Vec<u8>, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Shred> {
+    let shred = checked_any(bytes,slot,version,leader,max)?;
+    if !shred.is_data() { return Err(invalid()); }
+    Ok(shred)
+}
+fn checked_any(bytes: Vec<u8>, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Shred> {
     let shred = Shred::new_from_serialized_shred(bytes).map_err(|_| invalid())?;
     shred.sanitize().map_err(|_| invalid())?;
-    if !shred.is_data() || shred.slot()!=slot || shred.version()!=version
+    if shred.slot()!=slot || shred.version()!=version
         || shred.index()>=max || !shred.verify(leader) { return Err(invalid()); }
     Ok(shred)
 }
 pub(super) fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Value> {
     let mut shreds = BTreeMap::new();
+    let mut fec = BTreeMap::<u32,Vec<Shred>>::new();
     for row in fs::read_dir(dir)? {
         let path = row?.path();
-        if path.extension().and_then(|s|s.to_str()) != Some("shred") { continue; }
-        let shred = checked(raw(&path)?,slot,version,leader,max)?;
-        if shreds.insert(shred.index(),shred).is_some() { return Err(invalid()); }
+        let extension = path.extension().and_then(|s|s.to_str());
+        if extension != Some("shred") && extension != Some("coding") { continue; }
+        let shred = checked_any(raw(&path)?,slot,version,leader,max)?;
+        if shred.is_data() != (extension==Some("shred")) { return Err(invalid()); }
+        fec.entry(shred.fec_set_index()).or_default().push(shred.clone());
+        if shred.is_data() && shreds.insert(shred.index(),shred).is_some() { return Err(invalid()); }
+    }
+    let mut recovered = 0u64;
+    static CACHE: std::sync::OnceLock<solana_ledger::shred::ReedSolomonCache> = std::sync::OnceLock::new();
+    if !dir.join("conflict.json").exists() {
+        for group in fec.into_values().filter(|g|g.iter().any(|s|!s.is_data())) {
+            if let Ok(output) = solana_ledger::shred::freya_recover(group,CACHE.get_or_init(Default::default)) {
+                for shred in output.into_iter().filter(Shred::is_data) {
+                    let bytes = shred.payload().as_ref().to_vec();
+                    let shred = checked(bytes.clone(),slot,version,leader,max)?;
+                    if let Some(existing) = shreds.get(&shred.index()) {
+                        if existing.payload().as_ref()!=bytes.as_slice() { return Err(invalid()); }
+                    } else {
+                        atomic_file(&dir.join(format!("{}.shred",shred.index())),&bytes)?;
+                        shreds.insert(shred.index(),shred); recovered+=1;
+                    }
+                }
+            }
+        }
     }
     let last = shreds.values().filter(|s|s.last_in_slot()).map(|s|s.index()).collect::<Vec<_>>();
     if last.len()>1 { return Err(io::Error::other("conflicting terminal shreds")); }
@@ -50,7 +77,7 @@ pub(super) fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, 
     let complete = last.len()==1 && missing.is_empty();
     let mut result = json!({"schema":"freya-native-slot-v1","slot":slot,"leader":leader.to_string(),
         "shred_version":version,"received_shreds":shreds.len(),"missing_indices":missing,
-        "terminal_index":last.first(),"reconstructed":false,"execution_metadata":null,
+        "terminal_index":last.first(),"reconstructed":false,"execution_metadata":null,"recovered_data_shreds":recovered,
         "finality":"unverified","verification":"operator_configured_leader_signature",
         "authoritative":false,"conflict":dir.join("conflict.json").exists()});
     if !complete || result["conflict"]==true { return Ok(result); }
@@ -171,9 +198,10 @@ pub fn acquire(config_path: &Path, dir: &Path) -> io::Result<()> {
                     } else { None };
                     if let Some(shred) = parsed.filter(|s|slots.contains_key(&s.slot())) {
                         let slot = shred.slot();
-                        if let Ok(shred) = checked(packet[..length].to_vec(),slot,version,&slots[&slot],max) {
+                        if let Ok(shred) = checked_any(packet[..length].to_vec(),slot,version,&slots[&slot],max) {
                             let base = dir.join(slot.to_string());
-                            let path = base.join(format!("{}.shred",shred.index()));
+                            let suffix = if shred.is_data(){"shred"}else{"coding"};
+                            let path = base.join(format!("{}.{suffix}",shred.index()));
                             if path.exists() {
                                 if raw(&path)?!=packet[..length] {
                                     atomic_file(&base.join("conflict.json"),b"{\"conflict\":true}")?;
@@ -203,4 +231,49 @@ pub fn acquire(config_path: &Path, dir: &Path) -> io::Result<()> {
     // Best-effort rescan exposes conflicts; retain earlier checkpoint if reconstruction itself failed.
     if snapshot(&mut status).is_err() { publish(dir,&status)?; }
     outcome
+}
+
+#[cfg(test)]
+pub(super) mod reconstruction_tests {
+    use super::*;
+    use solana_entry::entry::Entry;
+    use solana_ledger::shred::{ProcessShredsStats, ReedSolomonCache};
+    pub(crate) fn fixture() -> (Keypair,Vec<Shred>) {
+        let key=Keypair::new();
+        let component=BlockComponent::EntryBatch(vec![Entry{num_hashes:1,hash:Default::default(),transactions:vec![]}]);
+        let payload=wincode::serialize(&component).unwrap();
+        let shreds=Shredder::new(42,41,0,7).unwrap().make_shreds_from_data_slice(
+            &key,&payload,true,Default::default(),0,0,&ReedSolomonCache::default(),
+            &mut ProcessShredsStats::default()).unwrap().collect();
+        (key,shreds)
+    }
+    fn put(dir:&Path,shred:&Shred) {
+        let suffix=if shred.is_data(){"shred"}else{"coding"};
+        atomic_file(&dir.join(format!("{}.{suffix}",shred.index())),shred.payload().as_ref()).unwrap();
+    }
+    #[test] fn complete_data_reconstructs_without_receipts() {
+        let (key,shreds)=fixture();let dir=tempfile::tempdir().unwrap();
+        for shred in shreds.iter().filter(|s|s.is_data()){put(dir.path(),shred);}
+        let report=reconstruct(dir.path(),42,7,&key.pubkey(),4096).unwrap();
+        assert_eq!(report["reconstructed"],true);assert_eq!(report["execution_metadata"],Value::Null);
+        assert_eq!(report["parent_slot"],41);
+    }
+    #[test] fn missing_data_stays_quarantined_then_recovers_from_parity() {
+        let (key,shreds)=fixture();let dir=tempfile::tempdir().unwrap();
+        for shred in shreds.iter().filter(|s|s.is_data() && s.index()!=0){put(dir.path(),shred);}
+        assert_eq!(reconstruct(dir.path(),42,7,&key.pubkey(),4096).unwrap()["reconstructed"],false);
+        for shred in shreds.iter().filter(|s|!s.is_data()){put(dir.path(),shred);}
+        let report=reconstruct(dir.path(),42,7,&key.pubkey(),4096).unwrap();
+        assert_eq!(report["reconstructed"],true);
+        assert!(report["recovered_data_shreds"].as_u64().unwrap()>0);
+        assert_eq!(reconstruct(dir.path(),42,7,&key.pubkey(),4096).unwrap()["reconstructed"],true);
+    }
+    #[test] fn wrong_leader_version_and_duplicate_records_fail() {
+        let (key,shreds)=fixture();let data=shreds.iter().find(|s|s.is_data()).unwrap();
+        assert!(checked(data.payload().as_ref().to_vec(),42,8,&key.pubkey(),4096).is_err());
+        assert!(checked(data.payload().as_ref().to_vec(),42,7,&Keypair::new().pubkey(),4096).is_err());
+        let dir=tempfile::tempdir().unwrap();put(dir.path(),data);
+        atomic_file(&dir.path().join("duplicate.shred"),data.payload().as_ref()).unwrap();
+        assert!(reconstruct(dir.path(),42,7,&key.pubkey(),4096).is_err());
+    }
 }

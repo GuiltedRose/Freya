@@ -22,6 +22,8 @@ in {
       type = lib.types.enum [ "discover" "acquire" "follow" ]; default = "discover";
       description = "Manual diagnostic operation; acquisition requires an explicitly authorized UDP sender/port.";
     };
+    continuousMode = lib.mkOption { type = lib.types.bool; default = false;
+      description = "Allow follow to run until the separately authorized network lease ends; no automatic renewal."; };
   };
   config = lib.mkIf cfg.enable {
     assertions = [
@@ -47,7 +49,9 @@ in {
         Restart = "no"; NoNewPrivileges = true; ProtectSystem = "strict";
         ProtectHome = true; PrivateTmp = true; CapabilityBoundingSet = "";
         MemoryAccounting = true; MemoryHigh = "1G"; MemoryMax = "2G"; MemorySwapMax = 0;
-        TasksMax = 128; LimitNOFILE = 128; RuntimeMaxSec = 52; TimeoutStopSec = 3;
+        TasksMax = 128; LimitNOFILE = 128;
+        RuntimeMaxSec = if cfg.continuousMode then "infinity" else 52;
+        TimeoutStopSec = 3;
         ReadWritePaths = [ peerState (builtins.dirOf cfg.providerLedger) ];
       };
       script = ''

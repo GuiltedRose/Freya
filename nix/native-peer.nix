@@ -8,6 +8,7 @@ let
     cp ${../native/freya_node/src/acquisition.rs} $out/core/src/acquisition.rs
     cp ${../native/freya_node/src/follow.rs} $out/core/src/follow.rs
     cat ${../native/freya_node/src/repair_bridge.rs} >> $out/core/src/repair/serve_repair.rs
+    cat ${../native/freya_node/src/erasure_bridge.rs} >> $out/ledger/src/shred.rs
     python - "$out" <<'PY'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -44,14 +45,15 @@ in rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.protobuf pkgs.perl pkgs.rustPlatform.bindgenHook pkgs.makeWrapper ];
   buildInputs = [ pkgs.openssl pkgs.udev pkgs.bzip2 pkgs.zlib pkgs.lz4 ];
   PROTOC = "${pkgs.protobuf}/bin/protoc";
-  doCheck = false;
+  doCheck = true; # Deterministic engine fixtures only; no authorized network lease.
   cargoTestFlags = [ "--package" "solana-core" "--features" "agave-unstable-api" "--bin" "freya-peer" ];
   postInstall = ''
     mv $out/bin/freya-peer $out/bin/.freya-peer-engine
     makeWrapper ${pkgs.util-linux}/bin/prlimit $out/bin/freya-peer \
       --add-flags '--as=2147483648 --nofile=128 --nproc=128 --' \
       --add-flags "$out/bin/.freya-peer-engine" \
-      --set SOLANA_RAYON_THREADS 2 --set RAYON_NUM_THREADS 2
+      --set SOLANA_RAYON_THREADS 2 --set RAYON_NUM_THREADS 2 \
+      --unset SOLANA_METRICS_CONFIG
   '';
   meta = { platforms = [ "x86_64-linux" ]; mainProgram = "freya-peer"; };
 }

@@ -90,6 +90,9 @@ def cleanup():
 
 
 def start(config):
+    session_seconds=config.get('sessionSeconds',55)
+    if type(session_seconds) is not int or not 1<=session_seconds<=3600:
+        raise ValueError('Explicit sessionSeconds must be 1..3600')
     ledger=Path(config['ledger'])
     if ledger.is_symlink() or ledger.stat().st_uid!=0 or ledger.stat().st_mode & 0o077:
         raise ValueError('Root-owned owner-only persistent ledger required')
@@ -104,7 +107,7 @@ def start(config):
     OWNED.write_text('solana-budget-network service owns this namespace\n')
     OWNED.chmod(0o600)
     grant=budget.grant(config['sessionBytes'],time.time())
-    expiry=min(grant['cycle_end'],time.time()+55)
+    expiry=min(grant['cycle_end'],time.time()+session_seconds)
     audit=ledger.parent/'network-events.jsonl'
     def event(phase):
         with audit.open('a') as stream:
@@ -130,7 +133,8 @@ def start(config):
         ns('ethtool','-K','eth0','tso','off','gso','off','gro','off')
         ns('sysctl','-w','net.ipv6.conf.all.disable_ipv6=1')
         ns('sysctl','-w','net.ipv6.conf.default.disable_ipv6=1')
-        ns('nft','-f','-',input=firewall(grant,config['uploadKbytes'],config['downloadKbytes'],upload_policed_on_host=True))
+        ns('nft','-f','-',input=firewall(grant,config['uploadKbytes'],config['downloadKbytes'],upload_policed_on_host=True,
+                                      session_seconds=min(3600,session_seconds+5)))
         # Atomic replacement of our tables only; deletion requires known existence.
         prefix=''
         for family,table in [('inet','solana_boundary'),('ip','solana_nat')]:

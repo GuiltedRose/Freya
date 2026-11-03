@@ -124,7 +124,7 @@ class Budget:
                 'isp_wire_budget_guaranteed':False, 'automatic_grants':False}
 
 
-def firewall(grant, upload_kbps=16, download_kbps=16, now=None, upload_policed_on_host=False):
+def firewall(grant, upload_kbps=16, download_kbps=16, now=None, upload_policed_on_host=False, session_seconds=60):
     """Render ONLY; install inside a dedicated, otherwise unrouted net namespace.
 
     The same named quota charges BOTH directions, all protocols/retransmissions.
@@ -134,7 +134,9 @@ def firewall(grant, upload_kbps=16, download_kbps=16, now=None, upload_policed_o
     """
     import time
     now=time.time() if now is None else now
-    lease_seconds=int(min(60,grant['cycle_end']-now))
+    if type(session_seconds) is not int or not 1 <= session_seconds <= 3600:
+        raise ValueError('Explicit lease duration must be 1..3600 seconds')
+    lease_seconds=int(min(session_seconds,grant['cycle_end']-now))
     if lease_seconds < 1: raise ValueError('Billing cycle expired')
     identifier = grant['id']
     if len(identifier)!=32 or any(c not in '0123456789abcdef' for c in identifier):

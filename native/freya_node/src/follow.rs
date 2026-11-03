@@ -4,8 +4,19 @@ use super::acquisition::{atomic_file, checked, raw, reconstruct};
 use solana_core::repair::serve_repair::{freya_repair_pong, RepairProtocol, RepairRequestHeader, ServeRepair};
 use solana_gossip::contact_info::Protocol;
 use solana_pubkey::Pubkey;
+use solana_ledger::shred::Shred;
 use std::{net::UdpSocket, process::{Command, Stdio}, str::FromStr};
 const SCHEMA: &str = "freya-native-follow-v1";
+fn response(packet:&[u8],from:SocketAddr,expected:SocketAddr,nonce:u32,slot:u64,
+    version:u16,leader:&Pubkey,max:u32,index:Option<u64>) -> Option<(Shred,Vec<u8>)> {
+    if from!=expected || packet.len()<4 || packet.len()>2048 {return None;}
+    let end=packet.len()-4;
+    if u32::from_le_bytes(packet[end..].try_into().ok()?)!=nonce {return None;}
+    let bytes=packet[..end].to_vec();
+    let shred=checked(bytes.clone(),slot,version,leader,max).ok()?;
+    if index.is_some_and(|i|i!=u64::from(shred.index())) {return None;}
+    Some((shred,bytes))
+}
 fn save(path: &Path, value: &Value) -> io::Result<()> {
     atomic_file(path,&serde_json::to_vec(value).map_err(|_|invalid())?)
 }
@@ -19,6 +30,7 @@ pub(super) fn disk_bytes(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) -> io::Result<Value> {
+    loop {
     lease()?;
     let mut command = Command::new(env::var_os("FREYA_NODE_PYTHON").ok_or_else(invalid)?);
     command.arg(env::var_os("FREYA_NODE_PLANNER").ok_or_else(invalid)?)
@@ -26,26 +38,34 @@ fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) ->
         .arg("--output").arg(dir.join("window.json"));
     if let Some(start) = start { command.arg("--start").arg(start.to_string()); }
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-    loop {
+    let status = loop {
         if Instant::now()>=deadline || stop.load(Ordering::Relaxed) || lease().is_err() {
             let _ = child.kill(); let _ = child.wait(); return Err(io::Error::other("planning interrupted"));
         }
         if let Some(status) = child.try_wait()? {
-            if !status.success() { return Err(io::Error::other("reviewed RPC plan unavailable")); }
-            break;
+            break status;
         }
         thread::sleep(Duration::from_millis(100));
     }
+    ;
+    if status.code()==Some(75) {
+        let until=(Instant::now()+Duration::from_secs(2)).min(deadline);
+        while Instant::now()<until && !stop.load(Ordering::Relaxed) {lease()?;thread::sleep(Duration::from_millis(100));}
+        continue;
+    }
+    if !status.success() { return Err(io::Error::other("reviewed RPC plan unavailable")); }
     let window = read_json(&dir.join("window.json"))?;
     if window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
         || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
         || start.is_some_and(|s|window["start"].as_u64()!=Some(s)) { return Err(invalid()); }
-    Ok(window)
+    return Ok(window);
+    }
 }
 pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let config = read_json(config_path)?;
-    let seconds = bounded(&config,"duration_seconds",1,50)?;
-    let traffic_cap = bounded(&config,"max_namespace_bytes",1,1_000_000)?;
+    let continuous = config["continuous"].as_bool().unwrap_or(false);
+    let seconds = if continuous {86400} else {bounded(&config,"duration_seconds",1,50)?};
+    let traffic_cap = bounded(&config,"max_namespace_bytes",1,if continuous {10_000_000}else{1_000_000})?;
     let disk_cap = bounded(&config,"max_disk_bytes",1_048_576,1_073_741_824)?;
     let max = bounded(&config,"max_shreds_per_slot",1,4096)? as u32;
     let max_attempts = bounded(&config,"max_attempts_per_window",1,4096)?;
@@ -60,30 +80,45 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         else {json!({"format":SCHEMA,"schema_version":1,"next_slot":null,"attempts":0,"window_start":null,
             "validated_shreds":0,"duplicates":0,"repair_requests":0,"repair_responses":0,"repair_timeouts":0})};
     if state["format"]!=SCHEMA || state["schema_version"]!=1 { return Err(invalid()); }
+    for field in ["attempts","validated_shreds","duplicates","repair_requests","repair_responses","repair_timeouts"] {
+        if !state[field].is_u64() {return Err(invalid());}
+    }
+    for field in ["next_slot","window_start"] {
+        if !state[field].is_null() && !state[field].is_u64() {return Err(invalid());}
+    }
+    if !state["window_start"].is_null() && (state["next_slot"].is_null() || !dir.join("window.json").is_file()) {return Err(invalid());}
     state["state"] = json!("starting"); state["native_ready"] = json!(false);
     state["verification"] = json!("RPC schedule plus leader-signed shreds; no replay or consensus");
     state["external_rpc_dependency"] = json!(["genesis","finalized manifest","leader schedule","shred version","execution receipts"]);
     state["source_mode"] = json!("native_repair_with_external_metadata");
-    state["coding_recovery"] = Value::Null; state["receipt_availability"] = json!("external reconciliation required");
+    state["coding_recovery"] = json!("available for persisted parity; data-index repair requests data only");
+    state["receipt_availability"] = json!("external reconciliation required");
+    state["continuous"] = json!(continuous);
     state["peer_connected"] = json!(0); state["active_repair_peer"] = Value::Null;
     state["queue_in_flight"] = json!(0); state["last_error_category"] = Value::Null;
     publish(dir,&state)?;
-    lease()?;
+    if lease().is_err() {
+        state["state"]=json!("blocked");state["last_error_category"]=json!("network_authorization");
+        publish(dir,&state)?;return Err(invalid());
+    }
     let initial = counters()?;
     let deadline = Instant::now()+Duration::from_secs(seconds);
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT,stop.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGTERM,stop.clone())?;
     let key_path = dir.join("identity.json");
+    if !state["node_identity"].is_null() && !key_path.exists() {return Err(invalid());}
     if !key_path.exists() { save(&key_path,&json!(Keypair::new().to_bytes().to_vec()))?; }
     let meta = fs::symlink_metadata(&key_path)?;
     if !meta.is_file() || meta.uid()!=fs::metadata("/proc/self")?.uid() || meta.permissions().mode()&0o077!=0 { return Err(invalid()); }
     let key = read_keypair_file(&key_path).map_err(|_|invalid())?;
     let request_key = read_keypair_file(&key_path).map_err(|_|invalid())?;
+    if state["node_identity"].as_str().is_some_and(|id|id!=request_key.pubkey().to_string()) {return Err(invalid());}
+    state["node_identity"]=json!(request_key.pubkey().to_string());publish(dir,&state)?;
     let outcome = (|| -> io::Result<()> {
         let mut window = if dir.join("window.json").exists() && state["next_slot"].is_u64() {
             read_json(&dir.join("window.json"))?
-        } else { plan(dir,state["next_slot"].as_u64(),deadline,&stop)? };
+        } else { plan(dir,state["next_slot"].as_u64().or(config["initial_slot"].as_u64()),deadline,&stop)? };
         if window["schema"]!="freya-native-window-v1" || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" { return Err(invalid()); }
         let version = bounded(&window,"shred_version",1,65535)? as u16;
         let socket = UdpSocket::bind("0.0.0.0:0")?;
@@ -96,7 +131,10 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 let rx=usage.0.checked_sub(initial.0).ok_or_else(invalid)?;
                 let tx=usage.1.checked_sub(initial.1).ok_or_else(invalid)?;
                 state["namespace_incoming_bytes"]=json!(rx);state["namespace_outgoing_bytes"]=json!(tx);
-                if rx.saturating_add(tx)>=traffic_cap || disk_bytes(dir)?.saturating_add(65536)>disk_cap { return Err(io::Error::other("resource bound")); }
+                let disk=disk_bytes(dir)?;state["disk_bytes"]=json!(disk);
+                state["ram_bytes"]=json!(fs::read_to_string("/proc/self/status").ok().and_then(|s|
+                    s.lines().find_map(|l|l.strip_prefix("VmRSS:").and_then(|v|v.split_whitespace().next()?.parse::<u64>().ok()).map(|kb|kb*1024))));
+                if rx.saturating_add(tx)>=traffic_cap || disk.saturating_add(65536)>disk_cap { return Err(io::Error::other("resource bound")); }
                 let first=window["start"].as_u64().ok_or_else(invalid)?;
                 let source=window["source_identity"].as_str().ok_or_else(invalid)?;
                 if state["rpc_source_identity"].as_str().is_some_and(|old|old!=source) { return Err(invalid()); }
@@ -107,6 +145,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     state["window_start"]=json!(first); state["next_slot"]=json!(first);state["attempts"]=json!(0);
                 }
                 let cursor=state["next_slot"].as_u64().ok_or_else(invalid)?;
+                state["observed_network_slot"]=window["observed_finalized_head"].clone();
+                state["network_progress_provenance"]=json!("finalized RPC claim");
+                let age=(now() as f64-window["at"].as_f64().ok_or_else(invalid)?).max(0.0);
+                state["head_age_seconds"]=json!(age);state["lag_is_current"]=json!(age<=30.0);
+                state["estimated_lag_slots"]=json!(window["observed_finalized_head"].as_u64().map(|head|head.saturating_sub(cursor)));
                 if cursor<first || cursor>end+1 { return Err(invalid()); }
                 if cursor>end {
                     state["state"]=json!("following"); publish(dir,&state)?;
@@ -165,10 +208,8 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     if !pong_sent {
                         if let Some(pong)=freya_repair_pong(&packet[..length],&request_key,&peer){socket.send_to(&pong,address)?;pong_sent=true;continue;}
                     }
-                    if length<4 || u32::from_le_bytes(packet[length-4..length].try_into().map_err(|_|invalid())?)!=nonce {continue;}
-                    let bytes=packet[..length-4].to_vec();
-                    let shred=match checked(bytes.clone(),cursor,version,&leader,max){Ok(s)=>s,Err(_)=>continue};
-                    if !highest && Some(u64::from(shred.index()))!=index {continue;}
+                    let Some((shred,bytes))=response(&packet[..length],from,address,nonce,cursor,version,&leader,max,
+                        if highest{None}else{index}) else {continue;};
                     let path=base.join(format!("{}.shred",shred.index()));
                     if path.exists(){
                         if raw(&path)?!=bytes {save(&base.join("conflict.json"),&json!({"conflict":true}))?;atomic_file(&base.join("conflicting-shred.bin"),&bytes)?;return Err(invalid());}
@@ -189,4 +230,34 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     state["state"]=json!(if outcome.is_ok(){"stopped"}else{"blocked"});state["queue_in_flight"]=json!(0);
     if outcome.is_err(){state["last_error_category"]=json!("repair_planning_or_network_policy");}
     state["updated_at"]=json!(now());publish(dir,&state)?;outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn response_binds_socket_nonce_slot_version_leader_and_index() {
+        let (key,shreds)=super::super::acquisition::reconstruction_tests::fixture();
+        let data=shreds.iter().find(|s|s.is_data()).unwrap();
+        let mut packet=data.payload().as_ref().to_vec();packet.extend_from_slice(&17u32.to_le_bytes());
+        let address="127.0.0.1:12345".parse().unwrap();let other="127.0.0.1:12346".parse().unwrap();
+        let accept=|from,nonce,slot,version,leader:&Pubkey,index|response(&packet,from,address,nonce,slot,version,leader,4096,index).is_some();
+        assert!(accept(address,17,42,7,&key.pubkey(),Some(0)));
+        assert!(!accept(other,17,42,7,&key.pubkey(),Some(0)));
+        assert!(!accept(address,18,42,7,&key.pubkey(),Some(0)));
+        assert!(!accept(address,17,43,7,&key.pubkey(),Some(0)));
+        assert!(!accept(address,17,42,8,&key.pubkey(),Some(0)));
+        assert!(!accept(address,17,42,7,&Keypair::new().pubkey(),Some(0)));
+        assert!(!accept(address,17,42,7,&key.pubkey(),Some(1)));
+    }
+    #[test] fn ping_requires_expected_peer_and_returns_authenticated_pong() {
+        use solana_keypair::signable::Signable;
+        #[derive(wincode::SchemaWrite)] enum Reply {Ping(solana_gossip::ping_pong::Ping<32>)}
+        let peer=Keypair::new();let node=Keypair::new();
+        let data=wincode::serialize(&Reply::Ping(solana_gossip::ping_pong::Ping::new([7;32],&peer))).unwrap();
+        let bytes=freya_repair_pong(&data,&node,&peer.pubkey()).unwrap();
+        let RepairProtocol::Pong(pong)=wincode::deserialize(&bytes).unwrap() else {panic!("expected pong")};
+        assert!(pong.verify());assert_eq!(pong.pubkey(),node.pubkey());
+        assert!(freya_repair_pong(&data,&node,&node.pubkey()).is_none());
+        assert!(freya_repair_pong(b"corrupt",&node,&peer.pubkey()).is_none());
+    }
 }

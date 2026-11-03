@@ -24,6 +24,8 @@ def prepare(config_path, output, start=None):
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
         start = max(0, head - 3) if start is None else start
+        if type(start) is int and start > head:
+            raise SystemExit(75)  # Caught up; wait under the same lease, never skip forward.
         if type(start) is not int or not 0 <= start <= head:
             raise ValueError('Window start is beyond finalized head')
         end = min(head, start + 3)

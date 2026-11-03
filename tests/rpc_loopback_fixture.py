@@ -11,7 +11,8 @@ from wallet_watch import MAINNET
 RESULTS={'getGenesisHash':MAINNET, 'getSlot':7,'getBlocks':[5,6,7],
          'getBlock':{'transactions':[],'parentSlot':6},'getAccountInfo':{'value':None},
          'getFirstAvailableBlock':0,'minimumLedgerSlot':0,'getHealth':'ok','getVersion':{'solana-core':'fixture'},
-         'getBlockTime':1000,'getSignaturesForAddress':[],'getTransaction':None}
+         'getBlockTime':1000,'getSignaturesForAddress':[],'getTransaction':None,
+         'getSlotLeaders':[],'getClusterNodes':[]}
 
 
 class LocalRpcServer:

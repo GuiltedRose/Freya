@@ -143,6 +143,10 @@ impl NativeHttp {
                         bytes.extend_from_slice(&chunk);
                         received.store(bytes.len(),std::sync::atomic::Ordering::Relaxed);
                     }
+                    // Release the completed body before the single-flight permit;
+                    // let Hyper return its connection to the shared runtime's pool.
+                    drop(response);
+                    tokio::task::yield_now().await;
                     let text=if encoding=="gzip" {base64::engine::general_purpose::STANDARD.encode(bytes)}
                         else {String::from_utf8(bytes).map_err(|_|bad("invalid response UTF8"))?};
                     Ok((status,retry,encoding,text))

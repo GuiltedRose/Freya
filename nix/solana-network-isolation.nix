@@ -7,7 +7,7 @@ let
     ledger = cfg.ledgerFile;
     uplink = cfg.uplinkInterface;
     inherit (cfg) sessionBytes uploadKbytes downloadKbytes reserveSession;
-    inherit (cfg) peerPorts;
+    inherit (cfg) peerPorts sessionSeconds;
   });
   support = pkgs.runCommand "solana-network-controller" {} ''
     mkdir -p $out
@@ -23,6 +23,8 @@ in {
     uplinkInterface = mkOption { type = types.str; default = ""; };
     ledgerFile = mkOption { type = types.str; default = "/var/lib/solana-network/budget.sqlite"; };
     sessionBytes = mkOption { type = types.ints.between 1 10000000; default = 1000000; };
+    sessionSeconds = mkOption { type = types.ints.between 1 3600; default = 55;
+      description = "Explicit nonrenewing authorization lifetime; monthly/byte caps still apply."; };
     uploadKbytes = mkOption { type = types.ints.between 1 1024; default = 16; };
     downloadKbytes = mkOption { type = types.ints.between 1 1024; default = 16; };
     reserveSession = mkOption { type = types.bool; default = false; description = "Explicit essential recovery session; ledger reserve authorization still required above 120GB."; };
