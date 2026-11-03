@@ -165,6 +165,82 @@ remain unavailable. A stale head does not establish current lag.
 
 ## Operator validation and rollback
 
+### Conventional NixOS installation (Monolith)
+
+A development shell does not install system services. On Monolith's existing
+non-flake NixOS installation, prepare the add-on as the existing collector user:
+
+```bash
+cd ~/repos/Freya
+nix develop .#native-mainnet
+python prepare_mainnet_host.py
+```
+
+Preparation discovers the actual default-route interface, current non-root user
+and group, reviewed private RPC config and existing shared provider ledger. It
+validates static source policy and refuses existing service definitions rather
+than replacing them. It builds the pinned node and writes private preparation
+files in `state/mainnet-host-setup`; no service, network grant or probe runs.
+Missing/insecure files fail; no credentials, trust rights or ledgers are invented.
+An existing nondefault index can be selected with `--index-db /actual/index.sqlite`.
+
+Review the generated `freya-mainnet.nix`, then install only the two add-on files:
+
+```bash
+sudo test ! -e /etc/nixos/freya-mainnet.nix &&
+sudo test ! -e /etc/nixos/freya-diagnostic-host.nix &&
+sudo install -m 0644 state/mainnet-host-setup/freya-mainnet.nix /etc/nixos/ &&
+sudo install -m 0644 state/mainnet-host-setup/freya-diagnostic-host.nix /etc/nixos/
+sudo nixos-rebuild build -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+sudo nixos-rebuild dry-activate -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+```
+
+The wrapper imports the original `configuration.nix` unchanged and adds the
+existing isolation module. Review activation's isolated forwarding/firewall and
+service changes before applying them. No Wi-Fi/default-route configuration is
+rewritten. The generated module pins immutable source/package store paths.
+
+For this initial diagnostic, temporary activation avoids changing the boot default:
+
+```bash
+sudo nixos-rebuild test -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+```
+
+Keep the private preparation directory: systemd loads its configs as credentials.
+The existing RPC source classification is preserved even inside the isolated
+namespace. The compatibility collector remains manually stopped; the diagnostic
+starts only `freya-peer-discovery` and its budget controller.
+If the existing provider ledger lives under a protected home directory, generated
+service-local mounts expose only its parent directory through `ProtectHome=tmpfs`;
+the host home and the ledger's ownership/permissions remain unchanged.
+
+If the network ledger already exists, preserve it and use `report` to validate it.
+Only if it is genuinely absent, initialize the new calendar ledger once:
+
+```bash
+sudo "$(command -v freya-network-budget)" --ledger /var/lib/solana-network/budget.sqlite initialize-calendar
+```
+
+Then run `freya-mainnet-preflight`. After configuration/accounting validation, the
+operator may start **one** diagnostic and inspect its result:
+
+```bash
+sudo systemctl start freya-peer-discovery.service
+sudo journalctl -u freya-peer-discovery.service -u solana-budget-network.service -n 100 --no-pager
+freya-node --peer status /dev/null /var/lib/freya-node/follow
+```
+
+Do not restart to obtain another grant. To roll back the temporary installation:
+
+```bash
+sudo systemctl stop freya-peer-discovery.service solana-budget-network.service
+sudo nixos-rebuild test -I nixos-config=/etc/nixos/configuration.nix
+```
+
+Keep all application state, provider/monthly ledgers, node identities and evidence.
+Host preparation and activation above are operator steps; they were not executed
+by the assistant.
+
 On Monolith, enter the dedicated environment:
 
 ```bash
