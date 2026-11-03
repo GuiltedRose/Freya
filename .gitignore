@@ -10,7 +10,6 @@ data/live_pool.jsonl
 **/target/
 result
 result-*
-flake.lock
 onchain_pipeline.json
 learning_pipeline.json
 *.json.backup-*
