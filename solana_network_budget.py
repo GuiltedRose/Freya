@@ -1,4 +1,4 @@
-"""UNTESTED server-only network budget control; no node startup or auto-refill.
+"""Server-only network budget control; optional retained-history calendar renewal.
 
 Grants are debited durably before firewall installation. Lost/unused grants are
 never refunded. This bounds authorized IP-layer traffic, NOT ISP wire billing.
@@ -16,6 +16,13 @@ NORMAL = 120_000_000_000
 HARD = 150_000_000_000
 SAFETY_MARGIN = 5_000_000_000
 MAX_GRANT = 10_000_000
+
+
+def calendar_month(now):
+    current = datetime.fromtimestamp(now, timezone.utc)
+    start = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(year=start.year+1, month=1) if start.month == 12 else start.replace(month=start.month+1)
+    return start.timestamp(), end.timestamp()
 
 
 def timestamp(value):
@@ -78,9 +85,48 @@ class Budget:
     @staticmethod
     def cycle(db, now):
         row = db.execute('SELECT * FROM cycle').fetchone()
+        policy = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calendar_policy'").fetchone()
+        if row and now >= row['end'] and policy and db.execute('SELECT enabled FROM calendar_policy').fetchone()[0]:
+            begin, end = calendar_month(now)
+            if begin < row['end']:
+                raise ValueError('Calendar boundary mismatch; preserve accounting')
+            db.execute('INSERT INTO cycle_history VALUES(?,?,?)', (row['start'],row['end'],row['reserve_authorized']))
+            db.execute('UPDATE cycle SET start=?,end=?,reserve_authorized=0', (begin,end))
+            row = db.execute('SELECT * FROM cycle').fetchone()
         if not row or not row['start'] <= now < row['end']:
             raise ValueError('Cycle expired or inactive; no automatic rollover')
         return row
+
+    def enable_calendar(self, now):
+        """Opt in without forgiving current usage or replacing an existing ledger."""
+        begin, end = calendar_month(now)
+        with self.connect() as db:
+            rows = db.execute('SELECT * FROM cycle').fetchall()
+            if len(rows) != 1 or rows[0]['start'] > now:
+                raise ValueError('Valid existing accounting required')
+            db.execute('CREATE TABLE IF NOT EXISTS calendar_policy(enabled INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS cycle_history(start REAL PRIMARY KEY,end REAL,reserve_authorized INTEGER)')
+            enabled = db.execute('SELECT enabled FROM calendar_policy').fetchone()
+            if enabled:
+                if enabled[0] != 1: raise ValueError('Unknown calendar policy')
+                self.cycle(db, now)
+                return
+            db.execute('INSERT INTO calendar_policy VALUES(1)')
+            row = rows[0]
+            # Retain original billing metadata, including an intentionally shortened/extended cycle.
+            db.execute('CREATE TABLE IF NOT EXISTS calendar_adoption(start REAL,end REAL,adopted REAL)')
+            db.execute('INSERT INTO calendar_adoption VALUES(?,?,?)',(row['start'],row['end'],now))
+            if row['end'] <= begin:
+                self.cycle(db, now)
+            else:
+                # Keep every existing charge until the next first; never reset mid-month.
+                db.execute('UPDATE cycle SET end=?', (end,))
+
+    def initialize_calendar(self, now):
+        begin, end = calendar_month(now)
+        self.initialize(datetime.fromtimestamp(begin,timezone.utc).isoformat(),
+                        datetime.fromtimestamp(end,timezone.utc).isoformat(),now)
+        self.enable_calendar(now)
 
     def authorize_reserve(self, now):
         with self.connect() as db:
@@ -92,7 +138,8 @@ class Budget:
             raise ValueError('Grant must be 1–10,000,000 bytes; no unlimited catch-up')
         with self.connect() as db:
             cycle = self.cycle(db, now)
-            charged = db.execute('SELECT coalesce(sum(max(bytes,rx+tx)),0) FROM grants').fetchone()[0]
+            charged = db.execute('SELECT coalesce(sum(max(bytes,rx+tx)),0) FROM grants WHERE created>=? AND created<?',
+                                 (cycle['start'],cycle['end'])).fetchone()[0]
             limit = HARD-SAFETY_MARGIN if cycle['reserve_authorized'] else NORMAL
             if charged+amount > limit: raise ValueError('Network budget exhausted')
             identifier = uuid.uuid4().hex
@@ -112,7 +159,8 @@ class Budget:
     def report(self, now):
         with self.connect() as db:
             cycle = self.cycle(db, now)
-            row = db.execute('SELECT coalesce(sum(max(bytes,rx+tx)),0),coalesce(sum(rx),0),coalesce(sum(tx),0) FROM grants').fetchone()
+            row = db.execute('SELECT coalesce(sum(max(bytes,rx+tx)),0),coalesce(sum(rx),0),coalesce(sum(tx),0) FROM grants WHERE created>=? AND created<?',
+                             (cycle['start'],cycle['end'])).fetchone()
         rate = row[0]/max(1,now-cycle['start'])
         return {'budget_debited_bytes':row[0], 'observed_ip_download_bytes':row[1],
                 'observed_ip_upload_bytes':row[2], 'normal_remaining_bytes':max(0,NORMAL-row[0]),
@@ -218,6 +266,8 @@ def main():
     parser.add_argument('--ledger', type=Path, required=True)
     sub = parser.add_subparsers(dest='action', required=True)
     init = sub.add_parser('initialize'); init.add_argument('--start',required=True); init.add_argument('--end',required=True)
+    sub.add_parser('initialize-calendar', help='Create a new first-of-month UTC ledger; never replace one')
+    sub.add_parser('enable-calendar', help='Enable first-of-month UTC renewal, retaining current charges')
     reserve = sub.add_parser('authorize-reserve'); reserve.add_argument('--confirm-reserve',action='store_true',required=True)
     grant = sub.add_parser('grant'); grant.add_argument('--bytes',type=int,required=True)
     grant.add_argument('--upload-kbps',type=int,default=16); grant.add_argument('--download-kbps',type=int,default=16)
@@ -230,6 +280,8 @@ def main():
     args = parser.parse_args(); now=time.time(); budget=Budget(args.ledger)
     if args.action=='render-shaping': print('\n'.join(shaping_commands())); return
     if args.action=='initialize': budget.initialize(args.start,args.end,now)
+    elif args.action=='initialize-calendar': budget.initialize_calendar(now)
+    elif args.action=='enable-calendar': budget.enable_calendar(now)
     elif args.action=='authorize-reserve': budget.authorize_reserve(now)
     elif args.action=='grant':
         # Charge before emitting any usable firewall configuration.

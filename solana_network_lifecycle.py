@@ -97,6 +97,8 @@ def start(config):
     if ledger.is_symlink() or ledger.stat().st_uid!=0 or ledger.stat().st_mode & 0o077:
         raise ValueError('Root-owned owner-only persistent ledger required')
     budget=Budget(ledger)
+    if config.get('calendarMonthly',False):
+        budget.enable_calendar(time.time())
     report=budget.report(time.time())
     if report['optional_collection_suspended'] and not config.get('reserveSession',False):
         raise ValueError('Normal budget reached; optional collection suspended')

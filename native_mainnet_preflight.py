@@ -35,7 +35,7 @@ def inspect():
               'missing': [], 'services': {}, 'network_test_run': False,
               'defaults': {'sessionBytes': 1000000, 'sessionSeconds': 55,
                            'uploadKbytes': 16, 'downloadKbytes': 16,
-                           'reserveSession': False, 'peerPorts': None,
+                           'reserveSession': False, 'peerPorts': None, 'calendarMonthly': True,
                            'normalMonthlyBytes': 120000000000, 'hardMonthlyBytes': 150000000000},
               'scope': 'host discovery only; not authorization or full diagnostic validation'}
     try:

@@ -7,7 +7,7 @@ let
     ledger = cfg.ledgerFile;
     uplink = cfg.uplinkInterface;
     inherit (cfg) sessionBytes uploadKbytes downloadKbytes reserveSession;
-    inherit (cfg) peerPorts sessionSeconds;
+    inherit (cfg) peerPorts sessionSeconds calendarMonthly;
   });
   support = pkgs.runCommand "solana-network-controller" {} ''
     mkdir -p $out
@@ -22,6 +22,8 @@ in {
     services = mkOption { type = types.listOf types.str; default = []; description = "Complete inventory of unprivileged Solana service names, without .service."; };
     uplinkInterface = mkOption { type = types.str; default = ""; };
     ledgerFile = mkOption { type = types.str; default = "/var/lib/solana-network/budget.sqlite"; };
+    calendarMonthly = mkOption { type = types.bool; default = true;
+      description = "Renew allowance on the first at 00:00 UTC, retaining usage history; never renew sessions."; };
     sessionBytes = mkOption { type = types.ints.between 1 10000000; default = 1000000; };
     sessionSeconds = mkOption { type = types.ints.between 1 3600; default = 55;
       description = "Explicit nonrenewing authorization lifetime; monthly/byte caps still apply."; };

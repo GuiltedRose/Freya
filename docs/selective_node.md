@@ -134,7 +134,8 @@ For explicitly authorized longer operation, set JSON `continuous: true` and modu
 `continuousMode = true`. Set `services.solana-budget-isolation.sessionSeconds`
 explicitly (1–3600, default 55). The existing byte grant, namespace firewall,
 shaping, billing-cycle checks and 120 GB normal / 150 GB hard monthly accounting
-still apply. No session or billing cycle renews automatically. Continuous means
+still apply. Monthly allowance renews on the first at midnight UTC with history
+retained; sessions never renew automatically. Continuous means
 following successive windows **within the current authorization**; lease expiry,
 quota exhaustion or denial stops it. Waiting for the next finalized slot no longer
 counts as a planning failure. A new session requires explicit operator action.
@@ -251,3 +252,25 @@ The subsequent `native-mainnet` shell and automatic-bootstrap changes were prepa
 without builds, test execution or network diagnostics at the operator's request.
 The acceptance counts above describe the preceding revision. Bootstrap-selection
 regressions are written but await operator execution.
+
+### First-of-month network allowance
+
+`calendarMonthly = true` is now the isolation module default. On the next explicit
+controller start, an existing secure ledger adopts calendar months without
+forgiving current usage; subsequent month boundaries archive the previous cycle
+and start a fresh allowance at 00:00 UTC on the first. Old grants and counters stay
+in the database. Reserve authorization does not carry into the new month.
+Provider cooldown ledgers, wallets, trading history and models are unaffected.
+
+For a genuinely new network ledger, no billing dates need to be calculated:
+
+```bash
+sudo freya-network-budget --ledger /var/lib/solana-network/budget.sqlite initialize-calendar
+```
+
+This command refuses to replace an existing ledger. For an existing ledger outside
+the managed controller, use `enable-calendar` instead; it retains current charges.
+Missing ledgers are never automatically recreated. Renewal occurs transactionally
+on the first accounting operation of the month, even after downtime. It does not
+start services, issue grants or authorize another network session. The 120 GB
+normal / 150 GB hard policy and existing safety margin remain unchanged.
