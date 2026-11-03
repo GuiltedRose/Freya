@@ -13,6 +13,11 @@ static NATIVE_DISK_LIMIT: std::sync::OnceLock<(PathBuf, u64)> = std::sync::OnceL
 mod acquisition;
 mod follow;
 fn invalid() -> io::Error { io::Error::other("invalid private configuration or state") }
+fn effective_uid() -> io::Result<u32> {
+    // Proc directory ownership can change with dumpability; read the actual UID.
+    fs::read_to_string("/proc/self/status")?.lines().find_map(|line|
+        line.strip_prefix("Uid:")?.split_whitespace().nth(1)?.parse().ok()).ok_or_else(invalid)
+}
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
 fn read_json(path: &Path) -> io::Result<Value> {
     let mut file = OpenOptions::new().read(true).custom_flags(0x20000).open(path)?;
@@ -32,7 +37,7 @@ fn bounded(value: &Value, key: &str, min: u64, max: u64) -> io::Result<u64> {
 }
 fn private_dir(dir: &Path) -> io::Result<File> {
     let meta = fs::symlink_metadata(dir)?;
-    if !meta.is_dir() || meta.uid() != fs::metadata("/proc/self")?.uid()
+    if !meta.is_dir() || meta.uid() != effective_uid()?
         || meta.permissions().mode() & 0o077 != 0 { return Err(invalid()); }
     // Existing unowned directories and databases are never adopted.
     let marker = dir.join("owner.json");
@@ -109,7 +114,7 @@ fn run() -> io::Result<()> {
         file.sync_all()?; File::open(&dir)?.sync_all()?;
     }
     let meta = fs::symlink_metadata(&identity)?;
-    if !meta.is_file() || meta.uid() != fs::metadata("/proc/self")?.uid() || meta.permissions().mode() & 0o077 != 0 { return Err(invalid()); }
+    if !meta.is_file() || meta.uid() != effective_uid()? || meta.permissions().mode() & 0o077 != 0 { return Err(invalid()); }
     let key = read_keypair_file(&identity).map_err(|_| invalid())?;
     state["node_identity"] = json!(key.pubkey().to_string());
     state["previous_session_state"] = state["state"].clone();
@@ -193,6 +198,7 @@ mod tests {
     }
     #[test] fn checkpoint_retains_unresolved_claims_across_restart() {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
         let lock = private_dir(dir.path()).unwrap();
         let state = json!({"format":FORMAT,"state":"discovering","observed_network_slot":42,
             "native_ready":false,"recovered_ranges":[],"missing_ranges":null});
@@ -205,6 +211,7 @@ mod tests {
     }
     #[test] fn refuses_unowned_data_without_deleting_it() {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(dir.path().join("index.sqlite"),b"existing evidence").unwrap();
         assert!(private_dir(dir.path()).is_err());
         assert_eq!(fs::read(dir.path().join("index.sqlite")).unwrap(),b"existing evidence");

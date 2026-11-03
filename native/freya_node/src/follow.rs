@@ -110,7 +110,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     if !state["node_identity"].is_null() && !key_path.exists() {return Err(invalid());}
     if !key_path.exists() { save(&key_path,&json!(Keypair::new().to_bytes().to_vec()))?; }
     let meta = fs::symlink_metadata(&key_path)?;
-    if !meta.is_file() || meta.uid()!=fs::metadata("/proc/self")?.uid() || meta.permissions().mode()&0o077!=0 { return Err(invalid()); }
+    if !meta.is_file() || meta.uid()!=effective_uid()? || meta.permissions().mode()&0o077!=0 { return Err(invalid()); }
     let key = read_keypair_file(&key_path).map_err(|_|invalid())?;
     let request_key = read_keypair_file(&key_path).map_err(|_|invalid())?;
     if state["node_identity"].as_str().is_some_and(|id|id!=request_key.pubkey().to_string()) {return Err(invalid());}

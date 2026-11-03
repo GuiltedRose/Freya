@@ -29,8 +29,14 @@ def prepare(config_path, output, start=None):
         if type(start) is not int or not 0 <= start <= head:
             raise ValueError('Window start is beyond finalized head')
         end = min(head, start + 3)
+        def check_history():
+            floor = rpc.call('getFirstAvailableBlock', [])
+            if type(floor) is not int or not 0 <= floor <= start:
+                raise ValueError('Historical window unavailable; preserve unresolved gap')
+        check_history()
         leaders = rpc.call('getSlotLeaders', [start, end - start + 1])
         slots = rpc.call('getBlocks', [start, end, {'commitment': 'finalized'}])
+        check_history()  # Retention can advance while the manifest is being fetched.
         if (not isinstance(leaders, list) or len(leaders) != end - start + 1
                 or not isinstance(slots, list) or any(type(s) is not int for s in slots)
                 or slots != sorted(set(slots)) or any(not start <= s <= end for s in slots)):
