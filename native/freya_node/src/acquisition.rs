@@ -5,7 +5,13 @@ use solana_ledger::shred::{Shred, Shredder};
 use solana_pubkey::Pubkey;
 use std::{collections::BTreeMap, net::UdpSocket, str::FromStr};
 
-fn atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some((root,limit)) = NATIVE_DISK_LIMIT.get() {
+        if !path.starts_with(root) || super::follow::disk_bytes(root)?
+            .saturating_add(bytes.len() as u64).saturating_add(65536) > *limit {
+            return Err(io::Error::other("native disk bound; evidence retained"));
+        }
+    }
     let temporary = path.with_extension("pending");
     let mut file = OpenOptions::new().write(true).create(true).truncate(true)
         .mode(0o600).custom_flags(0x20000).open(&temporary)?;
@@ -13,19 +19,19 @@ fn atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temporary,path)?;
     File::open(path.parent().ok_or_else(invalid)?)?.sync_all()
 }
-fn raw(path: &Path) -> io::Result<Vec<u8>> {
+pub(super) fn raw(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = OpenOptions::new().read(true).custom_flags(0x20000).open(path)?;
     if file.metadata()?.len() > 2048 { return Err(invalid()); }
     let mut bytes = Vec::new(); file.read_to_end(&mut bytes)?; Ok(bytes)
 }
-fn checked(bytes: Vec<u8>, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Shred> {
+pub(super) fn checked(bytes: Vec<u8>, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Shred> {
     let shred = Shred::new_from_serialized_shred(bytes).map_err(|_| invalid())?;
     shred.sanitize().map_err(|_| invalid())?;
     if !shred.is_data() || shred.slot()!=slot || shred.version()!=version
         || shred.index()>=max || !shred.verify(leader) { return Err(invalid()); }
     Ok(shred)
 }
-fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Value> {
+pub(super) fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Value> {
     let mut shreds = BTreeMap::new();
     for row in fs::read_dir(dir)? {
         let path = row?.path();

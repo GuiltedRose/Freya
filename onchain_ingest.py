@@ -17,7 +17,7 @@ from pump_narratives import NoRedirect
 from wallet_watch import MAINNET, PublicRpcError
 from onchain_decode import Decoder
 
-READ_METHODS = {'getGenesisHash', 'getSlot', 'getBlocks', 'getBlock',
+READ_METHODS = {'getGenesisHash', 'getSlot', 'getBlocks', 'getBlock', 'getSlotLeaders', 'getClusterNodes',
                 'getAccountInfo', 'getBlockTime', 'getSignaturesForAddress', 'getTransaction',
                 'getFirstAvailableBlock', 'minimumLedgerSlot', 'getHealth', 'getVersion'}
 

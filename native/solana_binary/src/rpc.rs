@@ -76,7 +76,7 @@ fn url(value: &str, websocket: bool, loopback: bool) -> PyResult<reqwest::Url> {
 }
 
 fn request(method: &str, params: &str) -> PyResult<String> {
-    if !["getGenesisHash","getSlot","getBlocks","getBlock","getAccountInfo","getBlockTime","getSignaturesForAddress","getTransaction","getFirstAvailableBlock","minimumLedgerSlot","getHealth","getVersion"].contains(&method) {
+    if !["getGenesisHash","getSlot","getBlocks","getBlock","getSlotLeaders","getClusterNodes","getAccountInfo","getBlockTime","getSignaturesForAddress","getTransaction","getFirstAvailableBlock","minimumLedgerSlot","getHealth","getVersion"].contains(&method) {
         return Err(bad("read-only method allowlist violation"));
     }
     if params.len()>65536 { return Err(bad("request too large")); }

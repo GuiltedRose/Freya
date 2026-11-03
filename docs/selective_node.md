@@ -376,3 +376,110 @@ Preserve both state directories, identity, raw/conflicting shreds, databases and
 provider ledger. Existing discovery state remains at `peer`; acquisition uses
 `acquire`. Next milestone is operator compilation and bounded real acquisition,
 then active Agave-compatible repair and sustained receipt-reconciled indexing.
+
+## Phase 4: active repair sessions (unvalidated)
+
+`--peer follow CONFIG STATE` adds an active repair path. It discovers compatible
+Agave gossip contacts, selects advertised UDP repair endpoints, sends Agave-signed
+`HighestWindowIndex`/`WindowIndex` requests, verifies peer-signed repair pings and
+returns Agave pongs. One request is outstanding at a time; shred responses must
+match its source socket, random nonce, slot/index, configured version and expected
+leader signature. Persisted data shreds pass through the existing reconstruction
+and quarantined handoff. Gossip does not imply Turbine delivery or repair access;
+unstaked requests may be throttled, ignored, unavailable or pruned.
+
+The new Python planning helper uses the **existing reviewed Rust RPC client** for
+mainnet genesis, finalized head/manifest, leader schedule and cluster shred-version
+claims. It never obtains shred payloads or execution receipts. Four-slot windows
+advance automatically after durable reconstruction or an explicitly persisted RPC
+skip claim. Repair timeout is never skipped-slot evidence. The initial window is
+the latest finalized four slots; subsequent sessions resume the saved window/gap.
+A window retry limit survives restarts. A bounded failed window remains blocked;
+it is not silently abandoned. No trading index or wallet is written by the planner.
+
+Plans and checkpoints have separate schemas. Native slot directories additionally
+retain `schedule.json`; receipts still come from the existing finalized indexer.
+Shred version is an RPC cluster-majority claim, cached for at most five minutes,
+not independently derived network identity. Version changes stop the session for
+review. Provider identity/genesis validation, shared request budgets and cooldowns
+remain active. Cluster metadata can be large enough to exhaust the current lease;
+planning then fails closed. The process kills its planner when authorization or
+duration expires. RPC pacing can therefore prevent any acquisition in a short
+session; no cooldown or traffic cap is bypassed.
+
+Configuration for the existing manual diagnostic service:
+
+```json
+{
+  "bootstrap_peers": ["REPLACE_REVIEWED_PUBLIC_IPV4:8001"],
+  "duration_seconds": 40,
+  "max_namespace_bytes": 250000,
+  "max_disk_bytes": 67108864,
+  "max_shreds_per_slot": 1024,
+  "max_attempts_per_window": 128,
+  "request_interval_ms": 500
+}
+```
+
+Use the reviewed external indexer configuration already supplied by the module;
+it must contain exactly one enabled Rust endpoint with authorized source policy.
+The provider ledger remains the same existing ledger. For native session traffic,
+retain isolated namespace authorization. No ports, session renewals, additional
+bandwidth or background timers are granted. Outbound UDP repair uses an ephemeral
+socket and reply traffic; the node exposes no public RPC server.
+
+```nix
+services.freya-node.networkMode = "isolated";
+services.freya-node.peerOperation = "follow";
+services.freya-node.peerDiscoveryConfig = "/absolute/private/follow.json";
+```
+
+The service now also loads the existing external RPC config as a systemd credential
+and grants write access to its shared ledger directory for pacing/audit updates.
+Native state uses a new `follow` directory, preserving `peer` and `acquire` state.
+RAM containment remains 2 GiB/no swap, 128 tasks/descriptors, bounded gossip queues,
+512-identity CRDS trimming and a 64-peer repair candidate snapshot. Requests are
+paced at 250–10,000 ms with bounded timeout backoff; total retries are configurable
+1–4096 per window. Disk cap is 1 MiB–1 GiB. No unresolved evidence is pruned; disk
+exhaustion blocks acquisition. Namespace byte counters include other workloads and
+planning traffic, not exclusive repair payload. Unsupported measurements stay
+unavailable; resource limits do not demonstrate whole-system memory fitness.
+
+Operator commands (not executed here):
+
+```bash
+nix build --no-write-lock-file .#native-peer .#native-node .#bundle
+nix build --no-write-lock-file --impure --expr \
+  'let f = builtins.getFlake (toString ./.); in f.packages.x86_64-linux.native-peer.overrideAttrs (_: { doCheck = true; })'
+python -m unittest tests.test_native_receipt_handoff tests.test_selective_node
+sudo nixos-rebuild build --flake /absolute/path/to/system-flake#monolith
+sudo nixos-rebuild switch --flake /absolute/path/to/system-flake#monolith
+sudo systemctl start freya-peer-discovery.service
+sudo journalctl -u freya-peer-discovery.service --no-pager -n 30
+nix run --no-write-lock-file .#node -- --peer status /dev/null /var/lib/freya-node/follow
+```
+
+Run status as the collector UID. Service activation consumes a bounded authorized
+network session; do not restart an active session merely to obtain another grant.
+Build now links pinned `solana-core` to reuse repair APIs, increasing build scope;
+this does not launch validator replay. No compilation, tests, network calls or
+resource measurements ran in Phase 4. Prior Phase 3 fixture results do not validate
+these changes.
+
+**Remaining:** coding-shred acquisition/erasure recovery is not implemented;
+standard data-index repair currently recovers missing data by requesting it again.
+No independently verified leader schedule, consensus, replay, PoH, automatic
+receipt-source switch or indefinite catch-up service is supplied. Multiple slots
+and successive windows have implementation paths but no demonstrated network
+result. Finite sessions preserve progress; continuous operation is incompatible
+with the current nonrenewing lease until separately authorized. All full-block
+receipts remain required: static program filtering cannot safely rule out loaded
+addresses or indirect invocation. No receipt-query savings are claimed.
+
+Rollback: stop the diagnostic service, restore/remove `peerOperation` and its
+config, and apply the prior reviewed generation. Keep `follow`, its plans,
+identities, shreds, checkpoints, the provider ledger and index databases. Removing
+optional `native_handoff` retains external-only indexing. Next gate: operator
+compilation, protocol/nonce/restart fixtures and a bounded real repair diagnostic;
+only then assess whether unstaked access and the existing traffic cap sustain
+contiguous reconstruction.

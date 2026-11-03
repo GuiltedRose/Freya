@@ -9,6 +9,7 @@ pkgs.rustPlatform.buildRustPackage {
   postInstall = ''
     wrapProgram $out/bin/freya-node \
       --set FREYA_NODE_PYTHON ${python}/bin/python \
+      --set FREYA_NODE_PLANNER ${builtins.dirOf worker}/prepare_native_window.py \
       --set FREYA_NODE_WORKER ${worker} ${pkgs.lib.optionalString (peer != null) "--set FREYA_NODE_PEER ${peer}/bin/freya-peer"}
     mkdir -p $out/share/licenses/freya-node
     cp ${../LICENSE} $out/share/licenses/freya-node/LICENSE

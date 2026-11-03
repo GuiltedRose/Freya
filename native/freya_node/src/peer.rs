@@ -9,7 +9,9 @@ use std::{env, fs::{self, File, OpenOptions}, io::{self, Read, Write}, net::Sock
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf},
     sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 const FORMAT: &str = "freya-peer-v1";
+static NATIVE_DISK_LIMIT: std::sync::OnceLock<(PathBuf, u64)> = std::sync::OnceLock::new();
 mod acquisition;
+mod follow;
 fn invalid() -> io::Error { io::Error::other("invalid private configuration or state") }
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
 fn read_json(path: &Path) -> io::Result<Value> {
@@ -67,10 +69,12 @@ fn run() -> io::Result<()> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     if args.len() != 3 { return Err(io::Error::other("usage: freya-peer (discover|status) CONFIG STATE_DIRECTORY")); }
     let dir = PathBuf::from(&args[2]);
+    if args[0] == "follow" { return follow::run(Path::new(&args[1]), &dir); }
     if args[0] == "acquire" { return acquisition::acquire(Path::new(&args[1]), &dir); }
     if args[0] == "status" {
         let value = read_json(&dir.join("checkpoint.json"))?;
-        if value["format"] != FORMAT && value["format"] != "freya-native-acquisition-v1" { return Err(invalid()); }
+        if value["format"] != FORMAT && value["format"] != "freya-native-acquisition-v1"
+            && value["format"] != "freya-native-follow-v1" { return Err(invalid()); }
         println!("{value}"); return Ok(());
     }
     if args[0] != "discover" { return Err(invalid()); }
@@ -114,7 +118,7 @@ fn run() -> io::Result<()> {
     state["verification_level"] = json!("authenticated_peer_claims_only");
     state["independent_consensus_verified"] = json!(false);
     state["external_fallback"] = json!("unchanged; native observations quarantined");
-    state["engine_version"] = json!("freya-peer-0.2.0/agave-825efd18");
+    state["engine_version"] = json!("freya-peer-0.4.0/agave-825efd18");
     state["bootstrap_peers"] = json!(entrypoints.iter().map(ToString::to_string).collect::<Vec<_>>());
     let old_sessions = state["sessions"].as_u64().ok_or_else(invalid)?;
     state["sessions"] = json!(old_sessions.checked_add(1).ok_or_else(invalid)?);

@@ -2,7 +2,7 @@
 { config, lib, pkgs, package, ... }:
 let
   cfg = config.services.freya-node;
-  peerState = "${cfg.stateDirectory}/${if cfg.peerOperation == "discover" then "peer" else "acquire"}";
+  peerState = "${cfg.stateDirectory}/${if cfg.peerOperation == "discover" then "peer" else cfg.peerOperation}";
 in {
   imports = [ ./solana-network-isolation.nix ];
   options.services.freya-node = {
@@ -19,7 +19,7 @@ in {
       description = "Private absolute discovery configuration; enables a manual, bounded diagnostic only.";
     };
     peerOperation = lib.mkOption {
-      type = lib.types.enum [ "discover" "acquire" ]; default = "discover";
+      type = lib.types.enum [ "discover" "acquire" "follow" ]; default = "discover";
       description = "Manual diagnostic operation; acquisition requires an explicitly authorized UDP sender/port.";
     };
   };
@@ -40,16 +40,18 @@ in {
     systemd.services.freya-peer-discovery = lib.mkIf (cfg.peerDiscoveryConfig != null) {
       description = "Bounded Freya native gossip discovery; no trading admission";
       wantedBy = []; restartIfChanged = false; stopIfChanged = true;
+      environment.CRYPTO_BOT_PROVIDER_LIMITS = cfg.providerLedger;
       serviceConfig = {
         User = cfg.user; Group = cfg.group; UMask = "0077";
-        LoadCredential = [ "peer.json:${cfg.peerDiscoveryConfig}" ];
+        LoadCredential = [ "peer.json:${cfg.peerDiscoveryConfig}" "external.json:${cfg.externalConfigFile}" ];
         Restart = "no"; NoNewPrivileges = true; ProtectSystem = "strict";
         ProtectHome = true; PrivateTmp = true; CapabilityBoundingSet = "";
         MemoryAccounting = true; MemoryHigh = "1G"; MemoryMax = "2G"; MemorySwapMax = 0;
         TasksMax = 128; LimitNOFILE = 128; RuntimeMaxSec = 52; TimeoutStopSec = 3;
-        ReadWritePaths = [ peerState ];
+        ReadWritePaths = [ peerState (builtins.dirOf cfg.providerLedger) ];
       };
       script = ''
+        export FREYA_NODE_EXTERNAL_CONFIG="$CREDENTIALS_DIRECTORY/external.json"
         exec ${package}/bin/freya-node --peer ${cfg.peerOperation} "$CREDENTIALS_DIRECTORY/peer.json" \
           ${lib.escapeShellArg peerState}
       '';
