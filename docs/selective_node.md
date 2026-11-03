@@ -168,7 +168,17 @@ On Monolith, enter the dedicated environment:
 
 ```bash
 nix develop --no-write-lock-file .#native-mainnet
+freya-mainnet-preflight
 ```
+
+Preflight automatically detects the active, lowest-metric IPv4 default-route
+interface and reports existing service identity, namespace and storage mappings.
+Equal-priority routes fail instead of guessing. It emits JSON and performs no
+connectivity probe, authorization or network changes. Its detected uplink is a
+candidate for the host's existing NixOS configuration; it does not rewrite it.
+Host discovery success alone does not validate credentials, ledger billing dates
+or trust permissions. A ping cannot discover those. Run the bounded service
+diagnostic only after the full configuration/budget checks above pass.
 
 This x86_64 Linux shell includes the packaged `freya-node`, `freya-peer`, Rust
 HTTP/WebSocket Python extension, RPC diagnostics, SQLite, JSON and namespace/

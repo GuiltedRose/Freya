@@ -222,6 +222,9 @@
                 self.packages.${system}.native-node
                 self.packages.${system}.native-peer
                 self.packages.${system}.native-rpc-app
+                (pkgs.writeShellScriptBin "freya-mainnet-preflight" ''
+                  exec ${environments.${system}.pythonBase}/bin/python ${./native_mainnet_preflight.py} "$@"
+                '')
                 pkgs.ethtool pkgs.jq pkgs.systemd
               ];
               # Entering the shell never starts a service or authorizes networking.
