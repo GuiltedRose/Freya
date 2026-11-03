@@ -126,9 +126,18 @@
             version = "4.3.0";
             rustPlatform = nodePkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
           };
+          native-peer = let
+            nodePkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
+            toolchain = nodePkgs.rust-bin.stable."1.97.1".minimal;
+          in import ./nix/native-peer.nix {
+            pkgs = nodePkgs;
+            src = agave-source;
+            rustPlatform = nodePkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
+          };
          } // pkgs.lib.optionalAttrs nativeReady {
           native-node = import ./nix/native-node.nix {
             inherit pkgs;
+            peer = self.packages.${system}.native-peer or null;
             python = environments.${system}.pythonBase.withPackages (p: [ p.solders p.websockets p.zstandard self.packages.${system}.native-rpc ]);
             worker = "${self.packages.${system}.default}/share/freya/run_selective_node.py";
           };

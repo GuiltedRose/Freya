@@ -124,3 +124,114 @@ Rollback: stop only the owned collector/service, retain all node/provider/index/
 model journals and markers, and rebuild the prior reviewed revision. Resume V3
 through its unchanged operator workflow. Never restore older databases over newer
 records or clear provider cooldowns. No data migration or reset is required.
+
+## Phase 2: native gossip diagnostic (unvalidated)
+
+`freya-node --peer` now selects a separate Rust engine, compiled inside the pinned
+Agave workspace with its existing lock and Rust 1.97.1. It uses Agave's actual UDP
+gossip service, signed CRDS validation, contact records and epoch-slot reports.
+Python remains the compatibility coordinator for external mode. No Python runs in
+the peer engine. Neither mode switches the bot's data source.
+
+Discovery requires an active, root-owned, unexpired network-budget lease matching
+the process network namespace. It cannot run in `remote_provider` mode. Existing
+HTTP budgets and cooldowns are untouched. Bootstrap sockets must be explicit IPv4
+addresses (1–4); the operator must obtain the current compatible shred version.
+A shred-version match does **not** authenticate mainnet genesis or prove finality.
+No bootstrap hostname, port, or shred version is silently guessed.
+
+Create a protected JSON configuration outside the repository/Nix store:
+
+```json
+{
+  "bootstrap_peers": ["REPLACE_WITH_REVIEWED_PUBLIC_IPV4:8001"],
+  "shred_version": 0,
+  "duration_seconds": 20,
+  "max_peers": 64,
+  "max_namespace_bytes": 250000
+}
+```
+
+The placeholders deliberately fail validation. Duration is 1–50 seconds, peers
+1–256 and namespace traffic 1–1,000,000 bytes. Use a new empty directory, owned by
+the collector with mode 0700. A dedicated private identity is created there;
+wallet keys are never read. Atomic fsynced JSON checkpoints retain session history,
+last peer claims and interruption state. Previous peer addresses are evidence,
+not automatically trusted restart/bootstrap inputs. Shred-version changes require
+a separately owned state directory. Unknown/corrupt schemas fail closed.
+
+Upstream queues are reduced to 128 batches; CRDS trimming targets 512 identities
+(a periodic soft bound, not a hard allocation bound). The process has a 2 GiB
+address-space limit, 128 descriptors and 128 per-UID processes; the service also
+has a 2 GiB memory limit, no swap and 128 tasks. Peer snapshot overflow stops the
+session. Resource limits are containment, **not measured capacity**. Namespace
+rx/tx counters are actual aggregate interface traffic, including other consumers;
+they are not exclusive gossip-byte measurements. The kernel budget remains the
+hard traffic backstop; application limits are sampled every 100 ms and may
+overshoot. Unsupported protocol counters remain null.
+
+Peer identities and slot claims are quarantined in `peer/checkpoint.json`.
+`observed_network_slot` is only a compatible peer's advertised epoch-slot claim,
+not local acquisition, a root, a finalized checkpoint or verified execution.
+Recovered ranges remain empty; missing ranges remain unknown. CRDS handles signed
+record conflicts, expiration and gossip retries; there is no ledger repair policy
+yet. Discovery does not supply execution metadata, causal oracle history, complete
+candles or training evidence. Native trading readiness always remains false.
+
+### Monolith commands (operator only)
+
+No compilation, tests, services or real networking were executed for Phase 2.
+The following commands require the changed files to be Git-tracked and the existing
+Nix inputs available. Build and offline verification first:
+
+```bash
+nix build --no-write-lock-file .#native-peer .#native-node .#bundle
+nix build --no-write-lock-file --impure --expr \
+  'let f = builtins.getFlake (toString ./.); in f.packages.x86_64-linux.native-peer.overrideAttrs (_: { doCheck = true; })'
+nix develop .#native-rpc --command python -m unittest tests.test_selective_node
+```
+
+Review the existing V3 regression commands earlier in this document before
+activation. For a bounded diagnostic, set these module options in the existing
+collector configuration, retaining the current uplink, caps and service inventory:
+
+```nix
+services.freya-node.networkMode = "isolated";
+services.freya-node.peerDiscoveryConfig = "/absolute/private/peer.json";
+```
+
+Prerequisites: existing `services.freya-node.enable`, reviewed collector UID,
+private external configs/shared ledger and existing network-isolation configuration.
+Do not stop or restart a running budget session merely to obtain a fresh grant.
+No incoming port forwarding is added. The initial spy uses ephemeral outbound UDP
+and receives replies; NAT/peer reachability may prevent discovery. Do not grant
+extra ports or traffic without separate review.
+
+```bash
+sudo nixos-rebuild build --flake /absolute/path/to/system-flake#monolith
+sudo nixos-rebuild switch --flake /absolute/path/to/system-flake#monolith
+sudo systemctl start freya-peer-discovery.service
+sudo journalctl -u freya-peer-discovery.service --no-pager -n 30
+nix run --no-write-lock-file .#node -- --peer status /dev/null /var/lib/freya-node/peer
+```
+
+Read status as the collector UID if permissions require it. Status is a saved
+snapshot; check `updated_at` and the service journal, especially after a crash.
+SIGINT/SIGTERM request shutdown and join gossip workers; forced termination leaves
+an interrupted checkpoint for the next session. Network authorization failure
+records `blocked`; the root lease still closes networking if the process dies.
+
+Rollback: `sudo systemctl stop freya-peer-discovery.service`, remove only
+`peerDiscoveryConfig`, then rebuild/switch the previous reviewed configuration.
+Keep the identity, checkpoints, unresolved claims and existing budget ledger.
+External paper/indexer operation continues through its existing entrypoints;
+never run competing index writers.
+
+Gate A has source and packaging but awaits compilation. Gate B has actual gossip
+code but awaits live discovery/resource validation and tighter internal cache
+bounds. Gate C remains unimplemented: no shreds, repair, reconstructed blocks,
+execution metadata or independent replay/finality. Gate D preserves separation,
+but external regression compatibility is untested. Next milestone: demonstrate
+bounded real gossip, then implement authenticated shred acquisition with durable
+gap tracking before any market-data integration. No whole-system resource usage
+has been measured.
