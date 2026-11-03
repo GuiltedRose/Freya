@@ -1,0 +1,7 @@
+{
+  "mode": "external",
+  "external_config": "/absolute/protected/reviewed-observer.json",
+  "network_mode": "remote_provider",
+  "memory_bytes": 4294967296,
+  "disk_bytes": 68719476736
+}

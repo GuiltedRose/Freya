@@ -66,7 +66,7 @@
           else nixpkgs.lib.hasSuffix ".py" rel
             || (nixpkgs.lib.hasPrefix "vendor/" rel && nixpkgs.lib.hasSuffix ".json" rel)
             || (nixpkgs.lib.hasPrefix "tests/fixtures/onchain/" rel && nixpkgs.lib.hasSuffix ".json" rel)
-            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" ];
+            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" "selective_node.example.json" ];
       };
     in {
       packages = eachSystem (system:
@@ -81,7 +81,7 @@
             dontBuild = true;
             installPhase = ''
               mkdir -p $out/share/freya $out/bin
-              cp *.py meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json onchain_pipeline.example.json learning_pipeline.example.json $out/share/freya/
+              cp *.py meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json onchain_pipeline.example.json learning_pipeline.example.json selective_node.example.json $out/share/freya/
               cp -r vendor $out/share/freya/
               makeWrapper ${python}/bin/python $out/bin/freya-indexer \
                 --add-flags "$out/share/freya/run_onchain_indexer.py"
@@ -127,6 +127,15 @@
             rustPlatform = nodePkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
           };
          } // pkgs.lib.optionalAttrs nativeReady {
+          native-node = import ./nix/native-node.nix {
+            inherit pkgs;
+            python = environments.${system}.pythonBase.withPackages (p: [ p.solders p.websockets p.zstandard self.packages.${system}.native-rpc ]);
+            worker = "${self.packages.${system}.default}/share/freya/run_selective_node.py";
+          };
+          bundle = pkgs.symlinkJoin {
+            name = "freya-with-selective-node";
+            paths = [ self.packages.${system}.native-rpc-app self.packages.${system}.native-node ];
+          };
           native-decoder = nativePackage system;
           native-rpc = import ./nix/native-decoder.nix { inherit pkgs; python = environments.${system}.pythonBase; rpc = true; };
           native-rpc-app = pkgs.symlinkJoin {
@@ -155,6 +164,7 @@
         indexer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-indexer"; };
         observer = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-observer"; };
         audit-ingestion = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-audit-ingestion"; };
+        node = { type = "app"; program = "${self.packages.${system}.native-node}/bin/freya-node"; };
         rpc-evidence = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-rpc-evidence"; };
         rpc-diagnostics = { type = "app"; program = "${self.packages.${system}.native-rpc-app}/bin/freya-rpc-diagnostics"; };
         tmux = { type = "app"; program = "${environments.${system}.pkgs.tmux}/bin/tmux"; };
@@ -233,6 +243,10 @@
       nixosModules.selfhost-rpc = { config, lib, pkgs, ... }: import ./nix/selfhost-rpc.nix {
         inherit config lib pkgs;
         nodePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.agave-node or pkgs.emptyDirectory;
+      };
+      nixosModules.native-node = { config, lib, pkgs, ... }: import ./nix/selective-node.nix {
+        inherit config lib pkgs;
+        package = self.packages.${pkgs.stdenv.hostPlatform.system}.native-node;
       };
       nixosModules.default = { config, lib, pkgs, ... }:
         import ./nix/module.nix {
