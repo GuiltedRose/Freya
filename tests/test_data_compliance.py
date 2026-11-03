@@ -36,7 +36,7 @@ class ComplianceTests(unittest.TestCase):
             self.assertEqual(clock[0],1006.)
             second.failure(url,429,{'Retry-After':'1000'})
             with self.assertRaises(ProviderBackoff):first.reserve(url)
-            clock[0]+=1001;first.reserve(url)
+            clock[0]+=1061;first.reserve(url)
             first.failure(url,503,{'Retry-After':'Thu, 01 Jan 1970 00:40:00 GMT'})
             with self.assertRaises(ProviderBackoff):second.reserve(url)
             clock[0]=2500;first.reserve(url)

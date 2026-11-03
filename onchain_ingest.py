@@ -42,6 +42,7 @@ def decode_rpc_body(raw, encoding, max_bytes=64_000_000):
 class IndexRpc:
     supports_history_probe = True
     def __init__(self, endpoint, budget=None):
+        self.endpoint=endpoint
         self.url = endpoint['url']
         parsed = urlparse(self.url)
         local_http = False
@@ -59,17 +60,24 @@ class IndexRpc:
         self.interval = spacing
         # Remote providers share proactive HTTP burst pacing across paper/live.
         # Isolated self-hosted nodes retain existing network-budget enforcement.
-        local=False
-        try:local=ipaddress.ip_address(parsed.hostname).is_loopback
+        local=parsed.hostname.lower().rstrip('.')=='localhost'
+        try:
+            address=ipaddress.ip_address(parsed.hostname)
+            local=address.is_loopback or address.is_private
         except ValueError:pass
-        remote=endpoint.get('network_mode')!='isolated' and not local
+        selfhosted=(endpoint.get('network_mode')=='isolated' and
+                    endpoint.get('policy',{}).get('profile',{}).get('kind')=='selfhosted')
+        remote=not local and not selfhosted
         self.burst_requests=endpoint.get('burst_requests',10) if remote else None
-        self.burst_cooldown_seconds=endpoint.get('burst_cooldown_seconds',10)
+        self.burst_cooldown_seconds=endpoint.get('burst_cooldown_seconds',30)
         if remote and (type(self.burst_requests) is not int or not 1<=self.burst_requests<=100):
             raise ValueError('RPC burst requests must be 1..100')
         cooldown=self.burst_cooldown_seconds
         if remote and (isinstance(cooldown,bool) or not isinstance(cooldown,(int,float)) or not math.isfinite(cooldown) or not 1<=cooldown<=3600):
             raise ValueError('RPC burst cooldown must be 1..3600 seconds')
+        if remote:
+            self.burst_cooldown_seconds=max(30,cooldown)
+            self.burst_requests=min(10,self.burst_requests)
         self.budget = budget or BUDGET
         self.validated = False
         self._opener = None
@@ -92,11 +100,21 @@ class IndexRpc:
                             for index,slot in enumerate(slots)])
         return rpc_batch_result(decoded,self.source,self.budget,self.url,len(slots))
 
-    def _reserve(self,method):
+    def _reserve(self,method,logical_calls=1):
         try:
             if isinstance(self.budget,ProviderBudget):
-                self.budget.reserve(self.url,self.interval,burst_requests=self.burst_requests,
-                                    burst_cooldown_seconds=self.burst_cooldown_seconds)
+                # Wait BEFORE sending a read-only call; keep this step's metadata
+                # and slot manifest instead of restarting them on every rest cycle.
+                while True:
+                    try:
+                        self.budget.reserve(self.url,self.interval,burst_requests=self.burst_requests,
+                                            burst_cooldown_seconds=self.burst_cooldown_seconds,
+                                            rpc_method=method,logical_calls=logical_calls)
+                        self.budget.audit_attempt(self.url,method,logical_calls)
+                        break
+                    except ProviderBackoff as wait:
+                        self.budget.audit_wait(self.url,method,wait.seconds)
+                        self.budget.sleep(min(60,max(.001,wait.seconds)))
             else:self.budget.reserve(self.url,self.interval)
         except ProviderBackoff as error:
             error.rpc_method=method
@@ -111,7 +129,7 @@ class IndexRpc:
         # Batches are capped at two logical calls (at most four getBlock calls/s
         # under the existing 0.5s HTTP floor), within public method/IP ceilings.
         method=payload[0]['method'] if isinstance(payload,list) else payload['method']
-        self._reserve(method)
+        self._reserve(method,len(members))
         self.requests += 1
         request = Request(self.url, data=json.dumps(payload,allow_nan=False).encode(),
                           headers={'Content-Type': 'application/json', 'Accept-Encoding': 'gzip', 'User-Agent': 'SolanaOnchainIndex/1'})
@@ -122,6 +140,7 @@ class IndexRpc:
                 status=getattr(response,'status',None)
                 if type(status) is not int:status=None
                 self.last_http_status=status
+                if isinstance(self.budget,ProviderBudget):self.budget.audit_http(self.url,method,status)
                 phase='response_body'
                 raw=response.read(64_000_001);received=len(raw)
                 length=response.headers.get('Content-Length')
@@ -130,6 +149,7 @@ class IndexRpc:
                     raise IncompleteRead(raw,int(length)-len(raw))
                 encoding = response.headers.get('Content-Encoding', 'identity').lower()
         except HTTPError as error:
+            if isinstance(self.budget,ProviderBudget):self.budget.audit_http(self.url,method,error.code)
             self.budget.failure(self.url, error.code, error.headers)
             # Do not expose endpoint paths, which may contain credentials.
             failure=http_error(error.code,self.source,method)
@@ -281,8 +301,9 @@ class Ingester:
             except (ConnectionError,ValueError) as error:
                 # Prefix commits remain useful even if a later request is throttled.
                 # Persist their progress so the dashboard does not report no index.
-                cursor=self.store.next_slot()
-                if type(finalized) is int and sampled_at is not None and cursor is not None and cursor>initial:
+                if type(finalized) is int and sampled_at is not None:
+                    # A real head observation is useful even when throttling
+                    # prevented the first block commit. Never invent a new head.
                     self.record_progress(finalized,sampled_at,initial,started,'partial')
                 if not isinstance(error,ConnectionError):raise
                 print(json.dumps({'status':'rpc_source_unavailable','source_id':rpc.source,
@@ -321,7 +342,7 @@ class Ingester:
                         rpc_decoded_bytes=sum(getattr(r,'decoded_bytes',0) for r in self.endpoints),
                         rpc_counter_scope='current process')
         self.store.save_progress(progress)
-        return {'status': status, 'progress': progress, **self.store.metrics()}
+        return {'at':time.time(),'status': status, 'progress': progress, **self.store.metrics()}
 
 
 def follow(ingester, start=None, count=8, interval=5, max_failures=6, max_catchup_slots=64):
@@ -346,7 +367,7 @@ def follow(ingester, start=None, count=8, interval=5, max_failures=6, max_catchu
         except ProviderBackoff as error:
             if ingester.store.next_slot() is not None:start=None
             remaining=max(0,float(error.seconds))
-            yield {'status':'paused','reason':'Provider cooldown active','category':'provider_cooldown',
+            yield {'at':time.time(),'status':'paused','reason':'Provider cooldown active','category':'provider_cooldown',
                    'error_type':type(error).__name__,'rpc_method':getattr(error,'rpc_method',None),
                    'retry_seconds':remaining,'checkpoint':ingester.store.next_slot()}
             # A local cooldown check is not a failed network attempt. Keep bounded
@@ -358,7 +379,7 @@ def follow(ingester, start=None, count=8, interval=5, max_failures=6, max_catchu
             failures += 1
             delay = max(min(60,max(1,interval)*2**min(failures,6)),
                         getattr(error,'retry_after_seconds',0))
-            yield {'status': 'paused', 'reason': str(error), 'error_type': type(error).__name__,
+            yield {'at':time.time(),'status': 'paused', 'reason': str(error), 'error_type': type(error).__name__,
                    'rpc_code':getattr(error,'rpc_code',None),'rpc_method':getattr(error,'rpc_method',None),
                    'http_status':getattr(error,'http_status',None),'category':getattr(error,'category',None),
                    **details(error),

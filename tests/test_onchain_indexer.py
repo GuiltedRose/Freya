@@ -8,7 +8,7 @@ import tempfile
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from solders.pubkey import Pubkey
 from onchain_decode import Decoder, EVENT_IX
 from onchain_store import EventStore
@@ -449,14 +449,24 @@ class IndexerTests(unittest.TestCase):
     def test_indexer_respects_http_retry_after_without_extra_request(self):
         from urllib.error import HTTPError
         from provider_limits import ProviderBudget, ProviderBackoff
-        budget = ProviderBudget(Path(self.temp.name)/'limits.sqlite', clock=lambda: 1000)
+        clock=[1000.]
+        budget = ProviderBudget(Path(self.temp.name)/'limits.sqlite', clock=lambda: clock[0])
         rpc = IndexRpc({'url': 'https://example.invalid', 'source_id': 'fixture'}, budget)
         error = HTTPError('https://example.invalid', 429, 'limited', {'Retry-After': '120'}, None)
         with patch('onchain_ingest.build_opener') as opener:
-            opener.return_value.open.side_effect = error
-            with self.assertRaises(ValueError): rpc.call('getSlot', [])
-            with self.assertRaises(ProviderBackoff): rpc.call('getSlot', [])
-            self.assertEqual(opener.return_value.open.call_count, 1)
+            context=MagicMock()
+            response=context.__enter__.return_value
+            response.status=200;response.headers={}
+            response.read.return_value=b'{"jsonrpc":"2.0","id":1,"result":7}'
+            opener.return_value.open.side_effect=[error,context]
+            def wait(seconds):
+                self.assertEqual(opener.return_value.open.call_count,1)
+                clock[0]+=seconds
+            budget.sleep=wait
+            with self.assertRaises(ValueError):rpc.call('getSlot',[])
+            self.assertEqual(rpc.call('getSlot',[]),7)
+            self.assertEqual(clock[0],1180.)
+            self.assertEqual(opener.return_value.open.call_count,2)
         error.close()
 
     def test_partial_network_batch_preserves_durable_prefix(self):

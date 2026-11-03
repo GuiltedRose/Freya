@@ -133,8 +133,15 @@ def health(database, mints=(), now=None):
         except (ValueError,KeyError) as error:
             markets[mint] = {'error':safe_reason(error)}
             blockers.append('Market unavailable: '+mint)
+    progress=dict(store.progress() or {})
+    sampled=progress.get('head_sampled_at')
+    age=now-sampled if type(sampled) in (int,float) else None
+    progress.update(head_sample_age_seconds=age,lag_is_current=age is not None and 0<=age<=30,
+                    lag_scope='last sampled finalized head; not a live head estimate',
+                    rate_scope='last ingestion step; excludes between-step cooldown/rest')
     return {'ready':not blockers, 'blockers':blockers, 'index':store.metrics(),
-            'progress':store.progress(), 'coverage':coverage, 'recent_issues':issues,
+            'index_watermark':watermark,'index_age_seconds':now-watermark if watermark is not None else None,
+            'progress':progress, 'coverage':coverage, 'recent_issues':issues,
             'conversions':conversions, 'oracle':oracle_report, 'markets':markets}
 
 

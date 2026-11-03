@@ -1,10 +1,18 @@
 # Shared external RPC burst pacing
 
-External RPC clients allow ten paced HTTP requests, then a ten-second pause.
+External RPC clients allow ten paced HTTP requests, then a thirty-second pause.
 This is proactive pacing, not a claim about a provider's published quota or proof
-that full-block ingestion can keep up. Existing per-request spacing, byte budgets,
+that full-block ingestion can keep up. Throttling waits for the greater of the server Retry-After and existing minimum
+backoff, then adds 60 seconds. A missing header retains the existing 60-second
+429 fallback plus that margin (120 seconds total). Existing per-request spacing, byte budgets,
 401/403 denial and 429/Retry-After backoff remain enforced. A two-block batch counts
 as one HTTP request; its two-logical-call cap remains unchanged.
+
+Automatic pacing is selected from external RPC URLs; known mainnet aliases share
+one bucket. Existing provider identities are retained; no opt-in flag is needed. An isolated
+network label alone does not exempt an external endpoint. Explicit endpoint limits
+can make pacing stricter; external indexers clamp bursts to at most ten and rests
+to at least thirty seconds.
 
 Python and Rust indexers use the same limiter. Wallet observation and live RPC
 also use it, including transaction submission: pacing never retries a submission.
@@ -19,9 +27,9 @@ pause deadlines survive restart; success does not clear them. This limiter cover
 these clients, not unrelated programs or other machines sharing the public IP.
 
 Index endpoints accept `burst_requests` (integer 1–100) and
-`burst_cooldown_seconds` (1–3600), defaulting to 10 and 10. The public Solana aliases
-cannot exceed ten or shorten the ten-second pause. Wallet/live clients use the
-10/10 default. Isolated self-hosted index endpoints and literal loopback are exempt
+`burst_cooldown_seconds` (1–3600), defaulting to 10 and 30. The public Solana aliases
+cannot exceed ten or shorten the thirty-second pause. Wallet/live clients use the
+10/30 default. Explicitly reviewed self-hosted profiles and literal private/loopback endpoints are exempt
 from the new burst cap; wallet/live clients exempt literal private/loopback IPs and
 localhost. Existing pacing and network enforcement still apply. A self-hosted DNS
 endpoint used by wallet/live conservatively receives external pacing.
@@ -57,3 +65,21 @@ and resume through the same existing workflow. Preserve all journals and the new
 pacing table; older code ignores that additive table. Existing provider denial and
 Retry-After records remain in the unchanged `providers` table. Never delete the
 ledger or clear an unresolved order to restart.
+
+Read-only indexer requests wait for local admission in place, preserving the
+current step rather than repeating all metadata reads after each rest. Actual
+network failures keep existing bounded retry handling. Direct signed-order code
+does not gain automatic resubmission. A reservation queued before another worker's
+429 is rechecked after sleeping; it cannot knowingly dispatch through that new
+cooldown. Denials also remain fail-closed. The consumed reservation is not refunded.
+
+Additive `provider_events` records reservations, client attempts, HTTP outcomes,
+local waits and backoff decisions. A reservation is not a sent request, and a
+client attempt is not proof that the server received it. HTTP 429 backoff records
+retain the server's parsed Retry-After separately from the effective blocked-until
+deadline. Internal/RPC backoff is marked separately and never assigned an observed
+HTTP status. URL/credential identities use ledger-local keyed fingerprints; the
+key stays in `provider_audit_key`. Preserve the ledger/key for comparisons, keep it
+owner-only, and never publish the raw database. Audit records contain no request
+parameters or URLs. A diagnostic-write failure cannot undo committed throttling.
+See [coordinated-run evidence and operator commands](rpc_performance_changes.md).

@@ -26,7 +26,7 @@ class Rpc:
 
     def call(self, method, params):
         from provider_limits import BUDGET
-        BUDGET.reserve_rpc(self.endpoint,self.interval)
+        BUDGET.reserve_rpc(self.endpoint,self.interval,method)
         body = json.dumps(dict(jsonrpc='2.0', id=1, method=method, params=params)).encode()
         request = urllib.request.Request(self.endpoint, data=body, headers={'Content-Type': 'application/json', 'Accept':'application/json', 'User-Agent':'SolanaSpotBot/0.1'})
         from pump_narratives import NoRedirect

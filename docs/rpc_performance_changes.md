@@ -1,5 +1,176 @@
 # Native RPC reliability findings and repairs
 
+## Coordinated-run follow-up: operator evidence and current repair
+
+Operator-supplied Monolith results supersede the earlier local-only uncertainty:
+630 Python tests passed, native app and lifecycle VM checks returned successfully,
+and the bounded mainnet probe completed ten calls with no deadline expiry. Both
+backends decoded the same two sampled finalized slots (464690735: 549 transactions,
+35 events; 464690736: 517 transactions, 33 events) with no decoder issues. This
+establishes transport/decoder operation at that moment, not sustained capacity or
+byte-identical payloads. Reported Python/Rust latency observations (ms) were
+317.98/182.55 for genesis, 468.77/357.28 for head, 524.44/503.88 for the manifest,
+1382.79/901.19 for slot 464690735 and 1102.43/296.02 for slot 464690736. These are
+single sequential observations, not latency distributions or a sustained benchmark. Older probe reports did not capture effective settings;
+credential/ledger equivalence cannot be retroactively established from them.
+
+The supplied persistent-run record contains an actual `getBlock` HTTP 429 and
+approximately 60 seconds of backoff at checkpoint 464667086. That is distinct from
+older generic transport failures and synthetic 503 bookkeeping. The probe's later
+slots and the older checkpoint cannot be compared as contemporaneous without wall
+timestamps. Eleven source errors do not mean eleven throttles. Native imports in
+the development shell also rule out the suggested shell-only explanation for this
+reported run. A VM check does not establish that production packets used its rules.
+
+Local captured logs/config/ledgers are older than these Monolith observations.
+They were inspected read-only without rendering endpoint URLs. Both local legacy
+and index-directory provider ledgers exist, and neither contained request-level
+history. Their existence is not evidence that Monolith currently splits workers.
+The coordinated supervisor exports one selected absolute ledger path to its child
+processes. Standalone workers can choose the legacy path unless configured to
+share the same path. No ledger was merged, cleared or redirected by this repair.
+
+### Code-backed defects repaired
+
+* A future reservation slept without checking a throttle or denial recorded during
+  that sleep. It now rechecks shared state before dispatch; the consumed reservation
+  remains recorded. This proves a cooldown race existed, not that it caused the
+  provider's original 429.
+* A local rest could abort an indexer step and restart its metadata work. Normal
+  steps use a finalized head, history-floor probes, deployment reads and a slot
+  manifest, with periodic oracle reads, before fetching blocks. For the two pinned
+  programs that is eight metadata calls per step, plus two per due USD feed and an
+  initial cached genesis check. A ten-request allowance can therefore be consumed
+  before a block fetch. Read-only admission now waits in place instead of restarting
+  that work. The slot range stays bounded by its actually observed finalized head;
+  head timestamps are not refreshed by waiting and per-slot deployment/schema
+  admission remains enforced. HTTP failures retain existing bounded recovery;
+  signed transactions are never automatically resubmitted.
+* When throttling prevented the first block commit, an actually observed newer head
+  was not persisted to progress. It now is, without changing the checkpoint or
+  committing a block. Health/console reports expose head-sample age, mark lag as
+  belonging to that sample, and label the displayed rate as last-step throughput.
+  Between-step cooldowns are excluded from that rate. Complete-hour coverage, causal
+  USD conversions, fresh swaps and usable market windows remain separate gates.
+
+Automatic external/mainnet pacing is now **at most ten HTTP requests, then at least
+thirty seconds of rest**, shared by the existing ledger. A two-block batch still
+contains two logical getBlock calls. External URLs do not need an opt-in flag and
+an isolated-mode label alone cannot disable their pacing. Reviewed self-hosted
+profiles retain separate enforcement. Actual throttling uses the greater of server
+Retry-After and the existing minimum backoff, **plus sixty seconds**. No request
+comes from Penguin for this investigation; household traffic outside the shared
+ledger remains unobserved and can still affect the provider's IP-level limits.
+More rest reduces possible throughput; it does not prove the feed can keep up.
+
+### Probe versus persistent runner
+
+| Aspect | Bounded probe | Coordinated runner |
+| --- | --- | --- |
+| Scheduling | Python then Rust, ten calls total | Persistent indexer, oracle and consumers |
+| Blocks | Two common slots, single-block requests | Configured bounded batches, full finalized JSON transactions |
+| Metadata | Genesis, head and manifest per backend | History/deployment checks and periodic USD oracle reads also consume requests |
+| Wallet watch | Not exercised | With the on-chain DB, IndexedWalletFeed reads SQLite; its stale warning does not itself make an RPC call |
+| Learning | Not exercised | Uses configured outcome/index ledgers; it does not independently fetch blocks |
+| Shared identity | New reports include keyed URL/provider IDs | Startup logs include the actual budget path, IDs, pacing and network namespace |
+| Size evidence | Reported response bytes | Existing wire/decoded body counters; request-body byte sizes are not separately instrumented |
+
+New `provider_events` traces include time, PID, consumer, method, HTTP versus logical
+units, HTTP responses and local waits/backoff. Actual response records must be kept
+separate from reservations/client attempts. Internal/RPC backoff has no fabricated
+HTTP status. Secret URL/credential strings never enter the trace. All coordinated
+workers receive a consumer tag. Standalone consumers on another ledger, other
+machines sharing the public IP, and uninstrumented tools remain outside coverage.
+
+### Operator snapshot and bounded sustained acceptance
+
+Build the reviewed revision including the new public modules first. Keep all wallet,
+source, byte-budget, safety and authorization configuration intact. From Monolith:
+
+```bash
+# Include these new public files in the reviewed Git source used by Nix:
+git add rpc_run_evidence.py tests/test_rpc_shared_cooldown.py tests/test_rpc_evidence_monitor.py
+nix build --no-write-lock-file .#native-rpc-app
+# Read-only snapshot; makes no RPC calls and does not modify any ledger:
+nix run --no-write-lock-file .#rpc-evidence -- \
+  --index-db state/onchain/index.sqlite \
+  --log-dir state/paper_volume/pipeline/paper \
+  --output /tmp/freya-rpc-snapshot-new.jsonl
+```
+
+Select the existing shared ledger explicitly with `--provider-ledger` if independent
+services use a non-default path. Export that same existing absolute file through
+`CRYPTO_BOT_PROVIDER_LIMITS` for all RPC workers; do not copy an older ledger over it.
+The snapshot includes recent effective-settings log records, both known ledger
+locations where applicable, bounded historical log counts, sampled-head/index ages,
+coverage, conversion freshness, usable markets and request traces. Old logs without
+wall timestamps or request history cannot supply a retrospective timeline. Check
+`managed_namespace_match` on the **indexer startup settings**, not merely on the shell
+running the report. `null` means unknown, never proof that rules apply. The existing
+NixOS counter commands below remain available for operator inspection.
+
+After stopping owned processes, review/build the new revision and resume the same
+paper session, without initialization or balance reset. For this bounded acceptance
+run, use GNU timeout to request graceful shutdown at 70 minutes (30-second maximum
+shutdown grace); timeout exit 124 indicates the time boundary, not data acceptance:
+
+```bash
+timeout --signal=INT --kill-after=30s 4200s nix run --no-write-lock-file .#paper
+```
+
+Open paper inventory and incomplete work remain in the existing durable state for
+normal resume/reconciliation. Do not start a second paper collector alongside it.
+In another terminal, monitor that run; this observer is read-only and makes
+**zero additional network requests**:
+
+```bash
+nix run --no-write-lock-file .#rpc-evidence -- \
+  --index-db state/onchain/index.sqlite \
+  --log-dir state/paper_volume/pipeline/paper \
+  --duration-seconds 4200 --interval-seconds 30 \
+  --output /tmp/freya-paper-data-acceptance-new.jsonl
+```
+
+Use new report filenames. The observer records wall-time checkpoint throughput,
+regressions, head age, separate freshness/coverage/conversion blockers and provider
+events. Its data milestone requires advancing checkpoints and three consecutive
+fresh/complete, usable-market snapshots. It never promotes a model, authorizes a
+trade or counts synthetic outcomes. Inspect the contiguous-range evidence and
+unchanged historical blocks; polling cannot prove every intermediate state. A
+nonzero exit or incomplete report is not acceptance. Paper closes, eligible ML
+samples and challenger results remain separate later milestones.
+
+Do not run a concurrent probe, a second collector or an external Penguin test.
+A new bounded probe is only useful in a separate quiet operator-controlled window
+if exact settings comparison remains necessary. Its updated reports now include
+effective settings; do not infer equivalence for older captures.
+
+Rollback: stop owned workers and return to the prior reviewed package. Preserve all
+current index/paper/model/provider data and the new additive trace/key tables;
+older code ignores them. Preserve longer blocked-until deadlines. No database reset,
+slot skip, oracle backfill from current prices, budget increase, or funded live
+activation is part of this change.
+
+### Follow-up validation
+
+643 protected offline tests passed with zero failures, errors or skips; the
+privileged kernel suite remained explicitly omitted (`complete:false`,
+`live_ready:false`). Fourteen focused cooldown/privacy/observer checks also passed
+after the final report sanitization and identity-preservation review. The current
+native app built from cached inputs with substituters disabled, and its packaged
+`rpc-evidence --help` check passed. No external RPC calls, competing probes, node
+startup, paper activation or funded live orders were performed here. A local,
+read-only evidence snapshot completed with the data milestone false, as expected
+for the older local capture. Actual sustained Monolith acceptance is still pending.
+
+The older throttle test used a frozen clock and expected local backoff to escape
+the read-only caller. It was updated to use an advancing fake clock and now verifies
+that Retry-After 120 plus the sixty-second margin causes no second transport call
+until time 180. The first full attempt was stopped at that obsolete fixture; the
+subsequent complete run passed. Local evidence is retained in
+`/tmp/freya-shared-rpc-acceptance-offline.json` and
+`/tmp/freya-local-rpc-evidence.jsonl`; these are not Monolith acceptance reports.
+
 ## V3 implementation and current acceptance
 
 The mainnet root cause is **not yet confirmed**. Safe diagnostics now preserve

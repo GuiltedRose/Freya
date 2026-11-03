@@ -230,7 +230,9 @@ def supervise(args,extra,indexer,learning):
     def spawn(role,script,arguments,env=environment):
         stream=(directory/(role+'.log')).open('ab');streams.append(stream)
         output.follow(role,directory/(role+'.log'))
-        child=subprocess.Popen([sys.executable,'-u',str(ROOT/script),*map(str,arguments)],env=env,stdout=stream,stderr=subprocess.STDOUT)
+        consumer_role='live' if role=='consumer' and args.mode=='live' else role
+        worker_env=dict(env,CRYPTO_BOT_RPC_CONSUMER=consumer_role)
+        child=subprocess.Popen([sys.executable,'-u',str(ROOT/script),*map(str,arguments)],env=worker_env,stdout=stream,stderr=subprocess.STDOUT)
         children[role]=child
         status({'status':'worker_started','role':role,'pid':child.pid,'log':str(directory/(role+'.log'))})
         return child

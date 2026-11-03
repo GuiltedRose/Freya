@@ -160,7 +160,7 @@ class RustIndexRpc(IndexRpc):
         transport=self._transport_for(check_boundary(self.endpoint))
         if not hasattr(type(transport),'request_blocks_encoded_sync'):
             raise RuntimeError('Rebuild native RPC extension with bounded block batching')
-        self._reserve('getBlock')
+        self._reserve('getBlock',len(slots))
         self.requests+=1
         try:response=transport.request_blocks_encoded_sync(params)
         except (ConnectionError,ValueError) as error:self._transport_error(error,'getBlock')
@@ -172,6 +172,8 @@ class RustIndexRpc(IndexRpc):
 
     def _finish(self,status,retry,text,method=None):
         self.last_http_status=status
+        from provider_limits import ProviderBudget
+        if isinstance(self.budget,ProviderBudget):self.budget.audit_http(self.url,method,status)
         if status!=200:
             self.budget.failure(self.url,status,{'Retry-After':retry} if retry else {})
             failure=http_error(status,self.source,method)
@@ -186,6 +188,8 @@ class RustIndexRpc(IndexRpc):
 
     def _finish_encoded(self,status,retry,encoding,text,method=None,batch_count=None):
         self.last_http_status=status
+        from provider_limits import ProviderBudget
+        if status==200 and isinstance(self.budget,ProviderBudget):self.budget.audit_http(self.url,method,status)
         if status!=200:return self._finish(status,retry,'',method=method)
         # Native identity replies are already UTF-8-validated strings. Keep the
         # original text for JSON validation instead of encoding/decoding it twice.

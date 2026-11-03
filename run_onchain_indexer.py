@@ -88,6 +88,13 @@ def run(args,config,decoder,parser):
             continue
         store.register_source(endpoint['source_id'], endpoint['policy'])
         endpoints.append(make_rpc(endpoint))
+        from rpc_run_evidence import effective_settings
+        from provider_limits import ProviderBudget
+        rpc=endpoints[-1]
+        if isinstance(getattr(rpc,'budget',None),ProviderBudget):
+            rpc.endpoint=endpoint
+            print(json.dumps({'status':'rpc_effective_settings','at':__import__('time').time(),
+                              'settings':effective_settings(rpc,rpc.budget.identity(rpc.url))}),flush=True)
     try:
         if args.capture_sol_usd:
             if not endpoints:

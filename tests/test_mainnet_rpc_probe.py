@@ -18,6 +18,8 @@ class MainnetProbeTests(unittest.TestCase):
         calls=[]
         class Rpc:
             url='https://fixture.invalid'
+            interval=.5;block_batch_size=1;burst_requests=10;burst_cooldown_seconds=30
+            budget=SimpleNamespace(path=Path('/tmp/probe-fake-ledger'))
             wire_bytes=0
             def call(self,method,params):
                 calls.append((method,params));self.wire_bytes+=100
@@ -32,6 +34,7 @@ class MainnetProbeTests(unittest.TestCase):
                  patch('provider_limits.ProviderBudget') as budget,patch('solana_rpc_compat.make_rpc',side_effect=lambda *a,**k:Rpc()),\
                  patch('sys.stdout',new_callable=io.StringIO) as output:
                 budget.return_value.cooldown_remaining.return_value=0
+                budget.return_value.identity.return_value={}
                 worker(args)
             rows=[json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(calls),10)

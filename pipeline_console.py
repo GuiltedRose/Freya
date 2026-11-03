@@ -15,8 +15,12 @@ def format_pipeline(record):
     progress=record.get('progress') or {}
     details=[]
     if isinstance(progress.get('indexed_slots_per_second'),(int,float)):
-        details.append(f"{progress['indexed_slots_per_second']:.2f} indexed slots/s")
-    if 'lag_slots' in progress:details.append(f"lag {progress['lag_slots']} slots")
+        details.append(f"{progress['indexed_slots_per_second']:.2f} indexed slots/s (last step)")
+    if 'lag_slots' in progress:
+        label='lag' if progress.get('lag_is_current') is True else 'last sampled lag'
+        details.append(f"{label} {progress['lag_slots']} slots")
+    if isinstance(progress.get('head_sample_age_seconds'),(int,float)):
+        details.append(f"head sample {progress['head_sample_age_seconds']:.0f}s old")
     if record.get('failed_role'):details.append(record['failed_role']+' exited '+str(record.get('exit_code')))
     details.extend(record.get('blockers',[]))
     if record.get('reason'):details.append(record['reason'])

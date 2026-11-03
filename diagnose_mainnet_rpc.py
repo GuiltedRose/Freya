@@ -77,6 +77,7 @@ def worker(args):
     attempts=0;anchor=None;slots=None
     with writer_lock(args.index_db,'indexer',config):
         for backend in ('python','rust'):
+            os.environ['CRYPTO_BOT_RPC_CONSUMER']='probe-'+backend
             rpc=make_rpc(dict(endpoint,backend=backend),budget=budget)
             try:
                 methods=['getGenesisHash','getSlot','getBlocks','getBlock','getBlock']
@@ -105,6 +106,8 @@ def worker(args):
                                 value=rpc.call(method,params)
                             row={'backend':backend,'method':method,'status':'success','http_status':getattr(rpc,'last_http_status',None),
                                  'elapsed_ms':(time.monotonic()-started)*1000,'bytes_received':rpc.wire_bytes-before}
+                            from rpc_run_evidence import effective_settings
+                            row['effective_settings']=effective_settings(rpc,budget.identity(rpc.url))
                             if method=='getGenesisHash' and value!=MAINNET:raise ValueError('Wrong chain')
                             if method=='getSlot' and anchor is None:anchor=value
                             if method=='getBlocks':

@@ -125,7 +125,7 @@ def configure(args,public,indexer,learning):
         else:
             source['network_mode']='remote_provider'
             source.setdefault('burst_requests',10)
-            source.setdefault('burst_cooldown_seconds',10)
+            source.setdefault('burst_cooldown_seconds',30)
             if source.get('network_budget'):raise ValueError('Public RPC profile cannot replace an existing node network-budget policy')
         print(json.dumps({'status':'automatic_setup','profile':automatic,'prompts':False}),flush=True)
     else:
