@@ -55,3 +55,25 @@ class PlanningTests(unittest.TestCase):
             prepare(Path('unused'), self.output, 11)
         self.assertEqual(result.exception.code, 75)
         self.assertFalse(self.output.exists())
+
+
+class BootstrapSelectionTests(unittest.TestCase):
+    def test_public_compatible_unique_candidates_are_bounded(self):
+        from solders.pubkey import Pubkey
+        from prepare_native_window import bootstrap_nodes
+        rows = [{'pubkey': str(Pubkey.new_unique()), 'gossip': f'1.1.1.1:{8000+i}',
+                 'shredVersion': 7} for i in range(6)]
+        selected = bootstrap_nodes([rows[0], rows[0], *rows[1:]], 7)
+        self.assertEqual(len(selected), 4)
+        self.assertEqual(selected[0]['gossip'], '1.1.1.1:8000')
+        self.assertEqual(len({row['identity'] for row in selected}), 4)
+
+    def test_private_multicast_invalid_and_incompatible_candidates_are_rejected(self):
+        from prepare_native_window import bootstrap_nodes
+        valid = {'pubkey': '11111111111111111111111111111111', 'gossip': '1.1.1.1:8001',
+                 'shredVersion': 7}
+        bad = [dict(valid, gossip=address) for address in
+               ('127.0.0.1:8001', '192.168.1.1:8001', '224.0.0.1:8001',
+                'hostname.invalid:8001', '1.1.1.1:0', '1.1.1.1:65536')]
+        bad += [dict(valid, pubkey='invalid'), dict(valid, shredVersion=8), None]
+        self.assertEqual(bootstrap_nodes(bad, 7), [])

@@ -2,9 +2,36 @@
 import argparse
 from collections import Counter
 import json
+import ipaddress
 import os
 from pathlib import Path
 import time
+
+
+def bootstrap_nodes(cluster, version):
+    """Public IPv4 gossip candidates from reviewed RPC claims, not peer proofs."""
+    from solders.pubkey import Pubkey
+    selected, addresses, identities = [], set(), set()
+    for row in cluster:
+        if not isinstance(row, dict) or type(row.get('shredVersion')) is not int or row['shredVersion'] != version:
+            continue
+        try:
+            identity = str(Pubkey.from_string(row['pubkey']))
+            host, separator, port = row['gossip'].rpartition(':')
+            address = ipaddress.IPv4Address(host)
+            if (not separator or not address.is_global or address.is_multicast or address.is_reserved
+                    or not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535):
+                continue
+            socket = f'{address}:{int(port)}'
+        except (KeyError, TypeError, AttributeError, ValueError):
+            continue
+        if socket in addresses or identity in identities:
+            continue
+        selected.append({'identity': identity, 'gossip': socket})
+        addresses.add(socket); identities.add(identity)
+        if len(selected) == 4:
+            break
+    return selected
 
 
 def prepare(config_path, output, start=None):
@@ -50,7 +77,8 @@ def prepare(config_path, output, start=None):
                     and 0 <= time.time() - prior.get('shred_version_at', 0) <= 300
                     and type(prior.get('shred_version')) is int and 1 <= prior['shred_version'] <= 65535):
                 cached = prior['shred_version']
-        cluster = [] if cached else rpc.call('getClusterNodes', [])
+        reuse = cached and isinstance(prior.get('bootstrap_nodes'), list) and prior['bootstrap_nodes']
+        cluster = [] if reuse else rpc.call('getClusterNodes', [])
         if not isinstance(cluster, list) or len(cluster) > 20000:
             raise ValueError('Invalid cluster metadata')
         versions = Counter(row.get('shredVersion') for row in cluster if isinstance(row, dict)
@@ -59,11 +87,13 @@ def prepare(config_path, output, start=None):
             raise ValueError('Compatible shred version unavailable')
         version = cached or versions.most_common(1)[0][0]
         version_at = prior['shred_version_at'] if cached else time.time()
+        peers = prior['bootstrap_nodes'] if reuse else bootstrap_nodes(cluster, version)
         plan = {'schema': 'freya-native-window-v1', 'at': time.time(), 'start': start, 'end': end,
                 'observed_finalized_head': head, 'genesis': '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
                 'source_id': rpc.source, 'source_identity': identity,
                 'verification': 'reviewed_rpc_claim', 'shred_version': version,
                 'shred_version_at': version_at,
+                'bootstrap_nodes': peers, 'bootstrap_provenance': 'reviewed_rpc_claim',
                 'slots': [{'slot': slot, 'leader': leaders[slot-start]} for slot in slots],
                 'rpc_reported_skipped_slots': [slot for slot in range(start, end+1) if slot not in slots]}
         temporary = output.with_suffix('.pending')

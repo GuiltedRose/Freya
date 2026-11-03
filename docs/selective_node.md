@@ -87,7 +87,7 @@ Example follow config outside the Nix store, owned privately by the collector:
 
 ```json
 {
-  "bootstrap_peers": ["REPLACE_REVIEWED_PUBLIC_IPV4:8001"],
+  "bootstrap_peers": [],
   "duration_seconds": 40,
   "continuous": false,
   "max_namespace_bytes": 1000000,
@@ -98,8 +98,18 @@ Example follow config outside the Nix store, owned privately by the collector:
 }
 ```
 
-The placeholder deliberately fails validation. Discovery uses 1–4 explicit
-bootstrap sockets. Follow plans four finalized slots automatically; its optional
+For follow mode, omit `bootstrap_peers` or use `[]` to obtain up to four public
+IPv4 gossip addresses from the reviewed RPC's `getClusterNodes` response. Candidates
+must have valid identities, matching shred versions and distinct identities/sockets.
+Private, reserved and multicast addresses are rejected. Metadata is cached for at
+most five minutes under the same provider identity. Old plans without bootstrap
+metadata refresh without advancing their saved window; no suitable peers means
+blocked. Status records `reviewed_rpc_claim` provenance. Gossip authentication
+remains separate. No fetch happens during Nix evaluation, build or shell entry.
+
+Explicit 1–4 socket lists remain supported; literal placeholders are rejected.
+Discovery-only mode still requires explicit sockets. Follow plans four finalized
+slots automatically; its optional
 `initial_slot` is a starting anchor, not a manually enumerated schedule. Plans
 retain RPC provenance and skipped-slot claims; they are distinct from native
 reconstruction evidence. Version changes, lost identity, corrupt checkpoint fields,
@@ -154,6 +164,25 @@ remain unavailable. A stale head does not establish current lag.
 
 ## Operator validation and rollback
 
+On Monolith, enter the dedicated environment:
+
+```bash
+nix develop --no-write-lock-file .#native-mainnet
+```
+
+This x86_64 Linux shell includes the packaged `freya-node`, `freya-peer`, Rust
+HTTP/WebSocket Python extension, RPC diagnostics, SQLite, JSON and namespace/
+firewall tools. It inherits `native-rpc`; no pip installation or manual planner
+environment is needed for the packaged node. Entering it does not activate a
+service, create a network grant or run a mainnet probe. Nix may build dependencies
+and run their offline package checks when the operator enters the environment.
+
+For peer acquisition, apply the reviewed NixOS configuration above first. Then,
+from this environment, the operator starts `freya-peer-discovery.service`; systemd
+supplies the private configs, shared ledger and authorized network namespace.
+Running `freya-peer follow` directly in the host shell still fails closed without
+that namespace/lease. Merely entering a development shell does not grant access.
+
 ```bash
 nix build --no-write-lock-file .#native-peer .#native-node .#bundle
 nix develop .#native-rpc --command python validate_production.py --native --output /tmp/freya-validation-NEW.json
@@ -207,3 +236,8 @@ results do not establish mainnet synchronization. Real repair acceptance, sustai
 catch-up, usable native-reconciled paper observations, direct parity availability
 and full-system resource use remain operator acceptance gates. Use the bounded
 Monolith commands above; preserve all caps and evidence on failure.
+
+The subsequent `native-mainnet` shell and automatic-bootstrap changes were prepared
+without builds, test execution or network diagnostics at the operator's request.
+The acceptance counts above describe the preceding revision. Bootstrap-selection
+regressions are written but await operator execution.

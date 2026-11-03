@@ -215,6 +215,17 @@
             native = pkgs.mkShell {
               packages = [ (environments.${system}.pythonBase.withPackages (p: [ p.solders p.websockets p.zstandard (nativePackage system) ])) pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy ];
             };
+          } // pkgs.lib.optionalAttrs (nativeReady && system == "x86_64-linux") {
+            native-mainnet = pkgs.mkShell {
+              inputsFrom = [ self.devShells.${system}.native-rpc ];
+              packages = [
+                self.packages.${system}.native-node
+                self.packages.${system}.native-peer
+                self.packages.${system}.native-rpc-app
+                pkgs.ethtool pkgs.jq pkgs.systemd
+              ];
+              # Entering the shell never starts a service or authorizes networking.
+            };
           });
       checks = eachSystem (system:
         let inherit (environments.${system}) pkgs python;

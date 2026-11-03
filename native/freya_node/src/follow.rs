@@ -70,9 +70,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let max = bounded(&config,"max_shreds_per_slot",1,4096)? as u32;
     let max_attempts = bounded(&config,"max_attempts_per_window",1,4096)?;
     let interval = bounded(&config,"request_interval_ms",250,10_000)?;
-    let bootstraps = config["bootstrap_peers"].as_array().ok_or_else(invalid)?.iter()
+    let configured_bootstraps = if config["bootstrap_peers"].is_null() {vec![]}
+        else {config["bootstrap_peers"].as_array().ok_or_else(invalid)?.clone()};
+    let mut bootstraps = configured_bootstraps.iter()
         .map(|v|v.as_str().ok_or_else(invalid)?.parse::<SocketAddr>().map_err(|_|invalid())).collect::<io::Result<Vec<_>>>()?;
-    if bootstraps.is_empty() || bootstraps.len()>4 || bootstraps.iter().any(|a|
+    if bootstraps.len()>4 || bootstraps.iter().any(|a|
         !a.is_ipv4() || a.ip().is_loopback() || a.ip().is_unspecified() || a.port()==0) { return Err(invalid()); }
     let _lock = private_dir(dir)?;
     NATIVE_DISK_LIMIT.set((dir.to_path_buf(),disk_cap)).map_err(|_|invalid())?;
@@ -120,6 +122,25 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
             read_json(&dir.join("window.json"))?
         } else { plan(dir,state["next_slot"].as_u64().or(config["initial_slot"].as_u64()),deadline,&stop)? };
         if window["schema"]!="freya-native-window-v1" || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" { return Err(invalid()); }
+        if bootstraps.is_empty() {
+            if window["bootstrap_nodes"].as_array().is_none_or(|rows|rows.is_empty()) {
+                window=plan(dir,window["start"].as_u64(),deadline,&stop)?;
+            }
+            if window["bootstrap_provenance"]!="reviewed_rpc_claim" {return Err(invalid());}
+            let peers=window["bootstrap_nodes"].as_array().ok_or_else(invalid)?;
+            if peers.is_empty() || peers.len()>4 {return Err(io::Error::other("no compatible public gossip bootstrap candidates"));}
+            for peer in peers {
+                Pubkey::from_str(peer["identity"].as_str().ok_or_else(invalid)?).map_err(|_|invalid())?;
+                let socket=peer["gossip"].as_str().ok_or_else(invalid)?.parse::<SocketAddr>().map_err(|_|invalid())?;
+                if !socket.is_ipv4() || socket.ip().is_loopback() || socket.ip().is_unspecified() || socket.port()==0 {return Err(invalid());}
+                bootstraps.push(socket);
+            }
+            state["bootstrap_source"]=json!("reviewed_rpc_claim");
+            state["bootstrap_nodes"]=window["bootstrap_nodes"].clone();
+        } else {state["bootstrap_source"]=json!("explicit_configuration");}
+        if state["rpc_source_identity"].as_str().is_some_and(|old|window["source_identity"].as_str()!=Some(old)) {return Err(invalid());}
+        state["bootstrap_peers"]=json!(bootstraps.iter().map(ToString::to_string).collect::<Vec<_>>());
+        publish(dir,&state)?;
         let version = bounded(&window,"shred_version",1,65535)? as u16;
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
