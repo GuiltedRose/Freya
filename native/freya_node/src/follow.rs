@@ -29,6 +29,25 @@ pub(super) fn disk_bytes(dir: &Path) -> io::Result<u64> {
     }
     Ok(total)
 }
+fn structured_source(value: &Value) -> io::Result<&Value> {
+    let object=value.as_object().ok_or_else(invalid)?;
+    if object.len()!=2 {return Err(invalid());}
+    for key in ["provider_id","endpoint_id"] {
+        let digest=object.get(key).and_then(Value::as_str).ok_or_else(invalid)?;
+        if digest.len()!=64 || !digest.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(invalid());
+        }
+    }
+    Ok(value)
+}
+fn checked_source<'a>(window: &'a Value, state: &Value) -> io::Result<&'a Value> {
+    let source=structured_source(&window["source_identity"])?;
+    let prior=&state["rpc_source_identity"];
+    // Missing identity is a first use. Malformed or legacy identities require
+    // explicit operator review; never silently discard an existing source pin.
+    if !prior.is_null() && structured_source(prior)?!=source {return Err(invalid());}
+    Ok(source)
+}
 fn interruption(deadline_reached: bool, stopped: bool, lease_valid: bool) -> Option<&'static str> {
     if stopped {Some("stop_requested")}
     else if deadline_reached {Some("planning_deadline")}
@@ -218,7 +237,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
             state["bootstrap_source"]=json!("reviewed_rpc_claim");
             state["bootstrap_nodes"]=window["bootstrap_nodes"].clone();
         } else {state["bootstrap_source"]=json!("explicit_configuration");}
-        if state["rpc_source_identity"].as_str().is_some_and(|old|window["source_identity"].as_str()!=Some(old)) {return Err(invalid());}
+        checked_source(&window,&state)?;
         state["bootstrap_peers"]=json!(bootstraps.iter().map(ToString::to_string).collect::<Vec<_>>());
         publish(dir,&state)?;
         // RPC planning is bounded by the independent network lease, not the repair timer.
@@ -239,9 +258,8 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     s.lines().find_map(|l|l.strip_prefix("VmRSS:").and_then(|v|v.split_whitespace().next()?.parse::<u64>().ok()).map(|kb|kb*1024))));
                 if rx.saturating_add(tx)>=traffic_cap || disk.saturating_add(65536)>disk_cap { return Err(io::Error::other("resource bound")); }
                 let first=window["start"].as_u64().ok_or_else(invalid)?;
-                let source=window["source_identity"].as_str().ok_or_else(invalid)?;
-                if state["rpc_source_identity"].as_str().is_some_and(|old|old!=source) { return Err(invalid()); }
-                state["rpc_source_identity"]=json!(source);
+                let source=checked_source(&window,&state)?.clone();
+                state["rpc_source_identity"]=source;
                 let end=window["end"].as_u64().ok_or_else(invalid)?;
                 if end<first || end-first>3 || bounded(&window,"shred_version",1,65535)?!=u64::from(version) { return Err(invalid()); }
                 if state["window_start"].as_u64()!=Some(first) {
@@ -338,6 +356,38 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn source_fixture() -> Value {
+        // ProviderBudget.identity returns two lowercase HMAC-SHA256 hex digests.
+        json!({"provider_id":"a".repeat(64),"endpoint_id":"b".repeat(64)})
+    }
+    #[test] fn structured_planner_identity_is_persisted_and_reusable() {
+        let window=json!({"schema":"freya-native-window-v1","source_identity":source_fixture()});
+        let mut state=json!({"next_slot":null});
+        state["rpc_source_identity"]=checked_source(&window,&state).unwrap().clone();
+        let restored:Value=serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(checked_source(&window,&restored).unwrap(),&source_fixture());
+        assert_eq!(restored["next_slot"],Value::Null);
+    }
+    #[test] fn structured_source_switches_are_rejected() {
+        let window=json!({"source_identity":source_fixture()});
+        for key in ["provider_id","endpoint_id"] {
+            let mut prior=source_fixture();prior[key]=json!("c".repeat(64));
+            assert!(checked_source(&window,&json!({"rpc_source_identity":prior})).is_err());
+        }
+    }
+    #[test] fn malformed_and_legacy_source_pins_fail_closed() {
+        let good=json!({"source_identity":source_fixture()});
+        for bad in [json!("legacy-pin"),json!({}),json!({"provider_id":"a".repeat(64)}),
+            json!({"provider_id":"https://private.invalid/SECRET","endpoint_id":"b".repeat(64)}),
+            json!({"provider_id":7,"endpoint_id":"b".repeat(64)})] {
+            assert!(checked_source(&json!({"source_identity":bad.clone()}),&json!({})).is_err());
+            let state=json!({"rpc_source_identity":bad});
+            let before=state.clone();
+            let error=checked_source(&good,&state).unwrap_err();
+            assert!(!error.to_string().contains("SECRET"));assert_eq!(state,before);
+        }
+        assert!(checked_source(&json!({}),&json!({})).is_err());
+    }
     fn child_result(script: &str, duration: Duration, stopped: bool, valid: bool) -> (&'static str, Option<std::process::ExitStatus>) {
         let mut child=Command::new("sh").arg("-c").arg(script).spawn().unwrap();
         supervise_child(&mut child,Some(Instant::now()+duration),&AtomicBool::new(stopped),||valid)

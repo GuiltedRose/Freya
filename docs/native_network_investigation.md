@@ -193,6 +193,32 @@ requires actual finalized-slot acquisition and reconstruction.
 
 ## Follow-up: corrected controller, remaining planning failure
 
+### Structured source identity correction
+
+The next operator report showed successful planning followed by an immediate
+follower failure. `ProviderBudget.identity()` returns an object containing
+`provider_id` and `endpoint_id` (lowercase, 64-character HMAC-SHA256 hex digests).
+Both follower checks instead used `as_str()`. The repair-loop conversion therefore
+failed on valid planner output; the earlier comparison also failed to enforce a
+previous structured source pin. This is a confirmed code mismatch, consistent
+with the reported post-planning exit; the corrected runtime is not yet validated.
+
+The follower now validates that exact object shape, compares both fields against
+any persisted structured pin, and persists the object intact. Missing/null prior
+identity permits first use. Malformed objects and legacy string pins fail closed:
+there is no automatic reset or unverifiable migration of a previous source pin.
+If such a pin exists, preserve it and obtain an explicit reviewed migration
+before proceeding. Checkpoints, slots, identity keys and evidence are retained.
+
+Added Rust coverage exercises structured first use, persisted JSON round-trip,
+changes to either digest, malformed metadata and legacy pins. The Python fixture
+now uses the actual object shape and asserts it appears intact in `window.json`.
+No tests or builds were executed. The operator validation commands below cover
+these regressions; do not authorize another network attempt before they pass.
+Deploy both planner and peer engine using the existing refresh, review, backup
+and temporary activation procedure above. Rollback uses that saved add-on and
+does not restore or erase runtime data.
+
 ### Confirmed planning deadline: current correction
 
 The operator then identified systemd's `RuntimeMaxSec=52` as the next cutoff.

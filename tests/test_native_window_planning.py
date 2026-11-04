@@ -25,7 +25,7 @@ class PlanningTests(unittest.TestCase):
                         patch('pipeline_runtime.resolve_indexer', return_value=config),
                         patch('solana_rpc_compat.make_rpc', return_value=self.rpc),
                         patch('solana_rpc_compat.close_rpc_clients'),
-                        patch('provider_limits.BUDGET.identity', return_value='private-test-identity')):
+                        patch('provider_limits.BUDGET.identity', return_value={'provider_id': 'a'*64, 'endpoint_id': 'b'*64})):
             context.start()
             self.addCleanup(context.stop)
 
@@ -49,6 +49,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(record['rpc_reported_skipped_slots'], [8, 10])
         self.assertEqual([row['slot'] for row in record['slots']], [7, 9])
         self.assertEqual(record['verification'], 'reviewed_rpc_claim')
+        self.assertEqual(record['source_identity'], {'provider_id': 'a'*64, 'endpoint_id': 'b'*64})
 
     def test_caught_up_is_retryable_without_replacing_window(self):
         with self.assertRaises(SystemExit) as result:
