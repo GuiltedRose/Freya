@@ -9,7 +9,7 @@ import subprocess
 import time
 import unittest
 import uuid
-from solana_network_budget import firewall
+from solana_network_budget import firewall, shaping_commands
 
 
 @unittest.skipUnless(os.environ.get('SOLANA_SERVER_KERNEL_TESTS')=='I_AM_ON_THE_MONOLITH',
@@ -57,3 +57,17 @@ class KernelBudgetTests(unittest.TestCase):
         self.assertEqual(self.ping(1).returncode,0)
         time.sleep(6)
         self.assertNotEqual(self.ping(1).returncode,0)
+
+    def test_shaper_transmits_full_mtu_without_fragmentation(self):
+        # No WAN/default route: exercise both actual generated shapers using
+        # full Ethernet frames, which the old 1500-byte bucket discarded.
+        left,right=self.names
+        self.command('ip','netns','exec',left,'ip','link','set','test-a','down')
+        self.command('ip','netns','exec',left,'ip','link','set','test-a','name','eth0')
+        self.command('ip','netns','exec',left,'ip','link','set','eth0','up')
+        upload,download=shaping_commands(left,'test-b')
+        self.command(*upload.split())
+        self.command('ip','netns','exec',right,*download.split())
+        result=self.command('ip','netns','exec',left,'ping','-n','-c','2',
+                            '-M','do','-s','1472','-W','2','10.203.0.2',check=False)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)

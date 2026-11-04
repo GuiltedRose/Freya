@@ -394,3 +394,41 @@ reset provider cooldowns. Restore the saved add-on and apply the same temporary
 host configuration to roll this update back. The fix passed 25 focused offline
 planner/DNS/budget/controller tests plus Python/Nix syntax checks; its Monolith
 runtime behavior has not been verified by the assistant.
+
+### Full-frame shaping repair
+
+The 1500-byte TBF bucket was below a full 1500-byte IP packet plus its Ethernet
+header (1514 bytes). Linux TBF drops packets larger than `max_size`, derived from
+its bucket. Small DNS/TCP packets could pass while full TLS packets were discarded,
+consistent with the observed first-request connection timeout. This is a concrete
+code defect; Monolith's exact packet-level failure still needs confirmation.
+
+Both shapers now use a 2048-byte bucket and a bounded 65536-byte queue. The 16 KB/s
+rates, shared byte quota, 55-second lease and monthly accounting are unchanged.
+The queue absorbs a short TLS flight while pacing it instead of dropping it into
+retransmission timeouts. Kernel references:
+[MTU includes link header](https://github.com/torvalds/linux/blob/master/include/net/pkt_sched.h),
+[TBF size/drop checks](https://github.com/torvalds/linux/blob/master/net/sched/sch_tbf.c).
+
+After syncing the fix, prepare a fresh update without overwriting the prior one:
+
+```bash
+nix develop .#native-mainnet
+python prepare_mainnet_host.py --refresh --output state/mainnet-frame-fix
+sudo install -m 0644 state/mainnet-frame-fix/freya-mainnet.nix /etc/nixos/freya-mainnet.nix
+sudo nixos-rebuild test -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+```
+
+Before spending another mainnet grant, the following regression sends two full-MTU
+packets between temporary isolated namespaces, with no default route or WAN access:
+
+```bash
+sudo env SOLANA_SERVER_KERNEL_TESTS=I_AM_ON_THE_MONOLITH \
+  "$(command -v python)" -m unittest \
+  tests.test_solana_network_kernel.KernelBudgetTests.test_shaper_transmits_full_mtu_without_fragmentation
+```
+
+Only after that passes, start one bounded `freya-peer-discovery.service` diagnostic.
+Preserve the ledger and all cooldowns. The assistant ran 21 focused offline
+regressions successfully; the privileged kernel regression was added but not run
+on Penguin. No mainnet request was made by the assistant for this repair.

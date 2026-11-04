@@ -16,6 +16,10 @@ NORMAL = 120_000_000_000
 HARD = 150_000_000_000
 SAFETY_MARGIN = 5_000_000_000
 MAX_GRANT = 10_000_000
+# Ethernet framing exceeds the 1500-byte IP MTU. TBF max_size is its burst:
+# a 1500-byte bucket drops full 1514-byte frames before transmission.
+SHAPER_BURST_BYTES = 2048
+SHAPER_QUEUE_BYTES = 65536
 
 
 def calendar_month(now):
@@ -237,8 +241,11 @@ def shaping_commands(namespace='solana-budget', root_veth='solana-host', upload_
             raise ValueError('Invalid interface/namespace')
     for value in (upload_kbytes,download_kbytes):
         if type(value) is not int or not 1<=value<=1024: raise ValueError('Invalid shaper rate')
-    return [f'ip netns exec {namespace} tc qdisc replace dev eth0 root tbf rate {upload_kbytes*8}kbit burst 1500b latency 100ms',
-            f'tc qdisc replace dev {root_veth} root tbf rate {download_kbytes*8}kbit burst 1500b latency 100ms']
+    # Buffer a bounded TLS flight while pacing it, rather than dropping it into
+    # retransmission timeouts. Rates and the independent nft byte quota stay fixed.
+    settings=f'burst {SHAPER_BURST_BYTES}b limit {SHAPER_QUEUE_BYTES}'
+    return [f'ip netns exec {namespace} tc qdisc replace dev eth0 root tbf rate {upload_kbytes*8}kbit {settings}',
+            f'tc qdisc replace dev {root_veth} root tbf rate {download_kbytes*8}kbit {settings}']
 
 
 def sample_os(budget, identifier, namespace, now):
