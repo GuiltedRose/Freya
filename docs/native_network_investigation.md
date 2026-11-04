@@ -105,7 +105,7 @@ run the existing Rust TLS regression from the native-mainnet development shell:
 
 ```bash
 cargo test --manifest-path native/solana_binary/Cargo.toml \
-  tls_connect_timeout_is_distinct_from_request_timeout
+  --features rpc-engine tls_connect_timeout_is_distinct_from_request_timeout
 ```
 
 ## One explicitly authorized bounded capture
@@ -187,6 +187,109 @@ also encrypts handshake records.
 Capture requires no configuration rollback. Let the bounded session expire;
 if intervention is needed, stop `freya-peer-discovery.service` and
 `solana-budget-network.service`. Preserve all state, accounting and cooldowns.
-There is no new runtime change to deploy or regression to add until the failing
-layer is established. Native readiness still requires actual finalized-slot
-acquisition and reconstruction.
+Do not change runtime networking until the failing layer is established. The
+follow-up below adds diagnostics and offline coverage. Native readiness still
+requires actual finalized-slot acquisition and reconstruction.
+
+## Follow-up: corrected controller, remaining planning failure
+
+The operator subsequently confirmed the old deployed 1500-byte controller and
+replaced it with the 2048-byte/65536-byte implementation. Reported corrected
+sessions lasted 40.095 and 30.477 seconds, with substantially more inbound data.
+The old `planning-error.json` predates these sessions. Neither the 40-second
+deadline nor a 30-second request timeout is an established cause of these runs.
+The latest Monolith state is not available in this checkout.
+
+The implementation now publishes three private, atomic, bounded snapshots:
+
+* `planning-supervisor.json`: authoritative attempt ID, termination reason,
+  exit code/signal, elapsed time, matching last stage and validation outcome.
+* `planning-progress.json`: the same attempt ID, stage/method, start times,
+  elapsed times and completed RPC/publication stages. Local metadata validation
+  is identified separately. RPC completion means the call returned, not that
+  its metadata or an entire window passed validation.
+* `planning-error.json`: current attempt's allowlisted category, transport
+  phase, numeric status/errno/bytes and transport elapsed time when available.
+  A fresh attempt replaces stale classification with `in_progress`; success
+  sets `none`. Historical node/checkpoint/evidence data is not reset.
+
+Only compare records with equal `run_id`. Each caught-up retry has a fresh ID.
+The supervisor writes first, even before launching Python: if the IDs differ,
+Python's snapshot is stale. A `running` snapshot plus `planning_deadline`,
+`stop_requested` or `network_lease_invalid` means the supervisor interrupted it;
+Python cannot catch SIGKILL. `planner_process_failure` plus a matching error
+identifies an independent Python failure. Inspect its category and phase to
+distinguish TLS/connect, request/body timeout, throttling and authorization.
+The checkpoint's legacy generic category remains for compatibility; use the
+supervisor record for precise planning outcomes. `planning_started` without a
+terminal record requires checking systemd's result/signals (for example an OOM
+or external SIGKILL of the supervisor itself).
+
+`window.json` now includes `planning_run_id`; supervisor success requires that
+ID and the existing provenance/genesis/start checks. An older retained window
+cannot establish success for a new planner process. No incomplete window is
+published. Diagnostic write failures fail closed; disk bounds and all network
+limits remain unchanged. Deploy Python and Rust together via the refresh above.
+
+### Timing review
+
+The uncached planner makes seven sequential calls: genesis, head, history floor,
+leaders, manifest, history recheck and cluster nodes. The existing valid cache
+can omit cluster nodes. `RustIndexRpc.call` reserves shared pacing before sending
+each request, reuses its transport, and performs no planner-level request retry.
+`ProviderBudget.reserve` can sleep for a reservation or reject an active cooldown;
+neither state is cleared. The Rust transport collects the complete response
+body under its existing 30-second request timeout, with a 15-second connection
+timeout. The supervisor's 40-second duration includes all calls, pacing,
+validation, publication and subsequent native work; the lease remains 55 seconds.
+
+At the configured 16 KB/s download rate, 400 KB takes roughly 25 seconds before
+handshake, pacing and other work. Systemd byte totals include traffic beyond
+unique response bytes, so this is a capacity illustration, not measured request
+size or proof the workflow cannot finish. Current stage wall times and transport
+`elapsed_ms` on failures will bound where time is spent; connection reuse itself
+is not directly observable through reqwest. No timeout or budget change follows
+from the existing evidence.
+
+### Operator validation and one diagnostic
+
+No new tests, builds, Nix evaluation or mainnet requests were executed by the
+assistant. Passed/failed/skipped counts for the new changes are unknown; all
+new regressions are **not executed**, per operator instruction. The previously
+reported Rust TLS/RPC and kernel results apply to the earlier implementation.
+
+In `nix develop .#native-mainnet`, run:
+
+```bash
+python -m unittest tests.test_native_window_planning tests.test_rpc_diagnostics
+cargo test --manifest-path native/solana_binary/Cargo.toml --features rpc-engine rpc::tests::
+nix build --no-write-lock-file .#native-peer .#native-node
+```
+
+`native-peer` applies the local follow supervisor to the pinned Agave workspace
+and runs its deterministic fixtures, including deadline, stop, invalid lease,
+child exit, success and redaction tests. Running Cargo against
+`native/freya_node/Cargo.toml` would only test the launcher, not this supervisor.
+Retain and run the full-MTU kernel command above. These checks require the
+existing dependencies/toolchain and, for the kernel test, Monolith privileges.
+
+After these pass, use the complete refresh/review/build/dry-activate/test and
+rollback commands above. Verify both `freya-node` and `freya-peer` deployment
+references: follow code resides in the peer engine. Then, only if explicitly
+authorizing one existing capped session, run once:
+
+```bash
+sudo systemctl start freya-peer-discovery.service
+sudo systemctl show freya-peer-discovery.service \
+  -p InvocationID -p Result -p ExecMainCode -p ExecMainStatus
+sudo journalctl -u freya-peer-discovery.service -u solana-budget-network.service \
+  -b -n 100 --no-pager
+sudo cat /var/lib/freya-node/follow/planning-supervisor.json
+sudo cat /var/lib/freya-node/follow/planning-progress.json
+sudo cat /var/lib/freya-node/follow/planning-error.json
+```
+
+Inspect these even if `systemctl start` returns failure. Do not rerun automatically.
+Match IDs and timestamps, and retain the results privately. A successful planning
+record establishes only a validated planning manifest; actual finalized-slot
+acquisition and reconstruction are still required before native readiness.

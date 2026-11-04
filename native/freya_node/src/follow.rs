@@ -29,38 +29,119 @@ pub(super) fn disk_bytes(dir: &Path) -> io::Result<u64> {
     }
     Ok(total)
 }
-fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) -> io::Result<Value> {
-    loop {
-    lease()?;
-    let mut command = Command::new(env::var_os("FREYA_NODE_PYTHON").ok_or_else(invalid)?);
-    command.arg(env::var_os("FREYA_NODE_PLANNER").ok_or_else(invalid)?)
-        .arg("--config").arg(env::var_os("FREYA_NODE_EXTERNAL_CONFIG").ok_or_else(invalid)?)
-        .arg("--output").arg(dir.join("window.json"));
-    if let Some(start) = start { command.arg("--start").arg(start.to_string()); }
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-    let status = loop {
-        if Instant::now()>=deadline || stop.load(Ordering::Relaxed) || lease().is_err() {
-            let _ = child.kill(); let _ = child.wait(); return Err(io::Error::other("planning interrupted"));
+fn interruption(deadline_reached: bool, stopped: bool, lease_valid: bool) -> Option<&'static str> {
+    if stopped {Some("stop_requested")}
+    else if deadline_reached {Some("planning_deadline")}
+    else if !lease_valid {Some("network_lease_invalid")}
+    else {None}
+}
+fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
+    status: Option<std::process::ExitStatus>) -> io::Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+    let at=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+    let mut record=json!({
+        "schema":"freya-native-planning-supervisor-v1", "run_id":run_id,
+        "at":at, "elapsed_seconds":begun.elapsed().as_secs_f64(),
+        "category":category, "exit_code":status.and_then(|s|s.code()),
+        "signal":status.and_then(|s|s.signal()),
+        "window_validated":category=="planner_success"
+    });
+    if let Ok(progress)=read_json(&dir.join("planning-progress.json")) {
+        if progress["run_id"].as_str()==Some(run_id) {
+            if let Some(stage)=progress["stage"].as_str().filter(|stage|matches!(*stage,
+                "rpc_validation"|"finalized_head"|"history_floor"|"leader_schedule"|
+                "finalized_manifest"|"history_recheck"|"cluster_nodes"|"cluster_metadata"|"manifest_validation"|"window_publication")) {
+                record["stage"]=json!(stage);
+            }
+            if let Some(method)=progress["rpc_method"].as_str().filter(|method|matches!(*method,
+                "getGenesisHash"|"getSlot"|"getFirstAvailableBlock"|"getSlotLeaders"|"getBlocks"|"getClusterNodes")) {
+                record["rpc_method"]=json!(method);
+            }
+            if let Some(start)=progress["stage_started_at"].as_f64().filter(|start|start.is_finite() && *start<=at && *start>=0.0) {
+                record["stage_elapsed_seconds"]=json!(at-start);
+            }
+            if let Some(value)=progress["status"].as_str().filter(|value|matches!(*value,
+                "started"|"running"|"stage_completed"|"failed"|"caught_up"|"completed")) {
+                record["planner_status"]=json!(value);
+            }
         }
-        if let Some(status) = child.try_wait()? {
-            break status;
+    }
+    save(&dir.join("planning-supervisor.json"), &record)
+}
+fn supervise_child(child: &mut std::process::Child, deadline: Instant, stop: &AtomicBool,
+    lease_valid: impl Fn() -> bool) -> (&'static str, Option<std::process::ExitStatus>) {
+    loop {
+        // A completed child wins over a concurrent deadline observation.
+        match child.try_wait() {
+            Ok(Some(status))=>return (if status.success(){"planner_success"}
+                else if status.code()==Some(75){"planner_caught_up"}
+                else {"planner_process_failure"},Some(status)),
+            Ok(None)=>(),
+            Err(_)=>{
+                let _=child.kill();return ("planner_process_failure",child.wait().ok());
+            }
+        }
+        if let Some(reason)=interruption(Instant::now()>=deadline,stop.load(Ordering::Relaxed),lease_valid()) {
+            let _=child.kill();return (reason,child.wait().ok());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    ;
-    if status.code()==Some(75) {
-        let until=(Instant::now()+Duration::from_secs(2)).min(deadline);
-        while Instant::now()<until && !stop.load(Ordering::Relaxed) {lease()?;thread::sleep(Duration::from_millis(100));}
-        continue;
-    }
-    if !status.success() { return Err(io::Error::other("reviewed RPC plan unavailable")); }
-    let window = read_json(&dir.join("window.json"))?;
-    if window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
-        || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
-        || start.is_some_and(|s|window["start"].as_u64()!=Some(s)) { return Err(invalid()); }
-    return Ok(window);
+}
+fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) -> io::Result<Value> {
+    loop {
+        let begun=Instant::now();
+        let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let run_id=format!("{:032x}",nonce ^ u128::from(std::process::id()));
+        planning_result(dir,&run_id,begun,"planning_started",None)?;
+        // A fresh supervisor record invalidates prior progress/errors even if Python cannot start.
+        if let Some(reason)=interruption(Instant::now()>=deadline,stop.load(Ordering::Relaxed),lease().is_ok()) {
+            planning_result(dir,&run_id,begun,reason,None)?;
+            return Err(io::Error::other(reason));
+        }
+        let launched=(|| {
+            let mut command=Command::new(env::var_os("FREYA_NODE_PYTHON").ok_or_else(invalid)?);
+            command.arg(env::var_os("FREYA_NODE_PLANNER").ok_or_else(invalid)?)
+                .arg("--config").arg(env::var_os("FREYA_NODE_EXTERNAL_CONFIG").ok_or_else(invalid)?)
+                .arg("--output").arg(dir.join("window.json"))
+                .arg("--run-id").arg(&run_id);
+            if let Some(start)=start {command.arg("--start").arg(start.to_string());}
+            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        })();
+        let mut child=match launched {
+            Ok(child)=>child,
+            Err(error)=>{planning_result(dir,&run_id,begun,"planner_process_failure",None)?;return Err(error);}
+        };
+        let (reason,status)=supervise_child(&mut child,deadline,stop,||lease().is_ok());
+        if !matches!(reason,"planner_success"|"planner_caught_up") {
+            planning_result(dir,&run_id,begun,reason,status)?;
+            return Err(io::Error::other(reason));
+        }
+        let status=status.ok_or_else(invalid)?;
+        if status.code()==Some(75) {
+            planning_result(dir,&run_id,begun,"planner_caught_up",Some(status))?;
+            let until=(Instant::now()+Duration::from_secs(2)).min(deadline);
+            while Instant::now()<until {
+                if let Some(reason)=interruption(Instant::now()>=deadline,stop.load(Ordering::Relaxed),lease().is_ok()) {
+                    planning_result(dir,&run_id,begun,reason,Some(status))?;
+                    return Err(io::Error::other(reason));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            continue;
+        }
+        let validated=(|| {
+            let window=read_json(&dir.join("window.json"))?;
+            if window["planning_run_id"].as_str()!=Some(run_id.as_str())
+                || window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
+                || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+                || start.is_some_and(|s|window["start"].as_u64()!=Some(s)) {return Err(invalid());}
+            Ok(window)
+        })();
+        planning_result(dir,&run_id,begun,if validated.is_ok(){"planner_success"}else{"invalid_rpc_metadata"},Some(status))?;
+        return validated;
     }
 }
+
 pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let config = read_json(config_path)?;
     let continuous = config["continuous"].as_bool().unwrap_or(false);
@@ -256,6 +337,39 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn child_result(script: &str, duration: Duration, stopped: bool, valid: bool) -> (&'static str, Option<std::process::ExitStatus>) {
+        let mut child=Command::new("sh").arg("-c").arg(script).spawn().unwrap();
+        supervise_child(&mut child,Instant::now()+duration,&AtomicBool::new(stopped),||valid)
+    }
+    #[test] fn planner_deadline_is_distinct() {
+        assert_eq!(child_result("exec sleep 5",Duration::ZERO,false,true).0,"planning_deadline");
+    }
+    #[test] fn planner_stop_is_distinct() {
+        assert_eq!(child_result("exec sleep 5",Duration::from_secs(2),true,true).0,"stop_requested");
+    }
+    #[test] fn planner_lease_is_distinct() {
+        assert_eq!(child_result("exec sleep 5",Duration::from_secs(2),false,false).0,"network_lease_invalid");
+    }
+    #[test] fn planner_exit_is_distinct() {
+        let (reason,status)=child_result("exit 9",Duration::from_secs(5),false,true);
+        assert_eq!(reason,"planner_process_failure");assert_eq!(status.unwrap().code(),Some(9));
+    }
+    #[test] fn planner_success_is_distinct() {
+        assert_eq!(child_result("exit 0",Duration::from_secs(5),false,true).0,"planner_success");
+    }
+    #[test] fn supervisor_replaces_stale_run_without_copying_secrets() {
+        let dir=tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("planning-error.json"),b"SECRET https://private.invalid").unwrap();
+        fs::write(dir.path().join("planning-progress.json"),serde_json::to_vec(&json!({
+            "run_id":"current","stage":"finalized_head","rpc_method":"getSlot",
+            "status":"running","stage_started_at":now(),"secret":"SECRET https://private.invalid"
+        })).unwrap()).unwrap();
+        planning_result(dir.path(),"current",Instant::now(),"planning_deadline",None).unwrap();
+        let record=read_json(&dir.path().join("planning-supervisor.json")).unwrap();
+        assert_eq!(record["run_id"],"current");assert_eq!(record["category"],"planning_deadline");
+        assert!(!record.to_string().contains("SECRET"));assert_eq!(record["window_validated"],false);
+        assert_eq!(record["stage"],"finalized_head");assert_eq!(record["rpc_method"],"getSlot");
+    }
     #[test] fn response_binds_socket_nonce_slot_version_leader_and_index() {
         let (key,shreds)=super::super::acquisition::reconstruction_tests::fixture();
         let data=shreds.iter().find(|s|s.is_data()).unwrap();

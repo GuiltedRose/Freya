@@ -56,6 +56,64 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(result.exception.code, 75)
         self.assertFalse(self.output.exists())
 
+    def test_current_run_progress_and_atomic_publication(self):
+        prepare(Path('unused'), self.output, 7, 'current')
+        progress=json.loads((self.output.parent/'planning-progress.json').read_text())
+        self.assertEqual(progress['run_id'], 'current')
+        self.assertEqual(progress['status'], 'completed')
+        self.assertEqual([row['stage'] for row in progress['stages']], [
+            'rpc_validation','finalized_head','history_floor','leader_schedule',
+            'finalized_manifest','history_recheck','cluster_nodes','window_publication'])
+        self.assertTrue(all(row['elapsed_seconds'] >= 0 for row in progress['stages']))
+        self.assertLess(len(json.dumps(progress)), 8192)
+        self.assertEqual((self.output.parent/'planning-progress.json').stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.output.parent/'planning-progress.pending').exists())
+
+    def test_transport_failure_stage_and_redaction(self):
+        for category, phase in [('request_timeout','response_body'), ('connect_timeout','connect')]:
+            with self.subTest(category=category):
+                error=ConnectionError('SECRET https://private.invalid/token response body')
+                error.category=category;error.phase=phase;error.elapsed_ms=30000;error.bytes_received=42
+                self.rpc.validate.side_effect=error
+                with self.assertRaises(ConnectionError):
+                    prepare(Path('unused'), self.output, 7, category)
+                record=json.loads((self.output.parent/'planning-error.json').read_text())
+                self.assertEqual(record['category'], category)
+                self.assertEqual(record['phase'], phase)
+                self.assertEqual(record['rpc_method'], 'getGenesisHash')
+                self.assertEqual(record['bytes_received'], 42)
+                for name in ('planning-error.json','planning-progress.json'):
+                    text=(self.output.parent/name).read_text()
+                    self.assertNotIn('SECRET', text);self.assertNotIn('private.invalid', text)
+                self.assertFalse(self.output.exists())
+
+    def test_stale_error_followed_by_uncatchable_interruption(self):
+        error_path=self.output.parent/'planning-error.json'
+        error_path.write_text('{"run_id":"old","category":"connect_timeout"}')
+        class Killed(BaseException): pass
+        self.rpc.validate.side_effect=Killed()
+        with self.assertRaises(Killed):
+            prepare(Path('unused'), self.output, 7, 'new')
+        record=json.loads(error_path.read_text())
+        self.assertEqual(record['run_id'], 'new')
+        self.assertEqual(record['category'], 'in_progress')
+        progress=json.loads((self.output.parent/'planning-progress.json').read_text())
+        self.assertEqual(progress['run_id'], 'new')
+        self.assertEqual(progress['stage'], 'rpc_validation')
+        self.assertEqual(progress['status'], 'running')
+        self.assertFalse(self.output.exists())
+
+    def test_provider_and_metadata_categories_are_bounded(self):
+        from prepare_native_window import planning_error
+        from provider_limits import ProviderBackoff
+        from rpc_contract import http_error
+        for error, category in [(ProviderBackoff(10),'throttled'),
+                                (http_error(401,'private'),'authorization_denied'),
+                                (ValueError('SECRET'),'invalid_rpc_metadata')]:
+            self.assertEqual(planning_error(error)['category'], category)
+            self.assertNotIn('SECRET',json.dumps(planning_error(error)))
+
+
 
 class BootstrapSelectionTests(unittest.TestCase):
     def test_public_compatible_unique_candidates_are_bounded(self):
