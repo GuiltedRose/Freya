@@ -16,6 +16,66 @@ is justified yet. Keep the DNS and full-frame shaping repairs.
 
 ## Operator checks before another session
 
+### Refreshing a deployment that keeps using an old build
+
+This repository's `flake.lock` pins dependencies, not Freya itself.
+`prepare_mainnet_host.py` writes immutable application and module store paths
+into `freya-mainnet.nix`. Rebuilding a bundle or updating dependency locks does
+not replace that installed add-on. Refresh it from the intended checkout instead.
+
+Prerequisites: sync the intended code to Monolith, preserve the existing private
+configuration and ledgers, and wait until all three Freya units are inactive or
+failed. Review `git status --short`; Git-backed flakes omit untracked files.
+The existing `/etc/nixos/freya-diagnostic-host.nix` wrapper must already be the
+reviewed diagnostic configuration. These commands build and temporarily activate
+configuration; they do not authorize starting another network session.
+
+```bash
+cd ~/repos/Freya
+git status --short
+git rev-parse HEAD
+nix develop .#native-mainnet
+```
+
+Inside that shell:
+
+```bash
+refresh_dir="state/mainnet-refresh-$(date -u +%Y%m%dT%H%M%SZ)"
+python prepare_mainnet_host.py --refresh --output "$refresh_dir"
+diff -u /etc/nixos/freya-mainnet.nix "$refresh_dir/freya-mainnet.nix"
+```
+
+Review the diff: new immutable store paths are expected; identity, ledger paths,
+network budgets and authorization must retain their intended values. `diff`
+returns 1 when files differ. Then preserve the installed add-on and install the
+reviewed replacement:
+
+```bash
+sudo cp -a /etc/nixos/freya-mainnet.nix "$refresh_dir/freya-mainnet.before.nix"
+sudo install -m 0644 "$refresh_dir/freya-mainnet.nix" /etc/nixos/freya-mainnet.nix
+sudo nixos-rebuild build -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+sudo nixos-rebuild dry-activate -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+sudo nixos-rebuild test -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+sudo systemctl show freya-peer-discovery.service solana-budget-network.service -p ExecStart
+```
+
+Run each command only after the preceding command succeeds and its output has
+been reviewed. Compare active `ExecStart` paths against the generated add-on;
+the controller path is derived from the imported source module. If the relevant
+source is unchanged, identical store paths are expected and correct. Do not
+change dependency pins merely to force a new hash. Run the focused validations
+below before manually authorizing another diagnostic.
+
+Rollback using the same shell's `refresh_dir` (or its recorded absolute path):
+
+```bash
+sudo systemctl stop freya-peer-discovery.service freya-node.service solana-budget-network.service
+sudo install -m 0644 "$refresh_dir/freya-mainnet.before.nix" /etc/nixos/freya-mainnet.nix
+sudo nixos-rebuild test -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+```
+
+Do not restart services automatically or restore/reset data and accounting.
+
 No commands below have been executed by the assistant. Keep unit output and
 captures private: configuration and captured traffic can contain credentials.
 Do not upload complete environment files or packet captures publicly.
