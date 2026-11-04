@@ -68,7 +68,7 @@ fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
     }
     save(&dir.join("planning-supervisor.json"), &record)
 }
-fn supervise_child(child: &mut std::process::Child, deadline: Instant, stop: &AtomicBool,
+fn supervise_child(child: &mut std::process::Child, deadline: Option<Instant>, stop: &AtomicBool,
     lease_valid: impl Fn() -> bool) -> (&'static str, Option<std::process::ExitStatus>) {
     loop {
         // A completed child wins over a concurrent deadline observation.
@@ -81,20 +81,20 @@ fn supervise_child(child: &mut std::process::Child, deadline: Instant, stop: &At
                 let _=child.kill();return ("planner_process_failure",child.wait().ok());
             }
         }
-        if let Some(reason)=interruption(Instant::now()>=deadline,stop.load(Ordering::Relaxed),lease_valid()) {
+        if let Some(reason)=interruption(deadline.is_some_and(|until|Instant::now()>=until),stop.load(Ordering::Relaxed),lease_valid()) {
             let _=child.kill();return (reason,child.wait().ok());
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
-fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) -> io::Result<Value> {
+fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> {
     loop {
         let begun=Instant::now();
         let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
         let run_id=format!("{:032x}",nonce ^ u128::from(std::process::id()));
         planning_result(dir,&run_id,begun,"planning_started",None)?;
         // A fresh supervisor record invalidates prior progress/errors even if Python cannot start.
-        if let Some(reason)=interruption(Instant::now()>=deadline,stop.load(Ordering::Relaxed),lease().is_ok()) {
+        if let Some(reason)=interruption(false,stop.load(Ordering::Relaxed),lease().is_ok()) {
             planning_result(dir,&run_id,begun,reason,None)?;
             return Err(io::Error::other(reason));
         }
@@ -111,7 +111,7 @@ fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) ->
             Ok(child)=>child,
             Err(error)=>{planning_result(dir,&run_id,begun,"planner_process_failure",None)?;return Err(error);}
         };
-        let (reason,status)=supervise_child(&mut child,deadline,stop,||lease().is_ok());
+        let (reason,status)=supervise_child(&mut child,None,stop,||lease().is_ok());
         if !matches!(reason,"planner_success"|"planner_caught_up") {
             planning_result(dir,&run_id,begun,reason,status)?;
             return Err(io::Error::other(reason));
@@ -119,9 +119,9 @@ fn plan(dir: &Path, start: Option<u64>, deadline: Instant, stop: &AtomicBool) ->
         let status=status.ok_or_else(invalid)?;
         if status.code()==Some(75) {
             planning_result(dir,&run_id,begun,"planner_caught_up",Some(status))?;
-            let until=(Instant::now()+Duration::from_secs(2)).min(deadline);
+            let until=Instant::now()+Duration::from_secs(2);
             while Instant::now()<until {
-                if let Some(reason)=interruption(Instant::now()>=deadline,stop.load(Ordering::Relaxed),lease().is_ok()) {
+                if let Some(reason)=interruption(false,stop.load(Ordering::Relaxed),lease().is_ok()) {
                     planning_result(dir,&run_id,begun,reason,Some(status))?;
                     return Err(io::Error::other(reason));
                 }
@@ -185,7 +185,6 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         publish(dir,&state)?;return Err(invalid());
     }
     let initial = counters()?;
-    let deadline = Instant::now()+Duration::from_secs(seconds);
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT,stop.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGTERM,stop.clone())?;
@@ -201,11 +200,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let outcome = (|| -> io::Result<()> {
         let mut window = if dir.join("window.json").exists() && state["next_slot"].is_u64() {
             read_json(&dir.join("window.json"))?
-        } else { plan(dir,state["next_slot"].as_u64().or(config["initial_slot"].as_u64()),deadline,&stop)? };
+        } else { plan(dir,state["next_slot"].as_u64().or(config["initial_slot"].as_u64()),&stop)? };
         if window["schema"]!="freya-native-window-v1" || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" { return Err(invalid()); }
         if bootstraps.is_empty() {
             if window["bootstrap_nodes"].as_array().is_none_or(|rows|rows.is_empty()) {
-                window=plan(dir,window["start"].as_u64(),deadline,&stop)?;
+                window=plan(dir,window["start"].as_u64(),&stop)?;
             }
             if window["bootstrap_provenance"]!="reviewed_rpc_claim" {return Err(invalid());}
             let peers=window["bootstrap_nodes"].as_array().ok_or_else(invalid)?;
@@ -222,6 +221,8 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         if state["rpc_source_identity"].as_str().is_some_and(|old|window["source_identity"].as_str()!=Some(old)) {return Err(invalid());}
         state["bootstrap_peers"]=json!(bootstraps.iter().map(ToString::to_string).collect::<Vec<_>>());
         publish(dir,&state)?;
+        // RPC planning is bounded by the independent network lease, not the repair timer.
+        let deadline=Instant::now()+Duration::from_secs(seconds);
         let version = bounded(&window,"shred_version",1,65535)? as u16;
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
@@ -255,7 +256,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 if cursor<first || cursor>end+1 { return Err(invalid()); }
                 if cursor>end {
                     state["state"]=json!("following"); publish(dir,&state)?;
-                    window=plan(dir,Some(cursor),deadline,&stop)?;
+                    window=plan(dir,Some(cursor),&stop)?;
                     continue;
                 }
                 let rows=window["slots"].as_array().ok_or_else(invalid)?;
@@ -339,10 +340,19 @@ mod tests {
     use super::*;
     fn child_result(script: &str, duration: Duration, stopped: bool, valid: bool) -> (&'static str, Option<std::process::ExitStatus>) {
         let mut child=Command::new("sh").arg("-c").arg(script).spawn().unwrap();
-        supervise_child(&mut child,Instant::now()+duration,&AtomicBool::new(stopped),||valid)
+        supervise_child(&mut child,Some(Instant::now()+duration),&AtomicBool::new(stopped),||valid)
     }
     #[test] fn planner_deadline_is_distinct() {
         assert_eq!(child_result("exec sleep 5",Duration::ZERO,false,true).0,"planning_deadline");
+    }
+    #[test] fn planning_without_local_deadline_still_obeys_lease() {
+        let mut child=Command::new("sh").arg("-c").arg("exec sleep 5").spawn().unwrap();
+        assert_eq!(supervise_child(&mut child,None,&AtomicBool::new(false),||false).0,
+            "network_lease_invalid");
+    }
+    #[test] fn planning_without_local_deadline_can_complete() {
+        let mut child=Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        assert_eq!(supervise_child(&mut child,None,&AtomicBool::new(false),||true).0,"planner_success");
     }
     #[test] fn planner_stop_is_distinct() {
         assert_eq!(child_result("exec sleep 5",Duration::from_secs(2),true,true).0,"stop_requested");

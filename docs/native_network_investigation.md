@@ -193,6 +193,30 @@ requires actual finalized-slot acquisition and reconstruction.
 
 ## Follow-up: corrected controller, remaining planning failure
 
+### Confirmed planning deadline: current correction
+
+The operator subsequently confirmed the 40-second planning deadline as the
+failure cause. Planning now runs without that local deadline; the supervisor
+still checks explicit stop and the existing network lease every 100 ms, including
+caught-up waits. No network-session renewal is introduced. The configured
+40-second native repair timer starts after initial planning/bootstrap metadata
+is ready. It does not extend the independent 55-second lease or byte allowance;
+if planning exhausts the lease, the session still stops. The 15/30-second HTTP
+timeouts, firewall, shapers, ledgers and persistent evidence remain unchanged.
+
+The timing discussion below describes the investigation before this correction.
+The existing supervisor supports deadline classification for regression coverage,
+but production planning no longer supplies a local deadline. Added offline
+regressions cover completion without a local deadline and continued lease
+enforcement. No tests or builds were executed for this correction.
+
+For an operator-controlled retry, use the refresh/review/backup/build/temporary
+activation procedure above, then the single manual diagnostic command below.
+The changed component is `freya-peer`; a bundle-only rebuild does not activate
+it. Roll back with the saved add-on as documented above. Inspect current-run
+supervisor/progress records after the attempt, even if the service fails. Do not
+automatically retry or renew the lease.
+
 The operator subsequently confirmed the old deployed 1500-byte controller and
 replaced it with the 2048-byte/65536-byte implementation. Reported corrected
 sessions lasted 40.095 and 30.477 seconds, with substantially more inbound data.
