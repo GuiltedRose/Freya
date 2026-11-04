@@ -50,7 +50,9 @@ in {
         ProtectHome = true; PrivateTmp = true; CapabilityBoundingSet = "";
         MemoryAccounting = true; MemoryHigh = "1G"; MemoryMax = "2G"; MemorySwapMax = 0;
         TasksMax = 128; LimitNOFILE = 128;
-        RuntimeMaxSec = if cfg.continuousMode then "infinity" else 52;
+        # The required network controller owns the bounded lease and stops this
+        # bound service on expiry. Avoid a competing wall-clock planning cutoff.
+        RuntimeMaxSec = "infinity";
         TimeoutStopSec = 3;
         ReadWritePaths = [ peerState (builtins.dirOf cfg.providerLedger) ];
       };

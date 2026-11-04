@@ -195,6 +195,20 @@ requires actual finalized-slot acquisition and reconstruction.
 
 ### Confirmed planning deadline: current correction
 
+The operator then identified systemd's `RuntimeMaxSec=52` as the next cutoff.
+The peer-discovery unit now sets `RuntimeMaxSec=infinity`; its required network
+controller and `BindsTo` relationship still stop it when the existing 55-second
+lease ends. This removes the competing service timer, not the network session
+limit. Refresh and activate the generated add-on using the commands above, then
+verify before authorizing another diagnostic:
+
+```bash
+sudo systemctl show freya-peer-discovery.service -p RuntimeMaxUSec -p BindsTo
+```
+
+Expect `RuntimeMaxUSec=infinity` and a binding to
+`solana-budget-network.service`. No tests or builds were run for this change.
+
 The operator subsequently confirmed the 40-second planning deadline as the
 failure cause. Planning now runs without that local deadline; the supervisor
 still checks explicit stop and the existing network lease every 100 ms, including
