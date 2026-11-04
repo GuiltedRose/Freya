@@ -56,7 +56,7 @@ in {
         iifname "${cfg.uplinkInterface}" oifname "solana-host" ip daddr 169.254.203.2 udp dport ${toString cfg.peerPorts.start}-${toString cfg.peerPorts.end} accept
       ''}
     '';
-    systemd.tmpfiles.rules = [ "d /var/lib/solana-network 0700 root root -" ];
+    systemd.tmpfiles.rules = [ "d /var/lib/solana-network 0700 root root -" "d /run/solana-budget-dns 0755 root root -" ];
     systemd.services = {
       solana-budget-network = {
         description = "Single bounded Solana namespace session (no automatic renewal)";
@@ -86,6 +86,7 @@ in {
       after = [ "solana-budget-network.service" ];
       serviceConfig = {
         NetworkNamespacePath = "/run/netns/solana-budget";
+        BindReadOnlyPaths = [ "/run/solana-budget-dns/resolv.conf:/etc/resolv.conf" ];
         NoNewPrivileges = true;
         CapabilityBoundingSet = lib.mkForce "";
         AmbientCapabilities = lib.mkForce "";

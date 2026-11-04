@@ -8,6 +8,25 @@ from pathlib import Path
 import time
 
 
+def planning_error(error):
+    """Only bounded categories/codes, never exception text or endpoint details."""
+    record={'schema':'freya-native-planning-error-v1','at':time.time(),
+            'error_type':type(error).__name__ if type(error).__name__ in
+            ('ValueError','PermissionError','FileNotFoundError','ConnectionError','SourceAccessBlocked',
+             'ProviderBackoff','RpcEvidenceError','TimeoutError','RuntimeError') else 'PlannerError'}
+    method=getattr(error,'freya_rpc_method',None)
+    if method in ('getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
+        record['rpc_method']=method
+    category=getattr(error,'category',None)
+    if category in ('connect','connect_timeout','request_timeout','transport','throttled','cancelled',
+                    'transport_unavailable','authorization_denied'):
+        record['category']=category
+    for name in ('http_status','socket_errno','rpc_code'):
+        value=getattr(error,name,None)
+        if type(value) is int and -2147483648<=value<=2147483647:record[name]=value
+    return record
+
+
 def bootstrap_nodes(cluster, version):
     """Public IPv4 gossip candidates from reviewed RPC claims, not peer proofs."""
     from solders.pubkey import Pubkey
@@ -43,11 +62,20 @@ def prepare(config_path, output, start=None):
     if len(rows) != 1 or rows[0].get('backend') != 'rust':
         raise ValueError('One explicitly reviewed Rust RPC required')
     rpc = make_rpc(rows[0])
+    def call(method,params):
+        try:return rpc.call(method,params)
+        except Exception as error:
+            error.freya_rpc_method=method
+            raise
     try:
         from provider_limits import BUDGET
         identity = BUDGET.identity(rows[0]['url'])
-        rpc.validate()  # Existing mainnet genesis, policy, boundary and shared pacing.
-        head = rpc.call('getSlot', [{'commitment': 'finalized'}])
+        try:
+            rpc.validate()  # Existing mainnet genesis, policy, boundary and shared pacing.
+        except Exception as error:
+            error.freya_rpc_method='getGenesisHash'
+            raise
+        head = call('getSlot', [{'commitment': 'finalized'}])
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
         start = max(0, head - 3) if start is None else start
@@ -57,12 +85,12 @@ def prepare(config_path, output, start=None):
             raise ValueError('Window start is beyond finalized head')
         end = min(head, start + 3)
         def check_history():
-            floor = rpc.call('getFirstAvailableBlock', [])
+            floor = call('getFirstAvailableBlock', [])
             if type(floor) is not int or not 0 <= floor <= start:
                 raise ValueError('Historical window unavailable; preserve unresolved gap')
         check_history()
-        leaders = rpc.call('getSlotLeaders', [start, end - start + 1])
-        slots = rpc.call('getBlocks', [start, end, {'commitment': 'finalized'}])
+        leaders = call('getSlotLeaders', [start, end - start + 1])
+        slots = call('getBlocks', [start, end, {'commitment': 'finalized'}])
         check_history()  # Retention can advance while the manifest is being fetched.
         if (not isinstance(leaders, list) or len(leaders) != end - start + 1
                 or not isinstance(slots, list) or any(type(s) is not int for s in slots)
@@ -78,7 +106,7 @@ def prepare(config_path, output, start=None):
                     and type(prior.get('shred_version')) is int and 1 <= prior['shred_version'] <= 65535):
                 cached = prior['shred_version']
         reuse = cached and isinstance(prior.get('bootstrap_nodes'), list) and prior['bootstrap_nodes']
-        cluster = [] if reuse else rpc.call('getClusterNodes', [])
+        cluster = [] if reuse else call('getClusterNodes', [])
         if not isinstance(cluster, list) or len(cluster) > 20000:
             raise ValueError('Invalid cluster metadata')
         versions = Counter(row.get('shredVersion') for row in cluster if isinstance(row, dict)
@@ -117,8 +145,13 @@ def main():
     args = parser.parse_args()
     try:
         prepare(args.config, args.output, args.start)
-    except Exception:
-        raise SystemExit('Native window planning failed; checkpoint preserved (details omitted)') from None
+    except Exception as error:
+        record=planning_error(error)
+        temporary=args.output.parent/'planning-error.pending'
+        with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600),'w') as stream:
+            json.dump(record,stream);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,args.output.parent/'planning-error.json')
+        raise SystemExit('Native window planning failed; see private planning-error.json') from None
 
 
 if __name__ == '__main__':

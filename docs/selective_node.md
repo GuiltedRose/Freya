@@ -350,3 +350,47 @@ Missing ledgers are never automatically recreated. Renewal occurs transactionall
 on the first accounting operation of the month, even after downtime. It does not
 start services, issue grants or authorize another network session. The 120 GB
 normal / 150 GB hard policy and existing safety margin remain unchanged.
+
+### Namespace DNS repair
+
+An isolated namespace cannot use the host's `127.0.0.53` DNS stub. Before issuing
+a grant, the controller now selects existing root-owned upstream IPv4 resolvers
+from systemd-resolved/NetworkManager/direct host resolver files. It publishes a
+private runtime resolver file; consumers bind it read-only over their own
+`/etc/resolv.conf`. Host DNS settings, Unix-socket restrictions, IPv6 policy and
+all traffic/authorization caps remain unchanged. No public resolver is invented.
+Absent usable configured upstreams block setup before charging another grant.
+
+The planner also writes redacted method/category/status/errno fields to
+`planning-error.json` on failure. Exception text and endpoint URLs are excluded.
+A 15-second early planning failure is consistent with resolver/connect timeout;
+the prior generic status alone did not prove its exact cause.
+
+To update the existing inactive installation on Monolith after syncing the code:
+
+```bash
+nix develop .#native-mainnet
+python prepare_mainnet_host.py --refresh --output state/mainnet-dns-fix
+```
+
+Review the newly generated add-on. Then preserve the original and temporarily
+activate the update, retaining the existing wrapper, ledgers and all node state:
+
+```bash
+sudo cp -an /etc/nixos/freya-mainnet.nix /etc/nixos/freya-mainnet.before-dns.nix
+sudo install -m 0644 state/mainnet-dns-fix/freya-mainnet.nix /etc/nixos/freya-mainnet.nix
+sudo nixos-rebuild test -I nixos-config=/etc/nixos/freya-diagnostic-host.nix
+```
+
+One subsequent manual diagnostic consumes one additional existing capped grant:
+
+```bash
+sudo systemctl start freya-peer-discovery.service
+```
+
+After its bounded session, inspect both service journals and, if planning failed,
+`/var/lib/freya-node/follow/planning-error.json`. Do not rerun initialization or
+reset provider cooldowns. Restore the saved add-on and apply the same temporary
+host configuration to roll this update back. The fix passed 25 focused offline
+planner/DNS/budget/controller tests plus Python/Nix syntax checks; its Monolith
+runtime behavior has not been verified by the assistant.

@@ -5,6 +5,7 @@ or accounting reset. Kernel lease remains the fail-closed backstop if Python die
 """
 import argparse
 import json
+import ipaddress
 import os
 from pathlib import Path
 import signal
@@ -18,6 +19,44 @@ VETH='solana-host'
 ADDRESS='169.254.203.2'
 OWNED=Path('/run/solana-budget-owned')
 STATUS=Path('/run/solana-budget-status.json')
+DNS=Path('/run/solana-budget-dns/resolv.conf')
+
+
+def upstream_resolvers(text):
+    addresses=[]
+    for line in text.splitlines():
+        fields=line.split('#',1)[0].split()
+        if len(fields)!=2 or fields[0]!='nameserver':continue
+        try: address=ipaddress.IPv4Address(fields[1])
+        except ValueError:continue
+        if (address.is_loopback or address.is_unspecified or address.is_multicast
+                or address.is_reserved or address in ipaddress.IPv4Network('169.254.203.0/30')):continue
+        if str(address) not in addresses:addresses.append(str(address))
+        if len(addresses)==3:break
+    return addresses
+
+
+def prepare_dns():
+    # Copy existing host upstreams; a host-loopback stub is not reachable in the namespace.
+    candidates=('/run/systemd/resolve/resolv.conf','/run/NetworkManager/no-stub-resolv.conf',
+                '/run/NetworkManager/resolv.conf','/etc/resolv.conf')
+    addresses=[]
+    for name in candidates:
+        try:
+            path=Path(name);info=path.stat()
+            if info.st_uid!=0 or info.st_mode & 0o022 or not path.is_file() or info.st_size>65536:continue
+            addresses=upstream_resolvers(path.read_text())
+        except OSError:continue
+        if addresses:break
+    if not addresses:raise ValueError('No configured non-loopback IPv4 DNS upstream; no grant issued')
+    parent=DNS.parent.stat()
+    if parent.st_uid!=0 or parent.st_mode & 0o022 or DNS.parent.is_symlink():
+        raise ValueError('Untrusted namespace DNS directory')
+    temporary=DNS.with_suffix('.pending')
+    with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600),'w') as stream:
+        stream.write(''.join('nameserver '+address+'\n' for address in addresses)+'options timeout:2 attempts:2\n')
+        stream.flush();os.fsync(stream.fileno())
+    temporary.chmod(0o644);os.replace(temporary,DNS)
 
 
 def run(*args, input=None, check=True):
@@ -106,6 +145,7 @@ def start(config):
     # Refuse unknown existing namespace ownership; cleanup is an explicit stop action.
     if Path('/run/netns/'+NS).exists():
         raise ValueError('Existing namespace requires stopped-service cleanup before restart')
+    prepare_dns()  # Before debiting a session; never invent public DNS servers.
     OWNED.write_text('solana-budget-network service owns this namespace\n')
     OWNED.chmod(0o600)
     grant=budget.grant(config['sessionBytes'],time.time())

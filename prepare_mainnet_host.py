@@ -58,7 +58,20 @@ def prepare(args):
     uplink = default_uplink()
     for unit in ('freya-peer-discovery.service','freya-node.service','solana-budget-network.service'):
         state = capture('systemctl','show',unit,'--property=LoadState','--value')
-        if state != 'not-found':
+        if args.refresh:
+            if state != 'loaded':raise PreparationError('Refresh requires the already installed Freya services')
+            active=capture('systemctl','show',unit,'--property=ActiveState','--value')
+            if active not in ('inactive','failed'):
+                raise PreparationError('Wait for the existing session to finish before refreshing: '+unit)
+            if unit != 'solana-budget-network.service':
+                owner=capture('systemctl','show',unit,'--property=User','--value')
+                if owner != pwd.getpwuid(os.getuid()).pw_name:
+                    raise PreparationError('Installed collector identity differs; preserve configuration for review')
+                import shlex
+                paths=shlex.split(capture('systemctl','show',unit,'--property=ReadWritePaths','--value'))
+                if str(ledger.parent) not in paths:
+                    raise PreparationError('Installed shared-ledger mapping differs; explicit review required')
+        elif state != 'not-found':
             raise PreparationError('Existing service requires configuration review, not replacement: ' + unit)
     # Build only; the operator runs this preparation command explicitly.
     print('Building the pinned node package; no service will start.', flush=True)
@@ -138,6 +151,7 @@ def main():
     parser.add_argument('--config',type=Path,default=ROOT/'onchain_pipeline.json')
     parser.add_argument('--index-db',type=Path,default=ROOT/'state/onchain/index.sqlite')
     parser.add_argument('--output',type=Path,default=ROOT/'state/mainnet-host-setup')
+    parser.add_argument('--refresh',action='store_true',help='Prepare an update for matching, inactive installed Freya services')
     try:
         prepare(parser.parse_args())
     except PreparationError as error:
