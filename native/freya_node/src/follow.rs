@@ -48,10 +48,27 @@ fn checked_source<'a>(window: &'a Value, state: &Value) -> io::Result<&'a Value>
     if !prior.is_null() && structured_source(prior)?!=source {return Err(invalid());}
     Ok(source)
 }
+fn initialize_window_state(window: &Value, state: &mut Value, version: u16) -> io::Result<()> {
+    let first=window["start"].as_u64().ok_or_else(invalid)?;
+    let end=window["end"].as_u64().ok_or_else(invalid)?;
+    let source=checked_source(window,state)?.clone();
+    if end<first || end-first>3 || bounded(window,"shred_version",1,65535)?!=u64::from(version) {
+        return Err(invalid());
+    }
+    if state["window_start"].as_u64()==Some(first) {
+        let cursor=state["next_slot"].as_u64().ok_or_else(invalid)?;
+        if cursor<first || cursor>end.saturating_add(1) {return Err(invalid());}
+    }
+    state["rpc_source_identity"]=source;
+    if state["window_start"].as_u64()!=Some(first) {
+        state["window_start"]=json!(first);state["next_slot"]=json!(first);state["attempts"]=json!(0);
+    }
+    Ok(())
+}
 fn interruption(deadline_reached: bool, stopped: bool, lease_valid: bool) -> Option<&'static str> {
-    if stopped {Some("stop_requested")}
+    if !lease_valid {Some("network_lease_invalid")}
+    else if stopped {Some("stop_requested")}
     else if deadline_reached {Some("planning_deadline")}
-    else if !lease_valid {Some("network_lease_invalid")}
     else {None}
 }
 fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
@@ -87,14 +104,22 @@ fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
     }
     save(&dir.join("planning-supervisor.json"), &record)
 }
+fn exited_planner(status: std::process::ExitStatus, stopped: bool, lease_valid: bool) -> &'static str {
+    use std::os::unix::process::ExitStatusExt;
+    if status.success() {"planner_success"}
+    else if status.code()==Some(75) {"planner_caught_up"}
+    else if matches!(status.signal(),Some(15)|Some(2)) {
+        if !lease_valid {"network_lease_invalid"}
+        else if stopped {"stop_requested"}
+        else {"planner_external_signal"}
+    } else {"planner_process_failure"}
+}
 fn supervise_child(child: &mut std::process::Child, deadline: Option<Instant>, stop: &AtomicBool,
     lease_valid: impl Fn() -> bool) -> (&'static str, Option<std::process::ExitStatus>) {
     loop {
         // A completed child wins over a concurrent deadline observation.
         match child.try_wait() {
-            Ok(Some(status))=>return (if status.success(){"planner_success"}
-                else if status.code()==Some(75){"planner_caught_up"}
-                else {"planner_process_failure"},Some(status)),
+            Ok(Some(status))=>return (exited_planner(status,stop.load(Ordering::Relaxed),lease_valid()),Some(status)),
             Ok(None)=>(),
             Err(_)=>{
                 let _=child.kill();return ("planner_process_failure",child.wait().ok());
@@ -113,10 +138,12 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
         let run_id=format!("{:032x}",nonce ^ u128::from(std::process::id()));
         planning_result(dir,&run_id,begun,"planning_started",None)?;
         // A fresh supervisor record invalidates prior progress/errors even if Python cannot start.
-        if let Some(reason)=interruption(false,stop.load(Ordering::Relaxed),lease().is_ok()) {
+        let authorization=lease();
+        if let Some(reason)=interruption(false,stop.load(Ordering::Relaxed),authorization.is_ok()) {
             planning_result(dir,&run_id,begun,reason,None)?;
             return Err(io::Error::other(reason));
         }
+        let expires=authorization?["expires"].as_f64().ok_or_else(invalid)?;
         let launched=(|| {
             let mut command=Command::new(env::var_os("FREYA_NODE_PYTHON").ok_or_else(invalid)?);
             command.arg(env::var_os("FREYA_NODE_PLANNER").ok_or_else(invalid)?)
@@ -130,7 +157,11 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
             Ok(child)=>child,
             Err(error)=>{planning_result(dir,&run_id,begun,"planner_process_failure",None)?;return Err(error);}
         };
-        let (reason,status)=supervise_child(&mut child,None,stop,||lease().is_ok());
+        let (observed,status)=supervise_child(&mut child,None,stop,||lease().is_ok());
+        let at=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+        let reason=if matches!(observed,"network_lease_invalid"|"stop_requested"|"planner_external_signal") && at>=expires {
+            "network_lease_expired"
+        } else {observed};
         if !matches!(reason,"planner_success"|"planner_caught_up") {
             planning_result(dir,&run_id,begun,reason,status)?;
             return Err(io::Error::other(reason));
@@ -216,11 +247,13 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let request_key = read_keypair_file(&key_path).map_err(|_|invalid())?;
     if state["node_identity"].as_str().is_some_and(|id|id!=request_key.pubkey().to_string()) {return Err(invalid());}
     state["node_identity"]=json!(request_key.pubkey().to_string());publish(dir,&state)?;
+    let mut failure_stage="rpc_planning";
     let outcome = (|| -> io::Result<()> {
         let mut window = if dir.join("window.json").exists() && state["next_slot"].is_u64() {
             read_json(&dir.join("window.json"))?
         } else { plan(dir,state["next_slot"].as_u64().or(config["initial_slot"].as_u64()),&stop)? };
         if window["schema"]!="freya-native-window-v1" || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" { return Err(invalid()); }
+        failure_stage="bootstrap_metadata";
         if bootstraps.is_empty() {
             if window["bootstrap_nodes"].as_array().is_none_or(|rows|rows.is_empty()) {
                 window=plan(dir,window["start"].as_u64(),&stop)?;
@@ -237,17 +270,23 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
             state["bootstrap_source"]=json!("reviewed_rpc_claim");
             state["bootstrap_nodes"]=window["bootstrap_nodes"].clone();
         } else {state["bootstrap_source"]=json!("explicit_configuration");}
+        failure_stage="rpc_source_identity";
         checked_source(&window,&state)?;
         state["bootstrap_peers"]=json!(bootstraps.iter().map(ToString::to_string).collect::<Vec<_>>());
         publish(dir,&state)?;
         // RPC planning is bounded by the independent network lease, not the repair timer.
         let deadline=Instant::now()+Duration::from_secs(seconds);
+        failure_stage="native_socket_initialization";
         let version = bounded(&window,"shred_version",1,65535)? as u16;
+        initialize_window_state(&window,&mut state,version)?;
+        state["state"]=json!("discovering");publish(dir,&state)?;
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        failure_stage="gossip_initialization";
         let (service,_,cluster) = make_node(key,&bootstraps,stop.clone(),None,version,true,SocketAddrSpace::Global);
         let session = (|| -> io::Result<()> {
             while Instant::now()<deadline && !stop.load(Ordering::Relaxed) {
+                failure_stage="native_network_or_resource_policy";
                 lease()?;
                 let usage = counters()?;
                 let rx=usage.0.checked_sub(initial.0).ok_or_else(invalid)?;
@@ -257,14 +296,10 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 state["ram_bytes"]=json!(fs::read_to_string("/proc/self/status").ok().and_then(|s|
                     s.lines().find_map(|l|l.strip_prefix("VmRSS:").and_then(|v|v.split_whitespace().next()?.parse::<u64>().ok()).map(|kb|kb*1024))));
                 if rx.saturating_add(tx)>=traffic_cap || disk.saturating_add(65536)>disk_cap { return Err(io::Error::other("resource bound")); }
+                failure_stage="native_window_validation";
+                initialize_window_state(&window,&mut state,version)?;
                 let first=window["start"].as_u64().ok_or_else(invalid)?;
-                let source=checked_source(&window,&state)?.clone();
-                state["rpc_source_identity"]=source;
                 let end=window["end"].as_u64().ok_or_else(invalid)?;
-                if end<first || end-first>3 || bounded(&window,"shred_version",1,65535)?!=u64::from(version) { return Err(invalid()); }
-                if state["window_start"].as_u64()!=Some(first) {
-                    state["window_start"]=json!(first); state["next_slot"]=json!(first);state["attempts"]=json!(0);
-                }
                 let cursor=state["next_slot"].as_u64().ok_or_else(invalid)?;
                 state["observed_network_slot"]=window["observed_finalized_head"].clone();
                 state["network_progress_provenance"]=json!("finalized RPC claim");
@@ -274,6 +309,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 if cursor<first || cursor>end+1 { return Err(invalid()); }
                 if cursor>end {
                     state["state"]=json!("following"); publish(dir,&state)?;
+                    failure_stage="rpc_planning";
                     window=plan(dir,Some(cursor),&stop)?;
                     continue;
                 }
@@ -291,6 +327,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 if !base.exists(){fs::create_dir(&base)?;fs::set_permissions(&base,fs::Permissions::from_mode(0o700))?;}
                 if !fs::symlink_metadata(&base)?.is_dir() || base.join("conflict.json").exists() {return Err(invalid());}
                 save(&base.join("schedule.json"),&window)?;
+                failure_stage="native_reconstruction";
                 let report=reconstruct(&base,cursor,version,&leader,max)?;
                 if report["reconstructed"]==true {
                     state["last_reconstructed_slot"]=json!(cursor);state["next_slot"]=json!(cursor+1);
@@ -302,6 +339,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 if attempts>=max_attempts {return Err(io::Error::other("repair retry bound; unresolved gap preserved"));}
                 let discovered=cluster.all_peers();
                 if discovered.len()>512 {return Err(io::Error::other("peer capacity"));}
+                failure_stage="native_peer_selection";
                 let peers: Vec<_>=discovered.into_iter().filter(|(p,t)|p.shred_version()==version
                     && now().saturating_mul(1000).saturating_sub(*t)<=30_000 && p.pubkey()!=&cluster.id())
                     .filter_map(|(p,_)|p.serve_repair(Protocol::UDP).filter(|a|a.is_ipv4()).map(|a|(*p.pubkey(),a))).take(64).collect();
@@ -317,6 +355,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 let payload=ServeRepair::repair_proto_to_bytes(&request,&request_key).map_err(|_|invalid())?;
                 state["attempts"]=json!(attempts+1);state["repair_requests"]=json!(state["repair_requests"].as_u64().unwrap_or(0)+1);
                 state["active_repair_peer"]=json!(peer.to_string());state["state"]=json!("recovering");state["queue_in_flight"]=json!(1);
+                failure_stage="native_repair_io";
                 publish(dir,&state)?;socket.send_to(&payload,address)?;
                 let timeout=(Instant::now()+Duration::from_secs(2)).min(deadline);
                 let mut packet=[0u8;2049];let mut accepted=false;let mut pong_sent=false;
@@ -349,7 +388,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         stop.store(true,Ordering::Relaxed);let joined=service.join();session?;joined.map_err(|_|invalid())
     })();
     state["state"]=json!(if outcome.is_ok(){"stopped"}else{"blocked"});state["queue_in_flight"]=json!(0);
-    if outcome.is_err(){state["last_error_category"]=json!("repair_planning_or_network_policy");}
+    if outcome.is_err(){state["last_error_category"]=json!(failure_stage);}
     state["updated_at"]=json!(now());publish(dir,&state)?;outcome
 }
 
@@ -387,6 +426,27 @@ mod tests {
             assert!(!error.to_string().contains("SECRET"));assert_eq!(state,before);
         }
         assert!(checked_source(&json!({}),&json!({})).is_err());
+    }
+    #[test] fn validated_window_initializes_native_checkpoint_and_preserves_cursor() {
+        let window=json!({"source_identity":source_fixture(),"start":7,"end":10,"shred_version":50093});
+        let mut state=json!({"window_start":null,"next_slot":null,"attempts":0,"native_ready":false});
+        initialize_window_state(&window,&mut state,50093).unwrap();
+        assert_eq!(state["window_start"],7);assert_eq!(state["next_slot"],7);
+        assert_eq!(state["rpc_source_identity"],source_fixture());
+        state["next_slot"]=json!(9);state["attempts"]=json!(2);
+        initialize_window_state(&window,&mut state,50093).unwrap();
+        assert_eq!(state["next_slot"],9);assert_eq!(state["attempts"],2);
+        assert_eq!(state["native_ready"],false);
+        let before=state.clone();
+        assert!(initialize_window_state(&window,&mut state,7).is_err());assert_eq!(state,before);
+    }
+    #[test] fn signalled_planner_is_not_automatically_a_process_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let status=std::process::ExitStatus::from_raw(15);
+        assert_eq!(exited_planner(status,false,false),"network_lease_invalid");
+        assert_eq!(exited_planner(status,true,true),"stop_requested");
+        assert_eq!(exited_planner(status,false,true),"planner_external_signal");
+        assert_eq!(exited_planner(std::process::ExitStatus::from_raw(256),true,false),"planner_process_failure");
     }
     fn child_result(script: &str, duration: Duration, stopped: bool, valid: bool) -> (&'static str, Option<std::process::ExitStatus>) {
         let mut child=Command::new("sh").arg("-c").arg(script).spawn().unwrap();

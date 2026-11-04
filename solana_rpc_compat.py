@@ -6,6 +6,7 @@ backend fallback after evidence errors, native program decoding or native storag
 import asyncio
 import json
 import threading
+import time
 from data_policy import SourceAccessBlocked, require_permitted_url
 from onchain_ingest import IndexRpc, READ_METHODS
 from wallet_watch import PublicRpcError
@@ -140,8 +141,36 @@ class RustIndexRpc(IndexRpc):
         if not hasattr(transport,'request_sync'): raise RuntimeError('Rebuild native RPC extension with request_sync')
         self.requests+=1
         encoded=getattr(type(transport),'request_encoded_sync',None) is not None
-        try: response=transport.request_encoded_sync(method,text) if encoded else transport.request_sync(method,text)
-        except (ConnectionError,ValueError) as error: self._transport_error(error,method)
+        begun=time.monotonic()
+        self._timing_event('http_request', http_attempts=1, backend_fallbacks=0)
+        sampling_stop=threading.Event()
+        sampling_errors=[]
+        def sample():
+            while not sampling_stop.wait(1):
+                try:
+                    metrics=json.loads(transport.timing_snapshot())
+                    metrics['http_bridge_elapsed_ms']=(time.monotonic()-begun)*1000
+                    self._timing_event('http_in_progress', **metrics)
+                except Exception:
+                    sampling_errors.append(True)
+                    return
+        sampler=None
+        if (getattr(self,'_planning_observer',None) is not None
+                and getattr(type(transport),'timing_snapshot',None) is not None):
+            sampler=threading.Thread(target=sample,daemon=True,name='planner-http-timing')
+            sampler.start()
+        try:
+            try: response=transport.request_encoded_sync(method,text) if encoded else transport.request_sync(method,text)
+            except (ConnectionError,ValueError) as error: self._transport_error(error,method)
+        finally:
+            sampling_stop.set()
+            if sampler is not None: sampler.join()
+            metrics={'http_bridge_elapsed_ms':(time.monotonic()-begun)*1000}
+            if getattr(type(transport),'timing_snapshot',None) is not None:
+                metrics.update(json.loads(transport.timing_snapshot()))
+            self._timing_event('http_finished', **metrics)
+        if sampling_errors: raise RuntimeError('Private RPC timing publication failed')
+        self._timing_event('response_validation')
         return (self._finish_encoded if encoded else self._finish)(*response,method=method)
 
     def close(self):

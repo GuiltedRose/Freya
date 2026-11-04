@@ -98,10 +98,21 @@ fn block_batch(params:&str)->PyResult<String> {
     }
     Ok(serde_json::Value::Array(requests).to_string())
 }
+fn http_timing(timing:&std::sync::Mutex<serde_json::Value>, phase:&str,
+    started:Instant, headers:Option<Instant>, received:usize) {
+    if let Ok(mut value)=timing.lock() {
+        *value=serde_json::json!({"transport_phase":phase,
+            "transport_elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
+            "request_headers_ms":headers.map(|at|at.duration_since(started).as_secs_f64()*1000.0),
+            "response_body_ms":headers.map(|at|at.elapsed().as_secs_f64()*1000.0),
+            "bytes_received":received});
+    }
+}
 #[pyclass]
 struct NativeHttp {
     client: std::sync::Mutex<Option<reqwest::Client>>, endpoint: reqwest::Url,
     inode:u64, busy:Arc<Semaphore>, stop:tokio::sync::watch::Sender<bool>,
+    timing:Arc<std::sync::Mutex<serde_json::Value>>,
 }
 impl NativeHttp {
     fn operation(&self,method:&str,params:&str,compressed:bool)->PyResult<impl std::future::Future<Output=PyResult<EncodedReply>>+Send+'static> {
@@ -115,11 +126,15 @@ impl NativeHttp {
         let endpoint=self.endpoint.clone(); let mut stop=self.stop.subscribe();
         if *stop.borrow() {return Err(diagnostic("cancellation",started,None,0,None,true,true));}
         let permit=self.busy.clone().try_acquire_owned().map_err(|_|PyRuntimeError::new_err("HTTP backpressure: one request already active"))?;
+        let timing=self.timing.clone();
+        http_timing(&timing,"request_send",started,None,0);
         Ok(async move {
             let _permit=permit;
+            http_timing(&timing,"request_send",started,None,0);
+            let mut headers_at=None;
             let status_seen=std::sync::atomic::AtomicU16::new(0);
             let received=std::sync::atomic::AtomicUsize::new(0);
-            tokio::select! {
+            let result=tokio::select! {
                 biased;
                 _=stop.changed()=>Err(diagnostic("cancellation",started,
                     match status_seen.load(std::sync::atomic::Ordering::Relaxed) {0=>None,n=>Some(n)},
@@ -127,6 +142,8 @@ impl NativeHttp {
                 result=async {
                     let mut response=client.post(endpoint).header("Content-Type","application/json")
                         .header("Accept-Encoding",if compressed {"gzip"} else {"identity"}).body(body).send().await.map_err(|e|diagnostic("request_send",started,None,0,Some(&e),false,false))?;
+                    headers_at=Some(Instant::now());
+                    http_timing(&timing,"response_body",started,headers_at,0);
                     let status=response.status().as_u16();
                     status_seen.store(status,std::sync::atomic::Ordering::Relaxed);
                     let retry=response.headers().get("retry-after").and_then(|v|v.to_str().ok()).unwrap_or("").chars().take(256).collect::<String>();
@@ -142,6 +159,7 @@ impl NativeHttp {
                         if bytes.len()+chunk.len()>64_000_000 {return Err(bad("oversized response"));}
                         bytes.extend_from_slice(&chunk);
                         received.store(bytes.len(),std::sync::atomic::Ordering::Relaxed);
+                        http_timing(&timing,"response_body",started,headers_at,bytes.len());
                     }
                     // Release the completed body before the single-flight permit;
                     // let Hyper return its connection to the shared runtime's pool.
@@ -151,7 +169,11 @@ impl NativeHttp {
                         else {String::from_utf8(bytes).map_err(|_|bad("invalid response UTF8"))?};
                     Ok((status,retry,encoding,text))
                 }=>result,
-            }
+            };
+            http_timing(&timing,if result.is_ok(){"transport_complete"}
+                else if headers_at.is_some(){"response_body"}else{"request_send"},
+                started,headers_at,received.load(std::sync::atomic::Ordering::Relaxed));
+            result
         })
     }
 }
@@ -173,13 +195,17 @@ impl NativeHttp {
         let started=Instant::now();
         let client=builder.build().map_err(|e|diagnostic("client_state",started,None,0,Some(&e),false,false))?;
         let (stop,_)=tokio::sync::watch::channel(false);
-        Ok(Self {client:std::sync::Mutex::new(Some(client)),endpoint,inode:namespace_inode,busy:Arc::new(Semaphore::new(1)),stop})
+        Ok(Self {client:std::sync::Mutex::new(Some(client)),endpoint,inode:namespace_inode,busy:Arc::new(Semaphore::new(1)),stop,
+            timing:Arc::new(std::sync::Mutex::new(serde_json::json!({})))})
     }
     fn request<'py>(&self,py:Python<'py>,method:&str,params:&str)->PyResult<Bound<'py,PyAny>> {
         let operation=self.operation(method,params,false)?;
         pyo3_async_runtimes::tokio::future_into_py(py,async move {
             let (status,retry,_,text)=operation.await?; Ok((status,retry,text))
         })
+    }
+    fn timing_snapshot(&self)->PyResult<String> {
+        Ok(self.timing.lock().map_err(|_|offline())?.to_string())
     }
     fn request_sync(&self,py:Python<'_>,method:&str,params:&str)->PyResult<HttpReply> {
         if tokio::runtime::Handle::try_current().is_ok() {return Err(PyRuntimeError::new_err("blocking RPC inside Tokio is forbidden"));}
@@ -367,6 +393,16 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn http_timing_snapshot_contains_only_phase_and_numbers() {
+        let timing=std::sync::Mutex::new(serde_json::json!({}));
+        let started=Instant::now();
+        http_timing(&timing,"response_body",started,Some(started),123);
+        let value=timing.lock().unwrap();
+        assert_eq!(value["transport_phase"],"response_body");assert_eq!(value["bytes_received"],123);
+        assert!(value["request_headers_ms"].as_f64().unwrap()>=0.0);
+        assert!(value["response_body_ms"].as_f64().unwrap()>=0.0);
+        assert_eq!(value.as_object().unwrap().len(),5);
+    }
     #[test] fn request_timeout_diagnostics_are_redacted() {
         // Local listener intentionally never sends headers; no external connection.
         let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();

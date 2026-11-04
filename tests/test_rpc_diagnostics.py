@@ -14,6 +14,25 @@ ENDPOINT={'url':'https://example.invalid/SECRET-key','source_id':'fixture'}
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_planner_bridge_reports_native_timing_without_payloads(self):
+        class Transport:
+            def request_sync(self, method, params): return (200,'','SECRET BODY')
+            def timing_snapshot(self):
+                return json.dumps({'transport_phase':'transport_complete',
+                    'request_headers_ms':12,'response_body_ms':23,'bytes_received':11})
+        rpc=RustIndexRpc(ENDPOINT,MagicMock())
+        events=[]
+        rpc._planning_observer=lambda phase, metrics:events.append((phase,metrics))
+        with patch('solana_rpc_compat.check_boundary',return_value=1), \
+                patch.object(rpc,'_reserve'), patch.object(rpc,'_transport_for',return_value=Transport()), \
+                patch.object(rpc,'_finish',return_value=7):
+            self.assertEqual(rpc.call('getSlot',[]),7)
+        timing=next(metrics for phase,metrics in events if phase=='http_finished')
+        self.assertEqual(timing['request_headers_ms'],12)
+        self.assertEqual(timing['response_body_ms'],23)
+        self.assertNotIn('SECRET',json.dumps(events))
+        self.assertEqual(rpc.requests,1)
+
     def test_safe_connect_error_does_not_render_authenticated_cause(self):
         cause=URLError(ConnectionRefusedError(111,'https://example.invalid/SECRET-key'))
         error=transport_error(cause,time.monotonic())

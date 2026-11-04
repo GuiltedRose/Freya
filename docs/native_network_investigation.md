@@ -193,6 +193,91 @@ requires actual finalized-slot acquisition and reconstruction.
 
 ## Follow-up: corrected controller, remaining planning failure
 
+### Latest findings: pacing versus transport, and lease-controlled shutdown
+
+The operator reports that `ccb700c` passed 17 Python checks and the native builds,
+was deployed through a refreshed add-on, and then completed six RPC stages in a
+new attempt. `getSlotLeaders` took 30.942 seconds; the 55-second lease ended while
+`getClusterNodes` was active. This is progress through planning, not evidence of
+UDP repair. Historical successful planning before `ccb700c` must not be confused
+with that newer attempt.
+
+Code review found a concrete source of approximately 30-second waits **outside**
+the HTTP timeout: `IndexRpc._reserve()` catches `ProviderBackoff`, records a wait,
+sleeps, and retries the reservation. Remote providers default to a shared
+10-request burst and at least 30-second cooldown. Prior sessions and other
+consumers share this count, so the wait can land on different planning methods.
+That mechanism fits the observations but is not confirmed as their cause until
+the matching timing/audit evidence is inspected. No cooldown, pacing or retry
+policy is changed or reset by this correction.
+
+The existing progress snapshot now carries `rpc_timing` for the active call and
+each completed RPC stage:
+
+* `phase`: reservation, provider backoff, HTTP request/in progress/finished, or
+  response validation. An interrupted reservation remains visible without an
+  invented transport timeout.
+* `reservation_elapsed_ms`, reservation attempt count, backoff sleep seconds and
+  next requested sleep. Reservation time includes SQLite contention, ordinary
+  request spacing and cooldown waits; backoff sleep is reported separately.
+* `http_bridge_elapsed_ms`, one HTTP attempt and zero backend fallbacks.
+* Native `request_headers_ms` (connect/TLS/request through response headers),
+  `response_body_ms`, total transport time, bytes and a fixed transport phase.
+  Reqwest does not expose separate successful DNS/TCP/TLS timings or connection
+  reuse here; do not infer those from the combined header interval.
+
+During planner HTTP calls only, one local sampler updates that same atomic,
+owner-only snapshot at most once a second. It performs no network requests.
+Native byte/phase snapshots show the last observed transfer progress; their
+elapsed values can stop advancing during a stall. The Python bridge elapsed
+time and stage elapsed time continue advancing. Final native timings cover
+completion or an observable transport failure. Exception category/phase fields
+remain in the matching `planning-error.json`. No raw payload or endpoint enters
+the snapshots. Publication uses a lock to serialize sampler and planner writes.
+
+Shutdown previously checked child exit before stop/lease state, so a cgroup
+SIGTERM could be mislabeled as a Python failure. A signalled child now records
+an observed lease invalidation, explicit stop, or `planner_external_signal` if
+neither is established. The supervisor retains the expiry from the validated
+lease and reports `network_lease_expired` when the observed termination reaches
+that expiry. It preserves the child signal. An independent nonzero Python exit
+still reports `planner_process_failure`; a signal alone does not prove why
+systemd stopped the service. SIGKILL of the supervisor itself still requires its
+systemd journal/result because no process can publish after being killed.
+
+After validated planning/bootstrap metadata, the follower validates and persists
+the structured source pin and numeric window cursor before starting gossip,
+publishing `state=discovering`. Resuming the same window preserves its cursor
+and attempts. Errors now retain bounded stage categories in the checkpoint
+instead of collapsing every post-planning error into one generic category.
+`native_ready` remains false until its existing evidence requirements are met.
+
+Partial RPC results remain diagnostic only. Existing source-matched, time-bounded
+window cache rules are unchanged; no stale head or new partial cluster cache is
+introduced. Interrupted planning never publishes an incomplete trusted window.
+
+All changes and added regressions are **not executed**: no tests, builds, Nix
+evaluation, activation or network session were run by the assistant. Existing
+operator results apply to `ccb700c`, not this revision. In the native-mainnet
+shell, the operator's focused validation commands are:
+
+```bash
+python -m unittest tests.test_native_window_planning tests.test_rpc_diagnostics tests.test_rpc_burst_pacing
+cargo test --manifest-path native/solana_binary/Cargo.toml --features rpc-engine rpc::tests::
+nix build --no-write-lock-file .#native-peer .#native-node
+```
+
+Then follow the complete refresh/diff/backup/install/build/dry-activate/test and
+rollback procedure above. Both the Python worker/native HTTP extension and peer
+engine changed; verify refreshed package paths. Keep the existing kernel MTU
+regression and run it before a further WAN diagnostic as documented above.
+Only after offline checks pass and explicit authorization, start the one bounded
+diagnostic below. Inspect matching run IDs and compare reservation versus HTTP
+timings before another networking change. If shutdown occurs, inspect both the
+supervisor record and systemd result. If planning succeeds, inspect checkpoint
+`rpc_source_identity`, `window_start`, `next_slot`, `state` and repair counters.
+No automatic retry, renewal, trading activation or increased limits is added.
+
 ### Structured source identity correction
 
 The next operator report showed successful planning followed by an immediate
@@ -300,7 +385,8 @@ limits remain unchanged. Deploy Python and Rust together via the refresh above.
 The uncached planner makes seven sequential calls: genesis, head, history floor,
 leaders, manifest, history recheck and cluster nodes. The existing valid cache
 can omit cluster nodes. `RustIndexRpc.call` reserves shared pacing before sending
-each request, reuses its transport, and performs no planner-level request retry.
+each request and reuses its transport. It performs no HTTP fallback/retry, but
+its inherited reservation loop can wait and retry provider-budget reservations.
 `ProviderBudget.reserve` can sleep for a reservation or reject an active cooldown;
 neither state is cleared. The Rust transport collects the complete response
 body under its existing 30-second request timeout, with a 15-second connection

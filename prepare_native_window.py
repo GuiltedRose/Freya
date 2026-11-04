@@ -8,6 +8,8 @@ from pathlib import Path
 import time
 import uuid
 import math
+import threading
+from functools import wraps
 
 
 def planning_error(error):
@@ -55,9 +57,17 @@ def atomic_diagnostic(path, record):
     finally: os.close(descriptor)
 
 
+def planning_locked(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self.lock: return method(self, *args, **kwargs)
+    return locked
+
+
 class PlanningProgress:
     """One bounded snapshot, replaced atomically; no RPC values or exception text."""
     def __init__(self, output, run_id):
+        self.lock = threading.RLock()
         self.path = output.parent / 'planning-progress.json'
         self.started = time.monotonic()
         self.record = {'schema': 'freya-native-planning-progress-v1', 'run_id': run_id,
@@ -65,21 +75,42 @@ class PlanningProgress:
         self.stage_started = self.started
         self.write('started')
 
+    @planning_locked
     def write(self, status, category=None):
         self.record.update(at=time.time(), elapsed_seconds=time.monotonic()-self.started,
                            stage_elapsed_seconds=time.monotonic()-self.stage_started, status=status)
         if category: self.record['category'] = category
         atomic_diagnostic(self.path, self.record)
 
+    @planning_locked
     def begin(self, stage, method=None):
         self.stage_started = time.monotonic()
-        self.record.update(stage=stage, rpc_method=method, stage_started_at=time.time())
+        self.record.update(stage=stage, rpc_method=method, stage_started_at=time.time(), rpc_timing={})
         self.write('running')
 
+    @planning_locked
+    def observe(self, phase, metrics):
+        if phase not in ('provider_reservation','provider_backoff','provider_reservation_finished',
+                         'http_request','http_in_progress','http_finished','response_validation'):
+            return
+        timing=self.record.setdefault('rpc_timing', {})
+        timing['phase']=phase
+        for key in ('reservation_attempts','backoff_sleep_seconds','next_wait_seconds',
+                    'reservation_elapsed_ms','http_attempts','backend_fallbacks','http_bridge_elapsed_ms',
+                    'transport_elapsed_ms','request_headers_ms','response_body_ms','bytes_received'):
+            value=metrics.get(key)
+            if type(value) in (int,float) and math.isfinite(value) and 0<=value<=2**53:
+                timing[key]=value
+        if metrics.get('transport_phase') in ('request_send','response_body','transport_complete'):
+            timing['transport_phase']=metrics['transport_phase']
+        self.write('running')
+
+    @planning_locked
     def complete(self):
         self.record['stages'].append({'stage': self.record['stage'],
             'rpc_method': self.record['rpc_method'], 'started_at': self.record['stage_started_at'],
-            'elapsed_seconds': time.monotonic()-self.stage_started, 'status': 'completed'})
+            'elapsed_seconds': time.monotonic()-self.stage_started, 'status': 'completed',
+            'rpc_timing': dict(self.record.get('rpc_timing', {}))})
         self.write('stage_completed')
 
 
@@ -145,6 +176,7 @@ def _prepare(config_path, output, start, progress):
     if len(rows) != 1 or rows[0].get('backend') != 'rust':
         raise ValueError('One explicitly reviewed Rust RPC required')
     rpc = make_rpc(rows[0])
+    rpc._planning_observer = progress.observe
     def call(stage,method,params):
         progress.begin(stage,method)
         try:

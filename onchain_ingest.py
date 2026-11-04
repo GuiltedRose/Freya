@@ -100,7 +100,15 @@ class IndexRpc:
                             for index,slot in enumerate(slots)])
         return rpc_batch_result(decoded,self.source,self.budget,self.url,len(slots))
 
+    def _timing_event(self, phase, **metrics):
+        observer=getattr(self, '_planning_observer', None)
+        if observer is not None: observer(phase, metrics)
+
     def _reserve(self,method,logical_calls=1):
+        begun=time.monotonic()
+        waits=0
+        waited=0.0
+        self._timing_event('provider_reservation', reservation_attempts=1)
         try:
             if isinstance(self.budget,ProviderBudget):
                 # Wait BEFORE sending a read-only call; keep this step's metadata
@@ -114,11 +122,20 @@ class IndexRpc:
                         break
                     except ProviderBackoff as wait:
                         self.budget.audit_wait(self.url,method,wait.seconds)
-                        self.budget.sleep(min(60,max(.001,wait.seconds)))
+                        delay=min(60,max(.001,wait.seconds))
+                        waits+=1
+                        self._timing_event('provider_backoff', reservation_attempts=waits+1,
+                            backoff_sleep_seconds=waited, next_wait_seconds=delay,
+                            reservation_elapsed_ms=(time.monotonic()-begun)*1000)
+                        self.budget.sleep(delay)
+                        waited+=delay
             else:self.budget.reserve(self.url,self.interval)
         except ProviderBackoff as error:
             error.rpc_method=method
             raise
+        finally:
+            self._timing_event('provider_reservation_finished', reservation_attempts=waits+1,
+                backoff_sleep_seconds=waited, reservation_elapsed_ms=(time.monotonic()-begun)*1000)
 
     def _post(self,payload):
         members=payload if isinstance(payload,list) else [payload]

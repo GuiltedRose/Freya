@@ -70,6 +70,26 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual((self.output.parent/'planning-progress.json').stat().st_mode & 0o777, 0o600)
         self.assertFalse((self.output.parent/'planning-progress.pending').exists())
 
+    def test_timing_snapshot_is_bounded_atomic_and_redacted(self):
+        from prepare_native_window import PlanningProgress
+        progress=PlanningProgress(self.output,'timed')
+        progress.begin('leader_schedule','getSlotLeaders')
+        progress.observe('provider_backoff',{'reservation_elapsed_ms':30000,
+            'next_wait_seconds':30,'url':'https://private.invalid/SECRET',
+            'response_body_ms':float('nan')})
+        record=json.loads(progress.path.read_text())
+        self.assertEqual(record['rpc_timing']['phase'],'provider_backoff')
+        self.assertEqual(record['rpc_timing']['reservation_elapsed_ms'],30000)
+        self.assertNotIn('response_body_ms',record['rpc_timing'])
+        progress.observe('http_finished',{'request_headers_ms':10,'response_body_ms':20,
+            'transport_phase':'transport_complete','bytes_received':500})
+        progress.complete()
+        record=json.loads(progress.path.read_text())
+        self.assertEqual(record['stages'][0]['rpc_timing']['response_body_ms'],20)
+        self.assertNotIn('SECRET',json.dumps(record))
+        self.assertLess(len(json.dumps(record)),8192)
+        self.assertFalse(progress.path.with_suffix('.pending').exists())
+
     def test_transport_failure_stage_and_redaction(self):
         for category, phase in [('request_timeout','response_body'), ('connect_timeout','connect')]:
             with self.subTest(category=category):

@@ -22,6 +22,24 @@ class RpcBurstPacingTests(unittest.TestCase):
     def advance(self,seconds):
         self.now+=seconds
 
+    def test_planner_reports_shared_backoff_without_http_retry(self):
+        from unittest.mock import patch
+        from onchain_ingest import IndexRpc
+        rpc=IndexRpc({'url':self.url,'source_id':'fixture'},self.budget)
+        events=[]
+        rpc._planning_observer=lambda phase, metrics: events.append((phase,metrics))
+        for _ in range(10):self.budget.reserve_rpc(self.url)
+        with patch('onchain_ingest.time.monotonic',side_effect=lambda:self.now):
+            rpc._reserve('getSlotLeaders')
+        self.assertIn('provider_backoff',[phase for phase,_ in events])
+        phase,metrics=events[-1]
+        self.assertEqual(phase,'provider_reservation_finished')
+        self.assertGreaterEqual(metrics['backoff_sleep_seconds'],29)
+        self.assertGreaterEqual(metrics['reservation_elapsed_ms'],29000)
+        self.assertEqual(metrics['reservation_attempts'],2)
+        self.assertEqual(rpc.requests,0)
+        self.assertNotIn(self.url,str(events))
+
     def test_shared_aliases_and_restart_preserve_burst(self):
         for _ in range(10):self.budget.reserve_rpc(self.url)
         other=self.client()
