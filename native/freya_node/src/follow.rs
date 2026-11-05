@@ -96,6 +96,18 @@ fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
             if let Some(start)=progress["stage_started_at"].as_f64().filter(|start|start.is_finite() && *start<=at && *start>=0.0) {
                 record["stage_elapsed_seconds"]=json!(at-start);
             }
+            let timing=&progress["rpc_timing"];
+            if let Some(phase)=timing["phase"].as_str().filter(|phase|matches!(*phase,
+                "provider_reservation"|"provider_backoff"|"provider_reservation_finished"|
+                "http_request"|"http_in_progress"|"http_finished"|"response_validation")) {
+                record["rpc_phase"]=json!(phase);
+            }
+            for key in ["next_wait_seconds","reservation_elapsed_ms","request_headers_ms",
+                        "response_body_ms","bytes_received"] {
+                if let Some(value)=timing[key].as_f64().filter(|v|v.is_finite() && *v>=0.0 && *v<=9_007_199_254_740_992.0) {
+                    record[key]=json!(value);
+                }
+            }
             if let Some(value)=progress["status"].as_str().filter(|value|matches!(*value,
                 "started"|"running"|"stage_completed"|"failed"|"caught_up"|"completed")) {
                 record["planner_status"]=json!(value);
@@ -108,6 +120,7 @@ fn exited_planner(status: std::process::ExitStatus, stopped: bool, lease_valid: 
     use std::os::unix::process::ExitStatusExt;
     if status.success() {"planner_success"}
     else if status.code()==Some(75) {"planner_caught_up"}
+    else if status.code()==Some(76) {"provider_cooldown_exceeds_lease"}
     else if matches!(status.signal(),Some(15)|Some(2)) {
         if !lease_valid {"network_lease_invalid"}
         else if stopped {"stop_requested"}
@@ -149,7 +162,8 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
             command.arg(env::var_os("FREYA_NODE_PLANNER").ok_or_else(invalid)?)
                 .arg("--config").arg(env::var_os("FREYA_NODE_EXTERNAL_CONFIG").ok_or_else(invalid)?)
                 .arg("--output").arg(dir.join("window.json"))
-                .arg("--run-id").arg(&run_id);
+                .arg("--run-id").arg(&run_id)
+                .env("FREYA_PLANNING_LEASE_EXPIRES",expires.to_string());
             if let Some(start)=start {command.arg("--start").arg(start.to_string());}
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
         })();
@@ -476,6 +490,23 @@ mod tests {
     }
     #[test] fn planner_success_is_distinct() {
         assert_eq!(child_result("exit 0",Duration::from_secs(5),false,true).0,"planner_success");
+    }
+    #[test] fn cooldown_lease_expiry_keeps_final_supervisor_evidence() {
+        let dir=tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("planning-progress.json"),serde_json::to_vec(&json!({
+            "run_id":"cooldown","stage":"cluster_nodes","rpc_method":"getClusterNodes",
+            "status":"running","rpc_timing":{"phase":"provider_backoff","next_wait_seconds":29.85}
+        })).unwrap()).unwrap();
+        let (reason,status)=child_result("exec sleep 5",Duration::from_secs(2),false,false);
+        assert_eq!(reason,"network_lease_invalid");
+        planning_result(dir.path(),"cooldown",Instant::now(),"network_lease_expired",status).unwrap();
+        let record=read_json(&dir.path().join("planning-supervisor.json")).unwrap();
+        assert_eq!(record["category"],"network_lease_expired");
+        assert_eq!(record["rpc_phase"],"provider_backoff");
+        assert_eq!(record["next_wait_seconds"],29.85);
+        assert_eq!(record["window_validated"],false);
+        assert_eq!(child_result("exit 76",Duration::from_secs(2),false,true).0,
+                   "provider_cooldown_exceeds_lease");
     }
     #[test] fn supervisor_replaces_stale_run_without_copying_secrets() {
         let dir=tempfile::tempdir().unwrap();

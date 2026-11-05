@@ -63,8 +63,8 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(progress['run_id'], 'current')
         self.assertEqual(progress['status'], 'completed')
         self.assertEqual([row['stage'] for row in progress['stages']], [
-            'rpc_validation','finalized_head','history_floor','leader_schedule',
-            'finalized_manifest','history_recheck','cluster_nodes','window_publication'])
+            'rpc_validation','cluster_nodes','finalized_head','history_floor','leader_schedule',
+            'finalized_manifest','history_recheck','window_publication'])
         self.assertTrue(all(row['elapsed_seconds'] >= 0 for row in progress['stages']))
         self.assertLess(len(json.dumps(progress)), 8192)
         self.assertEqual((self.output.parent/'planning-progress.json').stat().st_mode & 0o777, 0o600)
@@ -123,6 +123,56 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(progress['stage'], 'rpc_validation')
         self.assertEqual(progress['status'], 'running')
         self.assertFalse(self.output.exists())
+
+    def test_cooldown_overlaps_lease_without_sleep_or_request(self):
+        from prepare_native_window import PlanningProgress, PlanningDeferred
+        progress = PlanningProgress(self.output, 'lease')
+        progress.begin('cluster_nodes', 'getClusterNodes')
+        with patch.dict('os.environ', {'FREYA_PLANNING_LEASE_EXPIRES': '155'}), patch('prepare_native_window.time.time', return_value=140):
+            with self.assertRaises(PlanningDeferred):
+                progress.observe('provider_backoff', {'next_wait_seconds': 29.85})
+        record = json.loads(progress.path.read_text())
+        self.assertEqual(record['rpc_timing']['phase'], 'provider_backoff')
+        self.assertEqual(record['rpc_timing']['next_wait_seconds'], 29.85)
+
+    def test_authorized_resume_reuses_claims_but_rechecks_live_evidence(self):
+        from solders.pubkey import Pubkey
+        original = self.rpc.call.side_effect
+        def call(method, params):
+            if method == 'getClusterNodes':
+                return [{'pubkey': str(Pubkey.default()), 'gossip': '1.1.1.1:8001', 'shredVersion': 7}]
+            return original(method, params)
+        self.rpc.call.side_effect = call
+        # Simulate lease termination after durable claims, before publication.
+        from prepare_native_window import PlanningProgress
+        complete = PlanningProgress.begin
+        class Killed(BaseException): pass
+        def begin(progress, stage, method=None):
+            if stage == 'window_publication':
+                raise Killed()
+            return complete(progress, stage, method)
+        with patch.object(PlanningProgress, 'begin', begin), self.assertRaises(Killed):
+            prepare(Path('unused'), self.output, 7, 'first')
+        self.assertFalse(self.output.exists())
+        self.floors = iter([5, 5])
+        self.rpc.call.reset_mock()
+        prepare(Path('unused'), self.output, 7, 'second')
+        methods = [c.args[0] for c in self.rpc.call.call_args_list]
+        self.assertEqual(methods, ['getSlot', 'getFirstAvailableBlock', 'getFirstAvailableBlock'])
+        self.assertEqual(self.rpc.validate.call_count, 2)
+        self.assertEqual(json.loads(self.output.read_text())['planning_run_id'], 'second')
+
+    def test_cache_expiry_source_and_future_dates_prevent_reuse(self):
+        from prepare_native_window import PlanningCache
+        identity = {'provider_id': 'a'*64, 'endpoint_id': 'b'*64}
+        with patch('prepare_native_window.time.time', return_value=1000):
+            cache = PlanningCache(self.output, identity)
+            cache.put('cluster', {'version': 7, 'peers': []})
+            self.assertIsNone(PlanningCache(self.output, dict(identity, endpoint_id='c'*64)).get('cluster'))
+        for now in (999, 1301):
+            with patch('prepare_native_window.time.time', return_value=now):
+                self.assertIsNone(PlanningCache(self.output, identity).get('cluster'))
+        self.assertEqual(cache.path.stat().st_mode & 0o777, 0o600)
 
     def test_provider_and_metadata_categories_are_bounded(self):
         from prepare_native_window import planning_error

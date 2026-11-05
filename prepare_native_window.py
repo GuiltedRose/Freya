@@ -12,6 +12,10 @@ import threading
 from functools import wraps
 
 
+class PlanningDeferred(RuntimeError):
+    category = "provider_cooldown_exceeds_lease"
+
+
 def planning_error(error):
     """Only bounded categories/codes, never exception text or endpoint details."""
     record={'schema':'freya-native-planning-error-v1','at':time.time(),
@@ -24,7 +28,7 @@ def planning_error(error):
     category=getattr(error,'category',None)
     if category in ('connect','connect_timeout','request_timeout','transport','throttled','cancelled',
                     'transport_unavailable','authorization_denied','malformed_evidence','history_unavailable',
-                    'remote_rpc_error','provider_unavailable','http_error'):
+                    'remote_rpc_error','provider_unavailable','http_error','provider_cooldown_exceeds_lease'):
         record['category']=category
     for name in ('http_status','socket_errno','rpc_code'):
         value=getattr(error,name,None)
@@ -104,6 +108,11 @@ class PlanningProgress:
         if metrics.get('transport_phase') in ('request_send','response_body','transport_complete'):
             timing['transport_phase']=metrics['transport_phase']
         self.write('running')
+        deadline = os.environ.get('FREYA_PLANNING_LEASE_EXPIRES')
+        if phase == 'provider_backoff' and deadline is not None:
+            remaining = float(deadline) - time.time()
+            if not math.isfinite(remaining) or metrics.get('next_wait_seconds', 0) >= remaining:
+                raise PlanningDeferred('Provider cooldown exceeds current authorization')
 
     @planning_locked
     def complete(self):
@@ -112,6 +121,40 @@ class PlanningProgress:
             'elapsed_seconds': time.monotonic()-self.stage_started, 'status': 'completed',
             'rpc_timing': dict(self.record.get('rpc_timing', {}))})
         self.write('stage_completed')
+
+
+class PlanningCache:
+    """Bounded reviewed claims; never an authorization or freshness substitute."""
+    def __init__(self, output, identity):
+        self.path = output.parent / 'planning-cache.json'
+        self.identity = identity
+        self.entries = {}
+        try:
+            if self.path.stat().st_size > 65536:
+                return
+            record = json.loads(self.path.read_text())
+            if (isinstance(record, dict) and record.get('schema') == 'freya-native-planning-cache-v1'
+                    and record.get('source_identity') == identity
+                    and isinstance(record.get('entries'), dict)):
+                self.entries = record['entries']
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def get(self, key):
+        entry = self.entries.get(key)
+        if isinstance(entry, dict) and type(entry.get('at')) in (int, float):
+            if 0 <= time.time() - entry['at'] <= 300:
+                return entry.get('value')
+        return None
+
+    def put(self, key, value):
+        # Only the current window's immutable schedule/manifest and cluster claims.
+        self.entries = {k: v for k, v in self.entries.items()
+                        if k == 'cluster' or k == key or
+                        (key == 'cluster' and k.startswith('window:'))}
+        self.entries[key] = {'at': time.time(), 'value': value}
+        atomic_diagnostic(self.path, {'schema': 'freya-native-planning-cache-v1',
+                          'source_identity': self.identity, 'entries': self.entries})
 
 
 def prepare(config_path, output, start=None, run_id=None):
@@ -195,6 +238,34 @@ def _prepare(config_path, output, start, progress):
             error.freya_rpc_method='getGenesisHash'
             raise
         progress.complete()
+        cache = PlanningCache(output, identity)
+        progress.begin('cluster_metadata')
+        metadata = cache.get('cluster')
+        if metadata is not None:
+            try:
+                version = metadata['version']
+                if type(version) is not int or not 1 <= version <= 65535:
+                    raise ValueError('Invalid cached shred version')
+                peers = bootstrap_nodes([dict(row, pubkey=row['identity'], shredVersion=version)
+                                         for row in metadata['peers']], version)
+                if not peers or peers != metadata['peers']:
+                    raise ValueError('Invalid cached bootstrap nodes')
+                version_at = cache.entries['cluster']['at']
+            except (KeyError, TypeError, ValueError):
+                metadata = None
+        if metadata is None:
+            cluster = call('cluster_nodes', 'getClusterNodes', [])
+            if not isinstance(cluster, list) or len(cluster) > 20000:
+                raise ValueError('Invalid cluster metadata')
+            versions = Counter(row.get('shredVersion') for row in cluster if isinstance(row, dict)
+                               and type(row.get('shredVersion')) is int and 1 <= row['shredVersion'] <= 65535)
+            if not versions:
+                raise ValueError('Compatible shred version unavailable')
+            version = versions.most_common(1)[0][0]
+            peers = bootstrap_nodes(cluster, version)
+            version_at = time.time()
+            if peers:
+                cache.put('cluster', {'version': version, 'peers': peers})
         head = call('finalized_head', 'getSlot', [{'commitment': 'finalized'}])
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
@@ -209,9 +280,13 @@ def _prepare(config_path, output, start, progress):
             if type(floor) is not int or not 0 <= floor <= start:
                 raise ValueError('Historical window unavailable; preserve unresolved gap')
         check_history('history_floor')
-        leaders = call('leader_schedule', 'getSlotLeaders', [start, end - start + 1])
-        slots = call('finalized_manifest', 'getBlocks', [start, end, {'commitment': 'finalized'}])
-        check_history('history_recheck')  # Retention can advance while the manifest is being fetched.
+        cache_key = f'window:{start}:{end}'
+        claims = cache.get(cache_key)
+        if isinstance(claims, dict):
+            leaders, slots = claims.get('leaders'), claims.get('slots')
+        else:
+            leaders = call('leader_schedule', 'getSlotLeaders', [start, end - start + 1])
+            slots = call('finalized_manifest', 'getBlocks', [start, end, {'commitment': 'finalized'}])
         progress.begin('manifest_validation')
         if (not isinstance(leaders, list) or len(leaders) != end - start + 1
                 or not isinstance(slots, list) or any(type(s) is not int for s in slots)
@@ -219,26 +294,9 @@ def _prepare(config_path, output, start, progress):
             raise ValueError('Invalid leader schedule or finalized manifest')
         for leader in leaders:
             Pubkey.from_string(leader)
-        progress.begin('cluster_metadata')
-        cached = None
-        if output.exists():
-            prior = read_json(output)
-            if (prior.get('schema') == 'freya-native-window-v1' and prior.get('source_identity') == identity
-                    and 0 <= time.time() - prior.get('shred_version_at', 0) <= 300
-                    and type(prior.get('shred_version')) is int and 1 <= prior['shred_version'] <= 65535):
-                cached = prior['shred_version']
-        reuse = cached and isinstance(prior.get('bootstrap_nodes'), list) and prior['bootstrap_nodes']
-        cluster = [] if reuse else call('cluster_nodes', 'getClusterNodes', [])
-        progress.begin('cluster_metadata')
-        if not isinstance(cluster, list) or len(cluster) > 20000:
-            raise ValueError('Invalid cluster metadata')
-        versions = Counter(row.get('shredVersion') for row in cluster if isinstance(row, dict)
-                           and type(row.get('shredVersion')) is int and 1 <= row['shredVersion'] <= 65535)
-        if not versions and cached is None:
-            raise ValueError('Compatible shred version unavailable')
-        version = cached or versions.most_common(1)[0][0]
-        version_at = prior['shred_version_at'] if cached else time.time()
-        peers = prior['bootstrap_nodes'] if reuse else bootstrap_nodes(cluster, version)
+        if claims is None:
+            cache.put(cache_key, {'leaders': leaders, 'slots': slots})
+        check_history('history_recheck')  # Always fresh, including after a cached manifest.
         plan = {'schema': 'freya-native-window-v1', 'planning_run_id': progress.record['run_id'], 'at': time.time(), 'start': start, 'end': end,
                 'observed_finalized_head': head, 'genesis': '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
                 'source_id': rpc.source, 'source_identity': identity,
@@ -271,6 +329,8 @@ def main():
     args = parser.parse_args()
     try:
         prepare(args.config, args.output, args.start, args.run_id)
+    except PlanningDeferred:
+        raise SystemExit(76) from None
     except Exception:
         raise SystemExit('Native window planning failed; see private planning-error.json') from None
 

@@ -443,3 +443,52 @@ Inspect these even if `systemctl start` returns failure. Do not rerun automatica
 Match IDs and timestamps, and retain the results privately. A successful planning
 record establishes only a validated planning manifest; actual finalized-slot
 acquisition and reconstruction are still required before native readiness.
+
+
+### Provider cooldown and resumable planning (2026-11-04)
+
+Planning now requests cluster metadata immediately after genesis validation,
+so the large response is not deliberately placed after six burst reservations.
+It atomically retains validated public bootstrap claims and the current window's
+finalized manifest/schedule in owner-only `planning-cache.json`. Claims expire
+at 300 seconds, are bound to both provider and endpoint digests, and never renew
+their timestamp on reuse. Genesis authorization, finalized head, and both history
+floor checks still run on every attempt. Cache contents pass structural checks
+before use; partial HTTP bodies are never cached. No session is automatically
+renewed, and provider reservations/accounting remain in the existing RPC path.
+
+The supervisor passes the existing lease expiry to the planner. When a reported
+cooldown cannot fit in the remaining lease, the planner exits 76 before sleeping
+or issuing that request; the final supervisor category is
+`provider_cooldown_exceeds_lease`. It is a deferred attempt, not successful
+planning. A hard lease interruption remains `network_lease_expired`. The final
+supervisor also copies bounded RPC phase/wait/body metrics from the matching run,
+so expiry during cooldown can be distinguished from expiry during body transfer.
+A short authorized lease still cannot guarantee completion of an arbitrarily
+slow provider response. Wait for cooldown outside the next authorized session;
+never clear the shared ledger or automatically grant another session.
+
+Operator prerequisites: existing reviewed Monolith configuration, dependencies,
+and the `native-mainnet` development shell. Run the following focused validation:
+
+```bash
+nix develop .#native-mainnet
+python -m unittest tests.test_native_window_planning
+nix build --no-write-lock-file .#native-peer .#native-node
+```
+
+The peer build includes the supervisor regression fixtures. Then follow the
+refresh, diff review, backup, build, dry-activate, activation and rollback commands
+at the start of this document. Run only the single explicitly authorized session
+shown above; collect all three diagnostics even on failure. Acceptance requires
+matching run IDs with `planner_success` and `window_validated: true`, followed by
+actual native peer discovery and repair evidence in the existing follow status
+and journal. `provider_cooldown_exceeds_lease` or `network_lease_expired` is not
+acceptance. No operator diagnostic was supplied with this change, so its actual
+shutdown classification and end-to-end acceptance remain unverified.
+
+Rollback uses the saved Nix add-on and the existing stop/restore/test commands.
+Retain the new cache alongside all existing persistent data; older code ignores
+it. No wallet, transaction, training, checkpoint or accounting reset is needed.
+The assistant performed static review and `git diff --check` only; these tests,
+builds, activation and network operations remain for the operator.
