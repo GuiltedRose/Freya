@@ -5,6 +5,7 @@ let
     cp -r ${src} $out
     chmod -R u+w $out
     cp ${../native/freya_node/src/peer.rs} $out/core/src/freya_peer.rs
+    cp ${../native/freya_node/src/state_lock.rs} $out/core/src/state_lock.rs
     cp ${../native/freya_node/src/acquisition.rs} $out/core/src/acquisition.rs
     cp ${../native/freya_node/src/follow.rs} $out/core/src/follow.rs
     cat ${../native/freya_node/src/repair_bridge.rs} >> $out/core/src/repair/serve_repair.rs

@@ -492,3 +492,36 @@ Retain the new cache alongside all existing persistent data; older code ignores
 it. No wallet, transaction, training, checkpoint or accounting reset is needed.
 The assistant performed static review and `git diff --check` only; these tests,
 builds, activation and network operations remain for the operator.
+
+### Checkpoint writer lock release (2026-11-04)
+
+The checkpoint restart fixture already drops its original lock before reacquiring.
+The close-only implementation can nevertheless retain a Linux `flock` while a
+concurrent child still has an inherited descriptor before exec. This is consistent
+with the parallel supervisor tests spawning children; the reported build's exact
+interleaving has not been captured. A deterministic duplicate-descriptor fixture
+reproduced the same error with close-only release. `StateLock` now explicitly
+unlocks on guard destruction; unsuccessful contenders never receive a guard and
+cannot unlock the owner. The lock file is never removed/replaced, and checkpoint
+publication, source pins, identities, budgets, and network authorization are unchanged.
+
+Offline validation here: affected restart test passed in an isolated harness
+containing the exact production checkpoint functions/tests; all eight harness
+checkpoint/lock tests passed, including exclusive ownership, duplicate descriptor
+release, normal subprocess exit and forced termination. The production lock
+module's four standalone tests also passed. These are not the complete Agave
+native-peer suite. The requested Nix build was attempted but its daemon socket
+returned `Connection refused`; complete native-peer and native-node verification
+remain outstanding. No deployment or mainnet networking occurred.
+
+With the existing Nix daemon available, include the new `state_lock.rs` file in
+the Git checkout's tracked source, then run from the repository root:
+
+```bash
+nix build --no-write-lock-file .#native-peer .#native-node
+```
+
+The peer derivation runs its complete Rust binary suite, including the affected
+checkpoint test and the new lock regressions. This command does not require
+entering `native-mainnet` first; an unavailable development shell therefore does
+not require installing a separate Python interpreter. No activation is needed.

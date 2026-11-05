@@ -12,6 +12,7 @@ const FORMAT: &str = "freya-peer-v1";
 static NATIVE_DISK_LIMIT: std::sync::OnceLock<(PathBuf, u64)> = std::sync::OnceLock::new();
 mod acquisition;
 mod follow;
+mod state_lock;
 fn invalid() -> io::Error { io::Error::other("invalid private configuration or state") }
 fn effective_uid() -> io::Result<u32> {
     // Proc directory ownership can change with dumpability; read the actual UID.
@@ -35,7 +36,7 @@ fn publish(dir: &Path, value: &Value) -> io::Result<()> {
 fn bounded(value: &Value, key: &str, min: u64, max: u64) -> io::Result<u64> {
     value[key].as_u64().filter(|v| (min..=max).contains(v)).ok_or_else(invalid)
 }
-fn private_dir(dir: &Path) -> io::Result<File> {
+fn private_dir(dir: &Path) -> io::Result<state_lock::StateLock> {
     let meta = fs::symlink_metadata(dir)?;
     if !meta.is_dir() || meta.uid() != effective_uid()?
         || meta.permissions().mode() & 0o077 != 0 { return Err(invalid()); }
@@ -49,8 +50,7 @@ fn private_dir(dir: &Path) -> io::Result<File> {
     if read_json(&marker)?["format"] != FORMAT { return Err(invalid()); }
     let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false)
         .mode(0o600).custom_flags(0x20000).open(dir.join("writer.lock"))?;
-    lock.try_lock().map_err(|_| io::Error::other("peer state already locked"))?;
-    Ok(lock)
+    state_lock::StateLock::acquire(lock)
 }
 fn lease() -> io::Result<Value> {
     let path = Path::new("/run/solana-budget-status.json");
