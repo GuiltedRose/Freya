@@ -43,6 +43,17 @@ fn finish_repair(state: &mut Value, result: &str) {
     state["last_repair"]["outcome"]=json!(result);
     state["last_repair"]["finished_at"]=json!(now());
 }
+fn unexpected_datagram(record: &mut Value, from: SocketAddr, packet: &[u8], nonce: u32, at: f64) {
+    increment(record,"unexpected_endpoint");
+    // One untrusted metadata sample only; never decode, answer or admit this packet.
+    if record["unexpected_sample"].is_null() {
+        let nonce_matches=if (4..=2048).contains(&packet.len()) {
+            packet[packet.len()-4..].try_into().ok().map(u32::from_le_bytes).map(|n|n==nonce)
+        } else {None};
+        record["unexpected_sample"]=json!({"source":from.to_string(),"received_at":at,
+            "bytes":packet.len(),"nonce_matches":nonce_matches});
+    }
+}
 fn repair_error(state: &mut Value, operation: &str, error: io::Error) -> io::Error {
     let record=&mut state["last_repair"];
     record["failure_operation"]=json!(operation);
@@ -455,7 +466,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     let usage=counters().map_err(|e|repair_error(&mut state,"counter_read",e))?;
                     if usage.0.checked_sub(initial.0).ok_or_else(invalid)?.saturating_add(usage.1.checked_sub(initial.1).ok_or_else(invalid)?)>=traffic_cap {return Err(invalid());}
                     let (length,from)=match socket.recv_from(&mut packet){Ok(v)=>v,Err(e) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut)=>continue,Err(e)=>return Err(repair_error(&mut state,"socket_receive",e))};
-                    if from!=address {increment(&mut state["last_repair"],"unexpected_endpoint");continue;}
+                    if from!=address {
+                        unexpected_datagram(&mut state["last_repair"],from,&packet[..length],nonce,
+                            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
+                        continue;
+                    }
                     increment(&mut state["last_repair"],"expected_datagrams");
                     if length>2048 {increment(&mut state["last_repair"],"oversize_datagrams");continue;}
                     if !pong_sent {
@@ -656,6 +671,20 @@ mod tests {
         assert_eq!(state["repair_timeouts"],3);
         finish_repair(&mut state,"ping_completed_without_shred");
         assert_eq!(state["repair_timeouts"],4);
+    }
+    #[test] fn unexpected_datagram_records_first_source_without_admitting_data() {
+        let mut record=json!({"unexpected_endpoint":0,"expected_datagrams":0});
+        unexpected_datagram(&mut record,"1.1.1.1:8008".parse().unwrap(),&17u32.to_le_bytes(),17,100.5);
+        assert_eq!(record["unexpected_sample"]["source"],"1.1.1.1:8008");
+        assert_eq!(record["unexpected_sample"]["nonce_matches"],true);
+        unexpected_datagram(&mut record,"8.8.8.8:8008".parse().unwrap(),&[],17,101.0);
+        assert_eq!(record["unexpected_endpoint"],2);
+        assert_eq!(record["unexpected_sample"]["source"],"1.1.1.1:8008");
+        assert_eq!(record["expected_datagrams"],0);
+        assert!(record["validated_shreds"].is_null());
+        let mut short=json!({});
+        unexpected_datagram(&mut short,"1.1.1.1:8008".parse().unwrap(),&[],17,102.0);
+        assert!(short["unexpected_sample"]["nonce_matches"].is_null());
     }
     #[test] fn repair_interruption_retains_lease_and_socket_failure_evidence() {
         let mut state=json!({"repair_timeouts":1,"last_repair":{"outcome":"waiting","lease_expires":155.0}});
