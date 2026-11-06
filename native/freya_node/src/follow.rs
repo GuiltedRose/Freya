@@ -8,14 +8,16 @@ use solana_ledger::shred::Shred;
 use std::{net::UdpSocket, process::{Command, Stdio}, str::FromStr};
 const SCHEMA: &str = "freya-native-follow-v1";
 fn response(packet:&[u8],from:SocketAddr,expected:SocketAddr,nonce:u32,slot:u64,
-    version:u16,leader:&Pubkey,max:u32,index:Option<u64>) -> Option<(Shred,Vec<u8>)> {
-    if from!=expected || packet.len()<4 || packet.len()>2048 {return None;}
+    version:u16,leader:&Pubkey,max:u32,index:Option<u64>) -> Result<(Shred,Vec<u8>), &'static str> {
+    if from!=expected {return Err("unexpected_endpoint");}
+    if packet.len()<4 || packet.len()>2048 {return Err("packet_framing");}
     let end=packet.len()-4;
-    if u32::from_le_bytes(packet[end..].try_into().ok()?)!=nonce {return None;}
+    let trailer=packet[end..].try_into().map_err(|_|"packet_framing")?;
+    if u32::from_le_bytes(trailer)!=nonce {return Err("nonce_mismatch");}
     let bytes=packet[..end].to_vec();
-    let shred=checked(bytes.clone(),slot,version,leader,max).ok()?;
-    if index.is_some_and(|i|i!=u64::from(shred.index())) {return None;}
-    Some((shred,bytes))
+    let shred=checked(bytes.clone(),slot,version,leader,max).map_err(|_|"shred_validation_failed")?;
+    if index.is_some_and(|i|i!=u64::from(shred.index())) {return Err("index_mismatch");}
+    Ok((shred,bytes))
 }
 fn repair_address_allowed(address: &SocketAddr) -> bool {
     address.is_ipv4() && address.port()!=0 && SocketAddrSpace::Global.check(address)
@@ -40,6 +42,36 @@ fn finish_repair(state: &mut Value, result: &str) {
     if matches!(result,"response_timeout"|"ping_completed_without_shred") {increment(state,"repair_timeouts");}
     state["last_repair"]["outcome"]=json!(result);
     state["last_repair"]["finished_at"]=json!(now());
+}
+fn repair_error(state: &mut Value, operation: &str, error: io::Error) -> io::Error {
+    let record=&mut state["last_repair"];
+    record["failure_operation"]=json!(operation);
+    record["socket_errno"]=json!(error.raw_os_error());
+    record["error_kind"]=json!(match error.kind() {
+        io::ErrorKind::PermissionDenied=>"permission_denied",
+        io::ErrorKind::NotFound=>"not_found",
+        io::ErrorKind::ConnectionRefused=>"connection_refused",
+        io::ErrorKind::TimedOut=>"timed_out",
+        io::ErrorKind::WouldBlock=>"would_block",
+        _=>"io_error",
+    });
+    error
+}
+fn interrupted_repair(state: &mut Value, stopped: bool, deadline: bool, at: f64) {
+    if !matches!(state["last_repair"]["outcome"].as_str(),Some("prepared"|"waiting")) {return;}
+    let record=&mut state["last_repair"];
+    let expired=record["lease_expires"].as_f64().is_some_and(|until|at>=until);
+    let reason=match record["failure_operation"].as_str() {
+        Some("lease_check")=>if expired {"network_lease_expired"} else {"network_authorization_invalid"},
+        Some("request_send"|"pong_send"|"socket_receive")=>"socket_error",
+        Some("counter_read")=>"counter_read_failed",
+        _=>if stopped {"stop_requested"} else if deadline {"follow_deadline"} else {"request_interrupted"},
+    };
+    record["outcome"]=json!(reason);
+    record["stop_observed"]=json!(stopped);
+    record["follow_deadline_reached"]=json!(deadline);
+    record["lease_expired_at_finish"]=json!(expired);
+    record["finished_at"]=json!(at);
 }
 fn save(path: &Path, value: &Value) -> io::Result<()> {
     atomic_file(path,&serde_json::to_vec(value).map_err(|_|invalid())?)
@@ -268,10 +300,12 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     state["peer_connected"] = json!(0); state["active_repair_peer"] = Value::Null;
     state["queue_in_flight"] = json!(0); state["last_error_category"] = Value::Null;
     publish(dir,&state)?;
-    if lease().is_err() {
+    let initial_authorization=lease();
+    if initial_authorization.is_err() {
         state["state"]=json!("blocked");state["last_error_category"]=json!("network_authorization");
         publish(dir,&state)?;return Err(invalid());
     }
+    state["network_lease_expires"]=initial_authorization?["expires"].clone();
     let initial = counters()?;
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT,stop.clone())?;
@@ -402,23 +436,25 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     "local_socket":socket.local_addr()?.to_string(),"nonce":nonce,
                     "kind":if highest {"highest_window_index"} else {"window_index"},
                     "index":if highest {Some(0)} else {index},"request_bytes":payload.len(),
+                    "lease_expires":state["network_lease_expires"],
                     "send_confirmed":false,"outcome":"prepared","expected_datagrams":0,
                     "unexpected_endpoint":0,"oversize_datagrams":0,"rejected_datagrams":0,
                     "authenticated_pings":0,"pongs_sent":0});
                 publish(dir,&state)?;
                 if stop.load(Ordering::Relaxed) || Instant::now()>=deadline {break;}
-                lease()?;
-                if socket.send_to(&payload,address)?!=payload.len() {return Err(invalid());}
+                let authorization=lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
+                state["last_repair"]["lease_expires"]=authorization["expires"].clone();
+                if socket.send_to(&payload,address).map_err(|e|repair_error(&mut state,"request_send",e))?!=payload.len() {return Err(invalid());}
                 state["last_repair"]["send_confirmed"]=json!(true);
                 state["last_repair"]["outcome"]=json!("waiting");
                 publish(dir,&state)?;
                 let timeout=(Instant::now()+Duration::from_secs(2)).min(deadline);
                 let mut packet=[0u8;2049];let mut accepted=false;let mut pong_sent=false;
                 while Instant::now()<timeout && !stop.load(Ordering::Relaxed) {
-                    lease()?;
-                    let usage=counters()?;
+                    lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
+                    let usage=counters().map_err(|e|repair_error(&mut state,"counter_read",e))?;
                     if usage.0.checked_sub(initial.0).ok_or_else(invalid)?.saturating_add(usage.1.checked_sub(initial.1).ok_or_else(invalid)?)>=traffic_cap {return Err(invalid());}
-                    let (length,from)=match socket.recv_from(&mut packet){Ok(v)=>v,Err(e) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut)=>continue,Err(e)=>return Err(e)};
+                    let (length,from)=match socket.recv_from(&mut packet){Ok(v)=>v,Err(e) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut)=>continue,Err(e)=>return Err(repair_error(&mut state,"socket_receive",e))};
                     if from!=address {increment(&mut state["last_repair"],"unexpected_endpoint");continue;}
                     increment(&mut state["last_repair"],"expected_datagrams");
                     if length>2048 {increment(&mut state["last_repair"],"oversize_datagrams");continue;}
@@ -426,14 +462,18 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                         if let Some(pong)=freya_repair_pong(&packet[..length],&request_key,&peer){
                             increment(&mut state["last_repair"],"authenticated_pings");
                             if stop.load(Ordering::Relaxed) || Instant::now()>=deadline {break;}
-                            lease()?;
-                            if socket.send_to(&pong,address)?!=pong.len() {return Err(invalid());}
+                            lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
+                            if socket.send_to(&pong,address).map_err(|e|repair_error(&mut state,"pong_send",e))?!=pong.len() {return Err(invalid());}
                             increment(&mut state["last_repair"],"pongs_sent");
                             pong_sent=true;publish(dir,&state)?;continue;
                         }
                     }
-                    let Some((shred,bytes))=response(&packet[..length],from,address,nonce,cursor,version,&leader,max,
-                        if highest{None}else{index}) else {increment(&mut state["last_repair"],"rejected_datagrams");continue;};
+                    let (shred,bytes)=match response(&packet[..length],from,address,nonce,cursor,version,&leader,max,
+                        if highest{None}else{index}) {
+                        Ok(value)=>value,
+                        Err(reason)=>{increment(&mut state["last_repair"],"rejected_datagrams");
+                            state["last_repair"]["last_rejection"]=json!(reason);continue;}
+                    };
                     let path=base.join(format!("{}.shred",shred.index()));
                     if path.exists(){
                         if raw(&path)?!=bytes {save(&base.join("conflict.json"),&json!({"conflict":true}))?;atomic_file(&base.join("conflicting-shred.bin"),&bytes)?;return Err(invalid());}
@@ -450,11 +490,22 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
             }
             Ok(())
         })();
-        stop.store(true,Ordering::Relaxed);let joined=service.join();session?;joined.map_err(|_|invalid())
+        // Capture the real cancellation flag before setting it for gossip teardown.
+        if state["last_repair"]["session_id"].as_str()==Some(repair_session_id.as_str()) {
+            interrupted_repair(&mut state,stop.load(Ordering::Relaxed),Instant::now()>=deadline,
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
+            if session.is_err() {state["last_repair"]["failure_stage"]=json!(failure_stage);}
+        }
+        stop.store(true,Ordering::Relaxed);
+        state["queue_in_flight"]=json!(0);state["state"]=json!("stopping");
+        // Persist failure evidence before a potentially slow gossip join.
+        let diagnostic=publish(dir,&state);
+        let joined=service.join();diagnostic?;session?;joined.map_err(|_|invalid())
     })();
     if state["last_repair"]["session_id"].as_str()==Some(repair_session_id.as_str())
         && matches!(state["last_repair"]["outcome"].as_str(),Some("prepared"|"waiting")) {
-        state["last_repair"]["outcome"]=json!("request_interrupted");
+        interrupted_repair(&mut state,stop.load(Ordering::Relaxed),false,
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
         state["last_repair"]["failure_stage"]=json!(failure_stage);
         state["last_repair"]["finished_at"]=json!(now());
     }
@@ -606,13 +657,49 @@ mod tests {
         finish_repair(&mut state,"ping_completed_without_shred");
         assert_eq!(state["repair_timeouts"],4);
     }
+    #[test] fn repair_interruption_retains_lease_and_socket_failure_evidence() {
+        let mut state=json!({"repair_timeouts":1,"last_repair":{"outcome":"waiting","lease_expires":155.0}});
+        let error=io::Error::new(io::ErrorKind::NotFound,"SECRET lease path");
+        let _=repair_error(&mut state,"lease_check",error);
+        interrupted_repair(&mut state,false,false,155.1);
+        assert_eq!(state["last_repair"]["outcome"],"network_lease_expired");
+        assert_eq!(state["last_repair"]["stop_observed"],false);
+        assert_eq!(state["repair_timeouts"],1);
+        assert!(!state.to_string().contains("SECRET"));
+        // Teardown setting stop=true must not replace the captured error.
+        interrupted_repair(&mut state,true,false,156.0);
+        assert_eq!(state["last_repair"]["outcome"],"network_lease_expired");
+        state["last_repair"]=json!({"outcome":"waiting","lease_expires":155.0});
+        let _=repair_error(&mut state,"socket_receive",io::Error::from_raw_os_error(113));
+        interrupted_repair(&mut state,false,false,154.0);
+        assert_eq!(state["last_repair"]["outcome"],"socket_error");
+        assert_eq!(state["last_repair"]["socket_errno"],113);
+    }
+    #[test] fn repair_interruption_distinguishes_revocation_stop_and_deadline() {
+        for (operation,stopped,deadline,reason) in [
+            ("lease_check",false,false,"network_authorization_invalid"),
+            ("counter_read",false,false,"counter_read_failed"),
+            ("",true,false,"stop_requested"),("",false,true,"follow_deadline")] {
+            let mut state=json!({"last_repair":{"outcome":"waiting","lease_expires":155.0}});
+            if !operation.is_empty() {let _=repair_error(&mut state,operation,invalid());}
+            interrupted_repair(&mut state,stopped,deadline,154.0);
+            assert_eq!(state["last_repair"]["outcome"],reason);
+        }
+        let mut accepted=json!({"last_repair":{"outcome":"validated_shred"}});
+        interrupted_repair(&mut accepted,true,true,156.0);
+        assert_eq!(accepted["last_repair"]["outcome"],"validated_shred");
+    }
     #[test] fn response_binds_socket_nonce_slot_version_leader_and_index() {
         let (key,shreds)=super::super::acquisition::reconstruction_tests::fixture();
         let data=shreds.iter().find(|s|s.is_data()).unwrap();
         let mut packet=data.payload().as_ref().to_vec();packet.extend_from_slice(&17u32.to_le_bytes());
         let address="127.0.0.1:12345".parse().unwrap();let other="127.0.0.1:12346".parse().unwrap();
-        let accept=|from,nonce,slot,version,leader:&Pubkey,index|response(&packet,from,address,nonce,slot,version,leader,4096,index).is_some();
+        let accept=|from,nonce,slot,version,leader:&Pubkey,index|response(&packet,from,address,nonce,slot,version,leader,4096,index).is_ok();
         assert!(accept(address,17,42,7,&key.pubkey(),Some(0)));
+        assert_eq!(response(&packet,address,address,18,42,7,&key.pubkey(),4096,None).err(),Some("nonce_mismatch"));
+        assert_eq!(response(&packet[..3],address,address,17,42,7,&key.pubkey(),4096,None).err(),Some("packet_framing"));
+        assert_eq!(response(&packet,address,address,17,43,7,&key.pubkey(),4096,None).err(),Some("shred_validation_failed"));
+
         assert!(!accept(other,17,42,7,&key.pubkey(),Some(0)));
         assert!(!accept(address,18,42,7,&key.pubkey(),Some(0)));
         assert!(!accept(address,17,43,7,&key.pubkey(),Some(0)));

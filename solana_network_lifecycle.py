@@ -128,6 +128,23 @@ def cleanup():
     # No firewall-wide flush, no shared routing/firewall configuration removal.
 
 
+def controller_stop_reason(stopping, at, expiry, used=None, granted=None):
+    if stopping: return 'stop_requested'
+    if at >= expiry: return 'lease_expired'
+    if used is not None and granted is not None and used >= granted: return 'grant_exhausted'
+    return None
+
+
+def close_session(budget, identifier, event):
+    # Audit failure must not prevent final accounting and namespace teardown.
+    try:
+        close_boundary()
+        event('session_stopped_gap')
+    finally:
+        try: sample_os(budget, identifier, NS, time.time())
+        finally: cleanup()
+
+
 def start(config):
     session_seconds=config.get('sessionSeconds',55)
     if type(session_seconds) is not int or not 1<=session_seconds<=3600:
@@ -151,15 +168,21 @@ def start(config):
     grant=budget.grant(config['sessionBytes'],time.time())
     expiry=min(grant['cycle_end'],time.time()+session_seconds)
     audit=ledger.parent/'network-events.jsonl'
+    stop_reason='controller_error'
+    stop_signal=None
+    ready_at=None
     def event(phase):
         with audit.open('a') as stream:
-            stream.write(json.dumps({'time':time.time(),'grant':grant['id'],'phase':phase,'coverage':'gap until collector verifies recovery'})+'\n')
+            stream.write(json.dumps({'time':time.time(),'grant':grant['id'],'phase':phase,'expires':expiry,'ready_at':ready_at,
+                'stop_reason':stop_reason if phase=='session_stopped_gap' else None,
+                'stop_signal':stop_signal,'coverage':'gap until collector verifies recovery'})+'\n')
             stream.flush(); os.fsync(stream.fileno())
     event('session_start')
     stopping=False
-    def stop(*_):
-        nonlocal stopping
+    def stop(signum, *_):
+        nonlocal stopping, stop_signal
         stopping=True
+        stop_signal=signum
     signal.signal(signal.SIGTERM,stop)
     signal.signal(signal.SIGINT,stop)
     try:
@@ -203,19 +226,22 @@ def start(config):
             os.replace(temporary,STATUS)
         publish()
         run('ip','link','set',VETH,'up')
+        ready_at=time.time()
+        event('session_ready')
         notify('READY=1\nSTATUS=Bounded Solana session; no automatic renewal')
         while not stopping and time.time()<expiry:
             sample_os(budget,grant['id'],NS,time.time())
             publish()
             with budget.connect() as db:
                 counters=db.execute('SELECT rx+tx FROM grants WHERE id=?',(grant['id'],)).fetchone()[0]
-            if counters>=grant['bytes']: break
+            if counters>=grant['bytes']:
+                stop_reason='grant_exhausted'
+                break
             time.sleep(1)
+        if stop_reason!='grant_exhausted':
+            stop_reason=controller_stop_reason(stopping,time.time(),expiry) or 'controller_error'
     finally:
-        close_boundary()
-        event('session_stopped_gap')
-        try: sample_os(budget,grant['id'],NS,time.time())
-        finally: cleanup()
+        close_session(budget,grant['id'],event)
 
 
 def main():

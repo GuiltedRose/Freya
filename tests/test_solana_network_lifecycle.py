@@ -1,7 +1,7 @@
 """UNEXECUTED controller regression tests; all OS calls mocked."""
 import unittest
 from unittest.mock import patch, MagicMock
-from solana_network_lifecycle import host_rules, cleanup, start
+from solana_network_lifecycle import host_rules, cleanup, start, controller_stop_reason, close_session
 
 
 class LifecycleTests(unittest.TestCase):
@@ -46,3 +46,28 @@ class LifecycleTests(unittest.TestCase):
             calls=[call.args for call in run.call_args_list]
             self.assertEqual(calls[0],('ip','link','set','solana-host','down'))
             self.assertEqual(calls[-1],('ip','netns','del','solana-budget'))
+
+    def test_stop_reason_does_not_extend_or_renew_lease(self):
+        self.assertEqual(controller_stop_reason(False, 155, 155), 'lease_expired')
+        self.assertEqual(controller_stop_reason(True, 154, 155), 'stop_requested')
+        self.assertEqual(controller_stop_reason(False, 154, 155, 1000, 1000), 'grant_exhausted')
+        self.assertIsNone(controller_stop_reason(False, 154, 155, 999, 1000))
+
+    def test_audit_failure_still_samples_and_cleans_up(self):
+        with patch('solana_network_lifecycle.close_boundary') as boundary, \
+             patch('solana_network_lifecycle.sample_os') as sample, \
+             patch('solana_network_lifecycle.cleanup') as clean:
+            event=MagicMock(side_effect=OSError('private diagnostic failure'))
+            budget=object()
+            with self.assertRaises(OSError): close_session(budget, 'grant', event)
+            boundary.assert_called_once()
+            sample.assert_called_once()
+            clean.assert_called_once()
+
+    def test_boundary_failure_still_attempts_cleanup(self):
+        with patch('solana_network_lifecycle.close_boundary', side_effect=OSError()), \
+             patch('solana_network_lifecycle.sample_os') as sample, \
+             patch('solana_network_lifecycle.cleanup') as clean:
+            with self.assertRaises(OSError): close_session(object(), 'grant', MagicMock())
+            sample.assert_called_once()
+            clean.assert_called_once()
