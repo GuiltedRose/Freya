@@ -54,6 +54,20 @@ fn unexpected_datagram(record: &mut Value, from: SocketAddr, packet: &[u8], nonc
             "bytes":packet.len(),"nonce_matches":nonce_matches});
     }
 }
+fn remember_repair_send(state: &mut Value, at: f64) -> io::Result<()> {
+    let record=&state["last_repair"];
+    if record["send_confirmed"]!=true {return Err(invalid());}
+    let mut entry=json!({"sent_at":at});
+    for key in ["session_id","peer","endpoint","local_socket","nonce","slot","kind","request_bytes"] {
+        entry[key]=record[key].clone();
+    }
+    if state["repair_request_history"].is_null() {state["repair_request_history"]=json!([]);}
+    let history=state["repair_request_history"].as_array_mut().ok_or_else(invalid)?;
+    if history.len()>16 {return Err(invalid());}
+    if history.len()==16 {history.remove(0);}
+    history.push(entry);
+    Ok(())
+}
 fn repair_error(state: &mut Value, operation: &str, error: io::Error) -> io::Error {
     let record=&mut state["last_repair"];
     record["failure_operation"]=json!(operation);
@@ -301,6 +315,8 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         if !state[field].is_null() && !state[field].is_u64() {return Err(invalid());}
     }
     if !state["window_start"].is_null() && (state["next_slot"].is_null() || !dir.join("window.json").is_file()) {return Err(invalid());}
+    if !state["repair_request_history"].is_null()
+        && state["repair_request_history"].as_array().is_none_or(|rows|rows.len()>16) {return Err(invalid());}
     state["state"] = json!("starting"); state["native_ready"] = json!(false);
     state["verification"] = json!("RPC schedule plus leader-signed shreds; no replay or consensus");
     state["external_rpc_dependency"] = json!(["genesis","finalized manifest","leader schedule","shred version","execution receipts"]);
@@ -457,6 +473,8 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 state["last_repair"]["lease_expires"]=authorization["expires"].clone();
                 if socket.send_to(&payload,address).map_err(|e|repair_error(&mut state,"request_send",e))?!=payload.len() {return Err(invalid());}
                 state["last_repair"]["send_confirmed"]=json!(true);
+                remember_repair_send(&mut state,
+                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64())?;
                 state["last_repair"]["outcome"]=json!("waiting");
                 publish(dir,&state)?;
                 let timeout=(Instant::now()+Duration::from_secs(2)).min(deadline);
@@ -671,6 +689,24 @@ mod tests {
         assert_eq!(state["repair_timeouts"],3);
         finish_repair(&mut state,"ping_completed_without_shred");
         assert_eq!(state["repair_timeouts"],4);
+    }
+    #[test] fn confirmed_send_history_retains_prior_peer_and_stays_bounded() {
+        let mut state=json!({"repair_requests":20,"last_repair":{"send_confirmed":false}});
+        assert!(remember_repair_send(&mut state,1.0).is_err());
+        assert!(state["repair_request_history"].is_null());
+        for nonce in 0..20 {
+            state["last_repair"]=json!({"send_confirmed":true,"session_id":"session",
+                "peer":"public identity","endpoint":"185.8.106.229:8009",
+                "local_socket":"0.0.0.0:49458","nonce":nonce,"slot":42,
+                "kind":"highest_window_index","request_bytes":160});
+            remember_repair_send(&mut state,nonce as f64).unwrap();
+        }
+        assert_eq!(state["repair_request_history"].as_array().unwrap().len(),16);
+        assert_eq!(state["repair_request_history"][0]["nonce"],4);
+        assert_eq!(state["repair_request_history"][15]["nonce"],19);
+        assert_eq!(state["repair_request_history"][15]["endpoint"],"185.8.106.229:8009");
+        assert_eq!(state["repair_requests"],20);
+        assert!(state["validated_shreds"].is_null());
     }
     #[test] fn unexpected_datagram_records_first_source_without_admitting_data() {
         let mut record=json!({"unexpected_endpoint":0,"expected_datagrams":0});
