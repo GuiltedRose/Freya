@@ -1,7 +1,9 @@
 //! Active, bounded repair sessions. RPC supplies schedules, never shred payloads.
 use super::*;
 use super::acquisition::{atomic_file, checked, raw, reconstruct};
-use solana_core::repair::serve_repair::{freya_repair_pong, RepairProtocol, RepairRequestHeader, ServeRepair};
+use solana_core::repair::serve_repair::{freya_repair_pong_checked, RepairProtocol, RepairRequestHeader, ServeRepair};
+#[cfg(test)]
+use solana_core::repair::serve_repair::freya_repair_pong;
 use solana_gossip::contact_info::Protocol;
 use solana_pubkey::Pubkey;
 use solana_ledger::shred::Shred;
@@ -35,6 +37,12 @@ fn repair_wait_result(accepted: bool, stopped: bool, deadline_reached: bool,
     else if pong_sent {"ping_completed_without_shred"}
     else {"response_timeout"}
 }
+fn select_repair_peer<T: Copy + PartialEq>(peers: &[T], attempts: u64, pending: &mut Option<T>)
+    -> io::Result<(T,bool)> {
+    if let Some(peer)=pending.take().filter(|peer|peers.contains(peer)) {return Ok((peer,true));}
+    if peers.is_empty() {return Err(invalid());}
+    Ok((peers[attempts as usize%peers.len()],false))
+}
 fn increment(record: &mut Value, key: &str) {
     record[key]=json!(record[key].as_u64().unwrap_or(0).saturating_add(1));
 }
@@ -58,7 +66,7 @@ fn remember_repair_send(state: &mut Value, at: f64) -> io::Result<()> {
     let record=&state["last_repair"];
     if record["send_confirmed"]!=true {return Err(invalid());}
     let mut entry=json!({"sent_at":at});
-    for key in ["session_id","peer","endpoint","local_socket","nonce","slot","kind","request_bytes"] {
+    for key in ["session_id","peer","endpoint","local_socket","nonce","slot","kind","request_bytes","handshake_followup"] {
         entry[key]=record[key].clone();
     }
     if state["repair_request_history"].is_null() {state["repair_request_history"]=json!([]);}
@@ -386,6 +394,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         failure_stage="gossip_initialization";
         let (service,_,cluster) = make_node(key,&bootstraps,stop.clone(),None,version,true,SocketAddrSpace::Global);
+        let mut handshake_retry=None;
         let session = (|| -> io::Result<()> {
             while Instant::now()<deadline && !stop.load(Ordering::Relaxed) {
                 failure_stage="native_network_or_resource_policy";
@@ -447,7 +456,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     .filter_map(|(p,_)|p.serve_repair(Protocol::UDP).filter(repair_address_allowed).map(|a|(*p.pubkey(),a))).take(64).collect();
                 state["peer_connected"]=json!(peers.len());
                 if peers.is_empty(){state["state"]=json!("discovering");publish(dir,&state)?;thread::sleep(Duration::from_millis(100));continue;}
-                let (peer,address)=peers[attempts as usize%peers.len()];
+                let ((peer,address),handshake_followup)=select_repair_peer(&peers,attempts,&mut handshake_retry)?;
                 let nonce=rand::random::<u32>();
                 let header=RepairRequestHeader::new(request_key.pubkey(),peer,now().saturating_mul(1000),nonce);
                 let index=report["missing_indices"].as_array().and_then(|a|a.first()).and_then(Value::as_u64);
@@ -463,6 +472,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     "local_socket":socket.local_addr()?.to_string(),"nonce":nonce,
                     "kind":if highest {"highest_window_index"} else {"window_index"},
                     "index":if highest {Some(0)} else {index},"request_bytes":payload.len(),
+                    "handshake_followup":handshake_followup,
                     "lease_expires":state["network_lease_expires"],
                     "send_confirmed":false,"outcome":"prepared","expected_datagrams":0,
                     "unexpected_endpoint":0,"oversize_datagrams":0,"rejected_datagrams":0,
@@ -477,7 +487,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64())?;
                 state["last_repair"]["outcome"]=json!("waiting");
                 publish(dir,&state)?;
-                let timeout=(Instant::now()+Duration::from_secs(2)).min(deadline);
+                let receive_started=Instant::now();
+                let timeout=(receive_started+Duration::from_secs(2)).min(deadline);
+                let receive_at=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+                state["last_repair"]["receive_started_at"]=json!(receive_at);
+                state["last_repair"]["receive_deadline_at"]=json!(receive_at+timeout.duration_since(receive_started).as_secs_f64());
                 let mut packet=[0u8;2049];let mut accepted=false;let mut pong_sent=false;
                 while Instant::now()<timeout && !stop.load(Ordering::Relaxed) {
                     lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
@@ -491,14 +505,22 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     }
                     increment(&mut state["last_repair"],"expected_datagrams");
                     if length>2048 {increment(&mut state["last_repair"],"oversize_datagrams");continue;}
-                    if !pong_sent {
-                        if let Some(pong)=freya_repair_pong(&packet[..length],&request_key,&peer){
+                    state["last_repair"]["last_expected_received_at"]=json!(
+                        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
+                    if !pong_sent && length==132 && packet[..4]==[0;4] {
+                        match freya_repair_pong_checked(&packet[..length],&request_key,&peer) {
+                        Ok(pong)=>{
                             increment(&mut state["last_repair"],"authenticated_pings");
                             if stop.load(Ordering::Relaxed) || Instant::now()>=deadline {break;}
                             lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
                             if socket.send_to(&pong,address).map_err(|e|repair_error(&mut state,"pong_send",e))?!=pong.len() {return Err(invalid());}
                             increment(&mut state["last_repair"],"pongs_sent");
+                            state["last_repair"]["pong_sent_at"]=json!(
+                                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
                             pong_sent=true;publish(dir,&state)?;continue;
+                        }
+                        Err(reason)=>{increment(&mut state["last_repair"],"rejected_datagrams");
+                            state["last_repair"]["last_rejection"]=json!(reason);continue;}
                         }
                     }
                     let (shred,bytes)=match response(&packet[..length],from,address,nonce,cursor,version,&leader,max,
@@ -515,6 +537,10 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     state["repair_responses"]=json!(state["repair_responses"].as_u64().unwrap_or(0)+1);accepted=true;break;
                 }
                 let result=repair_wait_result(accepted,stop.load(Ordering::Relaxed),Instant::now()>=deadline,pong_sent);
+                // One follow-up uses an existing paced attempt, never an extra send.
+                if !handshake_followup && result=="ping_completed_without_shred" {
+                    handshake_retry=Some((peer,address));
+                }
                 finish_repair(&mut state,result);
                 state["queue_in_flight"]=json!(0);state["updated_at"]=json!(now());publish(dir,&state)?;
                 let wait=if accepted{interval}else{interval.saturating_mul(1u64<<attempts.min(4)).min(8000)};
@@ -670,6 +696,17 @@ mod tests {
             assert!(!repair_address_allowed(&value.parse().unwrap()),"{value}");
         }
     }
+    #[test] fn handshake_followup_requires_same_eligible_identity_and_endpoint() {
+        let mut pending=Some((1,8008));
+        assert_eq!(select_repair_peer(&[(1,8008),(2,8009)],1,&mut pending).unwrap(),((1,8008),true));
+        assert!(pending.is_none());
+        assert_eq!(select_repair_peer(&[(1,8008),(2,8009)],1,&mut pending).unwrap(),((2,8009),false));
+        for stale in [(1,9000),(3,8008)] {
+            pending=Some(stale);
+            assert_eq!(select_repair_peer(&[(1,8008),(2,8009)],1,&mut pending).unwrap(),((2,8009),false));
+        }
+        assert!(select_repair_peer::<(u8,u16)>(&[],0,&mut None).is_err());
+    }
     #[test] fn repair_wait_separates_stop_deadline_handshake_and_timeout() {
         assert_eq!(repair_wait_result(false,true,false,false),"stop_requested");
         assert_eq!(repair_wait_result(false,false,true,false),"follow_deadline");
@@ -782,5 +819,10 @@ mod tests {
         assert!(pong.verify());assert_eq!(pong.pubkey(),node.pubkey());
         assert!(freya_repair_pong(&data,&node,&node.pubkey()).is_none());
         assert!(freya_repair_pong(b"corrupt",&node,&peer.pubkey()).is_none());
+        assert_eq!(freya_repair_pong_checked(&data,&node,&node.pubkey()).err(),Some("ping_identity_mismatch"));
+        let mut forged=data.clone();forged[68]^=1;
+        assert_eq!(freya_repair_pong_checked(&forged,&node,&peer.pubkey()).err(),Some("ping_signature_invalid"));
+        assert_eq!(freya_repair_pong_checked(&data[..131],&node,&peer.pubkey()).err(),Some("ping_framing"));
+
     }
 }
