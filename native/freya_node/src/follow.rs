@@ -29,6 +29,13 @@ fn repair_address_allowed(address: &SocketAddr) -> bool {
             _=>false,
         }
 }
+fn receive_error(error: io::Error, stopped: bool, before_deadline: bool) -> io::Result<bool> {
+    match error.kind() {
+        io::ErrorKind::Interrupted=>Ok(!stopped && before_deadline), // Retry only under the original loop deadline.
+        io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut=>Ok(true),
+        _=>Err(error),
+    }
+}
 fn repair_wait_result(accepted: bool, stopped: bool, deadline_reached: bool,
     pong_sent: bool) -> &'static str {
     if accepted {"validated_shred"}
@@ -497,7 +504,14 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
                     let usage=counters().map_err(|e|repair_error(&mut state,"counter_read",e))?;
                     if usage.0.checked_sub(initial.0).ok_or_else(invalid)?.saturating_add(usage.1.checked_sub(initial.1).ok_or_else(invalid)?)>=traffic_cap {return Err(invalid());}
-                    let (length,from)=match socket.recv_from(&mut packet){Ok(v)=>v,Err(e) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut)=>continue,Err(e)=>return Err(repair_error(&mut state,"socket_receive",e))};
+                    let (length,from)=match socket.recv_from(&mut packet) {
+                        Ok(value)=>value,
+                        Err(error)=>match receive_error(error,stop.load(Ordering::Relaxed),Instant::now()<timeout) {
+                            Ok(true)=>continue,
+                            Ok(false)=>break,
+                            Err(error)=>return Err(repair_error(&mut state,"socket_receive",error)),
+                        }
+                    };
                     if from!=address {
                         unexpected_datagram(&mut state["last_repair"],from,&packet[..length],nonce,
                             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
@@ -706,6 +720,30 @@ mod tests {
             assert_eq!(select_repair_peer(&[(1,8008),(2,8009)],1,&mut pending).unwrap(),((2,8009),false));
         }
         assert!(select_repair_peer::<(u8,u16)>(&[],0,&mut None).is_err());
+    }
+    #[test] fn interrupted_receive_during_stop_is_graceful_not_socket_error() {
+        let mut state=json!({"repair_timeouts":7,"last_repair":{"outcome":"waiting"}});
+        let retry=receive_error(io::Error::from_raw_os_error(4),true,true).unwrap();
+        assert!(!retry);
+        finish_repair(&mut state,repair_wait_result(false,true,false,false));
+        assert_eq!(state["last_repair"]["outcome"],"stop_requested");
+        assert!(state["last_repair"]["failure_operation"].is_null());
+        assert_eq!(state["repair_timeouts"],7);
+    }
+    #[test] fn interrupted_receive_without_stop_uses_original_deadline() {
+        let deadline=Instant::now(); // Already expired: EINTR cannot create a fresh window.
+        assert!(receive_error(io::Error::from_raw_os_error(4),false,true).unwrap());
+        assert!(!receive_error(io::Error::from_raw_os_error(4),false,Instant::now()<deadline).unwrap());
+        assert_eq!(repair_wait_result(false,false,Instant::now()>=deadline,false),"follow_deadline");
+        for kind in [io::ErrorKind::WouldBlock,io::ErrorKind::TimedOut] {
+            assert!(receive_error(io::Error::from(kind),false,true).unwrap());
+        }
+    }
+    #[test] fn real_receive_failures_remain_errors_even_during_stop() {
+        for stopped in [false,true] {
+            assert_eq!(receive_error(io::Error::from_raw_os_error(113),stopped,true).unwrap_err().raw_os_error(),Some(113));
+            assert_eq!(receive_error(io::Error::from(io::ErrorKind::PermissionDenied),stopped,true).unwrap_err().kind(),io::ErrorKind::PermissionDenied);
+        }
     }
     #[test] fn repair_wait_separates_stop_deadline_handshake_and_timeout() {
         assert_eq!(repair_wait_result(false,true,false,false),"stop_requested");
