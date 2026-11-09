@@ -83,6 +83,15 @@ fn remember_repair_send(state: &mut Value, at: f64) -> io::Result<()> {
     history.push(entry);
     Ok(())
 }
+fn traffic_snapshot(state: &mut Value, phase: &str, counts: (u64,u64)) -> io::Result<()> {
+    let traffic=&mut state["session_traffic"];
+    let rx=counts.0.checked_sub(traffic["initial_rx"].as_u64().ok_or_else(invalid)?).ok_or_else(invalid)?;
+    let tx=counts.1.checked_sub(traffic["initial_tx"].as_u64().ok_or_else(invalid)?).ok_or_else(invalid)?;
+    let snapshots=traffic["interface_snapshots"].as_array_mut().ok_or_else(invalid)?;
+    if snapshots.len()>=4 {return Err(invalid());}
+    snapshots.push(json!({"phase":phase,"at":now(),"rx":rx,"tx":tx}));
+    Ok(())
+}
 fn repair_error(state: &mut Value, operation: &str, error: io::Error) -> io::Error {
     let record=&mut state["last_repair"];
     record["failure_operation"]=json!(operation);
@@ -364,6 +373,13 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let repair_session_id=format!("{}-{}",std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
     state["repair_session_id"]=json!(repair_session_id);
+    state["session_traffic"]=json!({"session_id":repair_session_id,
+        "interface_units":"namespace_eth0_counter_bytes",
+        "payload_units":"udp_application_bytes",
+        "initial_rx":initial.0,"initial_tx":initial.1,"interface_snapshots":[],
+        "repair_request_payload_tx":0,"repair_pong_payload_tx":0,
+        "repair_socket_rx_copied_bytes":0,"repair_socket_rx_datagrams":0,
+        "repair_socket_rx_buffer_full":0});
     let mut failure_stage="rpc_planning";
     let outcome = (|| -> io::Result<()> {
         let mut window = if dir.join("window.json").exists() && state["next_slot"].is_u64() {
@@ -391,6 +407,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         checked_source(&window,&state)?;
         state["bootstrap_peers"]=json!(bootstraps.iter().map(ToString::to_string).collect::<Vec<_>>());
         publish(dir,&state)?;
+        traffic_snapshot(&mut state,"planning_finished",counters()?)?;
         // RPC planning is bounded by the independent network lease, not the repair timer.
         let deadline=Instant::now()+Duration::from_secs(seconds);
         failure_stage="native_socket_initialization";
@@ -400,7 +417,9 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         failure_stage="gossip_initialization";
+        traffic_snapshot(&mut state,"gossip_start",counters()?)?;
         let (service,_,cluster) = make_node(key,&bootstraps,stop.clone(),None,version,true,SocketAddrSpace::Global);
+        let mut first_eligible_recorded=false;
         let mut handshake_retry=None;
         let session = (|| -> io::Result<()> {
             while Instant::now()<deadline && !stop.load(Ordering::Relaxed) {
@@ -463,6 +482,10 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                     .filter_map(|(p,_)|p.serve_repair(Protocol::UDP).filter(repair_address_allowed).map(|a|(*p.pubkey(),a))).take(64).collect();
                 state["peer_connected"]=json!(peers.len());
                 if peers.is_empty(){state["state"]=json!("discovering");publish(dir,&state)?;thread::sleep(Duration::from_millis(100));continue;}
+                if !first_eligible_recorded {
+                    traffic_snapshot(&mut state,"first_eligible_repair_peers",counters()?)?;
+                    first_eligible_recorded=true;
+                }
                 let ((peer,address),handshake_followup)=select_repair_peer(&peers,attempts,&mut handshake_retry)?;
                 let nonce=rand::random::<u32>();
                 let header=RepairRequestHeader::new(request_key.pubkey(),peer,now().saturating_mul(1000),nonce);
@@ -489,6 +512,9 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 let authorization=lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
                 state["last_repair"]["lease_expires"]=authorization["expires"].clone();
                 if socket.send_to(&payload,address).map_err(|e|repair_error(&mut state,"request_send",e))?!=payload.len() {return Err(invalid());}
+                state["session_traffic"]["repair_request_payload_tx"]=json!(
+                    state["session_traffic"]["repair_request_payload_tx"].as_u64().ok_or_else(invalid)?
+                        .saturating_add(payload.len() as u64));
                 state["last_repair"]["send_confirmed"]=json!(true);
                 remember_repair_send(&mut state,
                     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64())?;
@@ -512,6 +538,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                             Err(error)=>return Err(repair_error(&mut state,"socket_receive",error)),
                         }
                     };
+                    increment(&mut state["session_traffic"],"repair_socket_rx_datagrams");
+                    state["session_traffic"]["repair_socket_rx_copied_bytes"]=json!(
+                        state["session_traffic"]["repair_socket_rx_copied_bytes"].as_u64().ok_or_else(invalid)?
+                            .saturating_add(length as u64));
+                    if length==packet.len() {increment(&mut state["session_traffic"],"repair_socket_rx_buffer_full");}
                     if from!=address {
                         unexpected_datagram(&mut state["last_repair"],from,&packet[..length],nonce,
                             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
@@ -528,6 +559,9 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                             if stop.load(Ordering::Relaxed) || Instant::now()>=deadline {break;}
                             lease().map_err(|e|repair_error(&mut state,"lease_check",e))?;
                             if socket.send_to(&pong,address).map_err(|e|repair_error(&mut state,"pong_send",e))?!=pong.len() {return Err(invalid());}
+                            state["session_traffic"]["repair_pong_payload_tx"]=json!(
+                                state["session_traffic"]["repair_pong_payload_tx"].as_u64().ok_or_else(invalid)?
+                                    .saturating_add(pong.len() as u64));
                             increment(&mut state["last_repair"],"pongs_sent");
                             state["last_repair"]["pong_sent_at"]=json!(
                                 SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
@@ -581,6 +615,11 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
         state["last_repair"]["failure_stage"]=json!(failure_stage);
         state["last_repair"]["finished_at"]=json!(now());
+    }
+    // Optional final measurement must not mask the actual session result when the
+    // controller has already removed the interface. Earlier snapshots remain.
+    if counters().and_then(|counts|traffic_snapshot(&mut state,"finished",counts)).is_err() {
+        state["session_traffic"]["final_snapshot_unavailable"]=json!(true);
     }
     state["state"]=json!(if outcome.is_ok(){"stopped"}else{"blocked"});state["queue_in_flight"]=json!(0);
     if outcome.is_err(){state["last_error_category"]=json!(failure_stage);}
@@ -720,6 +759,17 @@ mod tests {
             assert_eq!(select_repair_peer(&[(1,8008),(2,8009)],1,&mut pending).unwrap(),((2,8009),false));
         }
         assert!(select_repair_peer::<(u8,u16)>(&[],0,&mut None).is_err());
+    }
+    #[test] fn traffic_snapshots_use_counter_deltas_and_bound_history() {
+        let mut state=json!({"repair_requests":17,"session_traffic":{
+            "initial_rx":100,"initial_tx":200,"interface_snapshots":[]}});
+        traffic_snapshot(&mut state,"planning_finished",(150,275)).unwrap();
+        assert_eq!(state["session_traffic"]["interface_snapshots"][0]["rx"],50);
+        assert_eq!(state["session_traffic"]["interface_snapshots"][0]["tx"],75);
+        assert!(traffic_snapshot(&mut state,"reset",(99,275)).is_err());
+        for _ in 0..3 {traffic_snapshot(&mut state,"phase",(150,275)).unwrap();}
+        assert!(traffic_snapshot(&mut state,"overflow",(150,275)).is_err());
+        assert_eq!(state["repair_requests"],17);
     }
     #[test] fn interrupted_receive_during_stop_is_graceful_not_socket_error() {
         let mut state=json!({"repair_timeouts":7,"last_repair":{"outcome":"waiting"}});
