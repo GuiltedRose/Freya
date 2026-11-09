@@ -1,6 +1,6 @@
 """Offline envelope checks; kernel behavior requires the NixOS lifecycle VM."""
 import unittest
-from solana_network_budget import firewall,shaping_commands
+from solana_network_budget import firewall,shaping_commands,SHAPER_BURST_BYTES,SHAPER_QUEUE_BYTES
 
 
 class NetworkPacingRepairTests(unittest.TestCase):
@@ -17,8 +17,11 @@ class NetworkPacingRepairTests(unittest.TestCase):
     def test_shaper_does_not_emit_sixteen_kilobyte_microbursts(self):
         commands=shaping_commands(upload_kbytes=16,download_kbytes=16)
         self.assertEqual(len(commands),2)
+        self.assertGreaterEqual(SHAPER_BURST_BYTES, 1514)  # Full Ethernet frame must fit.
+        self.assertLessEqual(SHAPER_BURST_BYTES, 2048)
+        self.assertEqual(SHAPER_QUEUE_BYTES, 65536)
         for command in commands:
-            self.assertIn('rate 128kbit burst 1500b latency 100ms',command)
+            self.assertIn('rate 128kbit burst 2048b limit 65536',command)
             self.assertNotIn('burst 16kb',command)
 
     def test_lifecycle_upload_policing_follows_namespace_shaper(self):

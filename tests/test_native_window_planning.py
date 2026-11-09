@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 import tempfile
+import sqlite3
+from contextlib import closing
 import unittest
 from unittest.mock import MagicMock, patch
 from prepare_native_window import prepare
@@ -12,6 +14,11 @@ class PlanningTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.output = Path(self.tmp.name) / 'window.json'
+        self.ledger = Path(self.tmp.name) / 'provider_limits.sqlite'
+        with closing(sqlite3.connect(self.ledger)) as db, db:
+            db.execute('CREATE TABLE provider_audit_key(id INTEGER PRIMARY KEY,secret BLOB NOT NULL)')
+            db.execute('INSERT INTO provider_audit_key VALUES(1,?)', (bytes(range(32)),))
+        self.ledger.chmod(0o600)
         self.rpc = MagicMock(source='fixture')
         self.floors = iter([5, 5])
         def call(method, params):
@@ -21,13 +28,62 @@ class PlanningTests(unittest.TestCase):
                     'getBlocks': [7, 9], 'getClusterNodes': [{'shredVersion': 7}]}[method]
         self.rpc.call.side_effect = call
         config = {'endpoints': [{'enabled': True, 'backend': 'rust', 'url': 'https://fixture.invalid'}]}
-        for context in (patch('pipeline_runtime.read_json', return_value=config),
+        for context in (patch('provider_limits.BUDGET.path', self.ledger),
+                        patch('pipeline_runtime.read_json', return_value=config),
                         patch('pipeline_runtime.resolve_indexer', return_value=config),
                         patch('solana_rpc_compat.make_rpc', return_value=self.rpc),
                         patch('solana_rpc_compat.close_rpc_clients'),
                         patch('provider_limits.BUDGET.identity', return_value={'provider_id': 'a'*64, 'endpoint_id': 'b'*64})):
             context.start()
             self.addCleanup(context.stop)
+
+    def test_missing_provider_ledger_blocks_before_client_creation(self):
+        from prepare_native_window import ProviderStateUnavailable
+        self.ledger.unlink()
+        with patch('solana_rpc_compat.make_rpc') as factory, self.assertRaises(ProviderStateUnavailable):
+            prepare(Path('unused'), self.output, 7)
+        factory.assert_not_called()
+        self.assertFalse(self.ledger.exists())
+        self.assertEqual(json.loads((self.output.parent/'planning-error.json').read_text())['category'],
+                         'provider_state_unavailable')
+
+    def test_provider_preflight_is_read_only_and_rejects_missing_identity(self):
+        from prepare_native_window import require_provider_state, ProviderStateUnavailable
+        before = self.ledger.read_bytes()
+        require_provider_state(self.ledger)
+        self.assertEqual(self.ledger.read_bytes(), before)
+        with closing(sqlite3.connect(self.ledger)) as db, db:
+            db.execute('DELETE FROM provider_audit_key')
+        before = self.ledger.read_bytes()
+        with self.assertRaises(ProviderStateUnavailable): require_provider_state(self.ledger)
+        self.assertEqual(self.ledger.read_bytes(), before)
+
+    def test_provider_preflight_rejects_empty_public_and_symlink_state(self):
+        from prepare_native_window import require_provider_state, ProviderStateUnavailable
+        self.ledger.chmod(0o644)
+        with self.assertRaises(ProviderStateUnavailable): require_provider_state(self.ledger)
+        self.ledger.chmod(0o600)
+        alias = self.ledger.with_name('alias.sqlite')
+        alias.symlink_to(self.ledger)
+        with self.assertRaises(ProviderStateUnavailable): require_provider_state(alias)
+        self.ledger.write_bytes(b'')
+        with self.assertRaises(ProviderStateUnavailable): require_provider_state(self.ledger)
+
+    def test_empty_start_plans_zero_instead_of_recent_head(self):
+        self.floors = iter([0, 0])
+        def call(method, params):
+            return {'getSlot': 10, 'getFirstAvailableBlock': 0,
+                    'getSlotLeaders': ['11111111111111111111111111111111']*4,
+                    'getBlocks': [0, 1, 2, 3], 'getClusterNodes': [{'shredVersion': 7}]}[method]
+        self.rpc.call.side_effect = call
+        prepare(Path('unused'), self.output)
+        self.assertEqual(json.loads(self.output.read_text())['start'], 0)
+
+    def test_pruned_genesis_is_blocked_not_replaced_by_current_head(self):
+        self.floors = iter([5])
+        with self.assertRaises(ValueError): prepare(Path('unused'), self.output)
+        self.assertFalse(self.output.exists())
+        self.assertNotIn('getBlocks', [c.args[0] for c in self.rpc.call.call_args_list])
 
     def test_pruned_window_is_not_published_as_skipped(self):
         self.floors = iter([8])

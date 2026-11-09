@@ -176,6 +176,39 @@ fn initialize_window_state(window: &Value, state: &mut Value, version: u16) -> i
     }
     Ok(())
 }
+fn resume_slot(state: &Value, window: Option<&Value>) -> io::Result<u64> {
+    if !state["next_slot"].is_null() {
+        return state["next_slot"].as_u64().ok_or_else(invalid);
+    }
+    if let Some(window)=window {
+        let first=window["start"].as_u64().ok_or_else(invalid)?;
+        let end=window["end"].as_u64().ok_or_else(invalid)?;
+        if window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
+            || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+            || end<first || end-first>3 {return Err(invalid());}
+        return Ok(first); // Resume the retained window; never infer completion from file counts.
+    }
+    Ok(0)
+}
+fn resume_window(dir: &Path, state: &Value) -> io::Result<Option<Value>> {
+    if dir.join("window.json").exists() {return read_json(&dir.join("window.json")).map(Some);}
+    if state["next_slot"].is_u64() {return Ok(None);}
+    let mut earliest: Option<Value>=None;
+    for entry in fs::read_dir(dir)? {
+        let entry=entry?;
+        let Some(slot)=entry.file_name().to_str().and_then(|name|name.parse::<u64>().ok()) else {continue;};
+        if !fs::symlink_metadata(entry.path())?.is_dir() {return Err(invalid());}
+        let window=read_json(&entry.path().join("schedule.json"))?;
+        let start=resume_slot(state,Some(&window))?;
+        if slot<start || slot>window["end"].as_u64().ok_or_else(invalid)? {return Err(invalid());}
+        checked_source(&window,state)?;
+        if let Some(prior)=earliest.as_ref() {
+            if prior["source_identity"]!=window["source_identity"] {return Err(invalid());}
+        }
+        if earliest.as_ref().is_none_or(|prior|start<prior["start"].as_u64().unwrap_or(0)) {earliest=Some(window);}
+    }
+    Ok(earliest)
+}
 fn interruption(deadline_reached: bool, stopped: bool, lease_valid: bool) -> Option<&'static str> {
     if !lease_valid {Some("network_lease_invalid")}
     else if stopped {Some("stop_requested")}
@@ -388,9 +421,16 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         "repair_socket_rx_buffer_full":0});
     let mut failure_stage="rpc_planning";
     let outcome = (|| -> io::Result<()> {
-        let mut window = if dir.join("window.json").exists() && state["next_slot"].is_u64() {
-            read_json(&dir.join("window.json"))?
-        } else { plan(dir,state["next_slot"].as_u64().or(config["initial_slot"].as_u64()),&stop)? };
+        let retained=resume_window(dir,&state)?;
+        let start=resume_slot(&state,retained.as_ref())?;
+        if let Some(window)=retained.as_ref() {
+            // Keep the original source pin even when only slot schedules survived.
+            state["rpc_source_identity"]=checked_source(window,&state)?.clone();
+        }
+        let mut window = match retained {
+            Some(window) if state["next_slot"].is_u64()=>window,
+            _=>plan(dir,Some(start),&stop)?, // Revalidate orphaned planning metadata before reuse.
+        };
         if window["schema"]!="freya-native-window-v1" || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" { return Err(invalid()); }
         failure_stage="bootstrap_metadata";
         if bootstraps.is_empty() {
@@ -639,6 +679,31 @@ mod tests {
     fn source_fixture() -> Value {
         // ProviderBudget.identity returns two lowercase HMAC-SHA256 hex digests.
         json!({"provider_id":"a".repeat(64),"endpoint_id":"b".repeat(64)})
+    }
+    #[test] fn startup_resumes_checkpoint_then_retained_window_otherwise_zero() {
+        let window=json!({"schema":"freya-native-window-v1","verification":"reviewed_rpc_claim",
+            "genesis":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d","start":7,"end":10});
+        assert_eq!(resume_slot(&json!({"next_slot":9}),Some(&window)).unwrap(),9);
+        assert_eq!(resume_slot(&json!({"next_slot":null}),Some(&window)).unwrap(),7);
+        assert_eq!(resume_slot(&json!({"next_slot":null}),None).unwrap(),0);
+        assert!(resume_slot(&json!({"next_slot":"corrupt"}),None).is_err());
+        assert!(resume_slot(&json!({"next_slot":null}),Some(&json!({"start":7}))).is_err());
+    }
+    #[test] fn retained_slot_schedules_resume_earliest_window_without_skipping_gaps() {
+        let dir=tempfile::tempdir().unwrap();
+        let state=json!({"next_slot":null});
+        assert!(resume_window(dir.path(),&state).unwrap().is_none());
+        for slot in [11,7] {
+            let base=dir.path().join(slot.to_string());fs::create_dir(&base).unwrap();
+            fs::write(base.join("schedule.json"),serde_json::to_vec(&json!({
+                "schema":"freya-native-window-v1","verification":"reviewed_rpc_claim",
+                "genesis":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+                "source_identity":source_fixture(),"start":slot,"end":slot+3})).unwrap()).unwrap();
+        }
+        let window=resume_window(dir.path(),&state).unwrap().unwrap();
+        assert_eq!(resume_slot(&state,Some(&window)).unwrap(),7);
+        fs::create_dir(dir.path().join("3")).unwrap(); // Orphaned bytes must not imply verified progress.
+        assert!(resume_window(dir.path(),&state).is_err());
     }
     #[test] fn structured_planner_identity_is_persisted_and_reusable() {
         let window=json!({"schema":"freya-native-window-v1","source_identity":source_fixture()});

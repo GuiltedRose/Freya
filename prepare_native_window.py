@@ -9,11 +9,34 @@ import time
 import uuid
 import math
 import threading
+import sqlite3
+import stat
 from functools import wraps
 
 
 class PlanningDeferred(RuntimeError):
     category = "provider_cooldown_exceeds_lease"
+
+
+class ProviderStateUnavailable(ValueError):
+    category = 'provider_state_unavailable'
+
+
+def require_provider_state(path):
+    """Read-only native preflight: never replace shared pacing or identity state."""
+    try:
+        meta = path.lstat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_mode & 0o077 or meta.st_size == 0:
+            raise ProviderStateUnavailable('Restore the original private provider ledger')
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            identity = db.execute('SELECT length(secret),typeof(secret) FROM provider_audit_key WHERE id=1').fetchone()
+        finally:
+            db.close()
+        if identity != (32, 'blob'):
+            raise ProviderStateUnavailable('Restore the original provider identity')
+    except (OSError, sqlite3.Error):
+        raise ProviderStateUnavailable('Existing provider state is unavailable') from None
 
 
 def planning_error(error):
@@ -28,7 +51,7 @@ def planning_error(error):
     category=getattr(error,'category',None)
     if category in ('connect','connect_timeout','request_timeout','transport','throttled','cancelled',
                     'transport_unavailable','authorization_denied','malformed_evidence','history_unavailable',
-                    'remote_rpc_error','provider_unavailable','http_error','provider_cooldown_exceeds_lease'):
+                    'remote_rpc_error','provider_unavailable','http_error','provider_cooldown_exceeds_lease','provider_state_unavailable'):
         record['category']=category
     for name in ('http_status','socket_errno','rpc_code'):
         value=getattr(error,name,None)
@@ -218,6 +241,8 @@ def _prepare(config_path, output, start, progress):
     rows = [e for e in config.get('endpoints', []) if e.get('enabled') is True]
     if len(rows) != 1 or rows[0].get('backend') != 'rust':
         raise ValueError('One explicitly reviewed Rust RPC required')
+    from provider_limits import BUDGET
+    require_provider_state(BUDGET.path)
     rpc = make_rpc(rows[0])
     rpc._planning_observer = progress.observe
     def call(stage,method,params):
@@ -230,7 +255,6 @@ def _prepare(config_path, output, start, progress):
             error.freya_rpc_method=method
             raise
     try:
-        from provider_limits import BUDGET
         identity = BUDGET.identity(rows[0]['url'])
         try:
             rpc.validate()  # Existing mainnet genesis, policy, boundary and shared pacing.
@@ -269,7 +293,7 @@ def _prepare(config_path, output, start, progress):
         head = call('finalized_head', 'getSlot', [{'commitment': 'finalized'}])
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
-        start = max(0, head - 3) if start is None else start
+        start = 0 if start is None else start
         if type(start) is int and start > head:
             raise SystemExit(75)  # Caught up; wait under the same lease, never skip forward.
         if type(start) is not int or not 0 <= start <= head:
