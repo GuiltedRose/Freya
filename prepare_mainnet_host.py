@@ -102,6 +102,8 @@ def prepare(args):
     inherit config lib pkgs;
     package = PACKAGE;
   }) ];
+  # Explicit operator root override; review this membership before activation.
+  services.freya-operators = { enable = true; members = [ USER ]; };
   services.freya-node = {
     enable = true;
     user = USER;

@@ -225,7 +225,7 @@
                 (pkgs.writeShellScriptBin "freya-mainnet-preflight" ''
                   exec ${environments.${system}.pythonBase}/bin/python ${./native_mainnet_preflight.py} "$@"
                 '')
-                pkgs.ethtool pkgs.jq pkgs.systemd
+                pkgs.ethtool pkgs.jq pkgs.systemd pkgs.termshark
               ];
               # Entering the shell never starts a service or authorizes networking.
             };
@@ -262,6 +262,7 @@
           }) ];
       };
       nixosModules.solana-budget-isolation = import ./nix/solana-network-isolation.nix;
+      nixosModules.freya-operators = import ./nix/freya-operators.nix;
       lib.mkAgavePackage = args: import ./nix/agave-package.nix args;
       nixosModules.selfhost-rpc = { config, lib, pkgs, ... }: import ./nix/selfhost-rpc.nix {
         inherit config lib pkgs;

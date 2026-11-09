@@ -29,6 +29,12 @@ fn repair_address_allowed(address: &SocketAddr) -> bool {
             _=>false,
         }
 }
+fn repair_receive_deadline(start: Instant, overall: Instant, interval: u64, attempts: u64) -> Instant {
+    // Use the former response + blind-backoff budget to receive from the same
+    // authorized peer. No new wait is added after an unsuccessful attempt.
+    let pacing=interval.saturating_mul(1u64<<attempts.min(4)).min(8000);
+    (start+Duration::from_secs(2)+Duration::from_millis(pacing)).min(overall)
+}
 fn receive_error(error: io::Error, stopped: bool, before_deadline: bool) -> io::Result<bool> {
     match error.kind() {
         io::ErrorKind::Interrupted=>Ok(!stopped && before_deadline), // Retry only under the original loop deadline.
@@ -521,7 +527,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 state["last_repair"]["outcome"]=json!("waiting");
                 publish(dir,&state)?;
                 let receive_started=Instant::now();
-                let timeout=(receive_started+Duration::from_secs(2)).min(deadline);
+                let timeout=repair_receive_deadline(receive_started,deadline,interval,attempts);
                 let receive_at=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
                 state["last_repair"]["receive_started_at"]=json!(receive_at);
                 state["last_repair"]["receive_deadline_at"]=json!(receive_at+timeout.duration_since(receive_started).as_secs_f64());
@@ -543,6 +549,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                         state["session_traffic"]["repair_socket_rx_copied_bytes"].as_u64().ok_or_else(invalid)?
                             .saturating_add(length as u64));
                     if length==packet.len() {increment(&mut state["session_traffic"],"repair_socket_rx_buffer_full");}
+                    if stop.load(Ordering::Relaxed) || Instant::now()>=timeout {break;}
                     if from!=address {
                         unexpected_datagram(&mut state["last_repair"],from,&packet[..length],nonce,
                             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64());
@@ -591,8 +598,8 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 }
                 finish_repair(&mut state,result);
                 state["queue_in_flight"]=json!(0);state["updated_at"]=json!(now());publish(dir,&state)?;
-                let wait=if accepted{interval}else{interval.saturating_mul(1u64<<attempts.min(4)).min(8000)};
-                let until=(Instant::now()+Duration::from_millis(wait)).min(deadline);
+                let until=if accepted {(Instant::now()+Duration::from_millis(interval)).min(deadline)}
+                    else {timeout};
                 while Instant::now()<until && !stop.load(Ordering::Relaxed){lease()?;thread::sleep(Duration::from_millis(100));}
             }
             Ok(())
@@ -770,6 +777,17 @@ mod tests {
         for _ in 0..3 {traffic_snapshot(&mut state,"phase",(150,275)).unwrap();}
         assert!(traffic_snapshot(&mut state,"overflow",(150,275)).is_err());
         assert_eq!(state["repair_requests"],17);
+    }
+    #[test] fn receive_window_uses_existing_backoff_without_increasing_attempt_budget() {
+        let start=Instant::now();let overall=start+Duration::from_secs(40);
+        assert_eq!(repair_receive_deadline(start,overall,500,0),start+Duration::from_millis(2500));
+        let deadline=repair_receive_deadline(start,overall,500,4);
+        assert_eq!(deadline,start+Duration::from_secs(10));
+        // The observed valid ping arrived 3.705 seconds after kernel send:
+        // outside the old two-second wait, inside the already allocated budget.
+        assert!(start+Duration::from_millis(3705)<deadline);
+        assert_eq!(repair_receive_deadline(start,start+Duration::from_secs(1),500,4),start+Duration::from_secs(1));
+        assert_eq!(repair_receive_deadline(start,overall,10000,128),start+Duration::from_secs(10));
     }
     #[test] fn interrupted_receive_during_stop_is_graceful_not_socket_error() {
         let mut state=json!({"repair_timeouts":7,"last_repair":{"outcome":"waiting"}});

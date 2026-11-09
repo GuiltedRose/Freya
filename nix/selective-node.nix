@@ -4,7 +4,7 @@ let
   cfg = config.services.freya-node;
   peerState = "${cfg.stateDirectory}/${if cfg.peerOperation == "discover" then "peer" else cfg.peerOperation}";
 in {
-  imports = [ ./solana-network-isolation.nix ];
+  imports = [ ./solana-network-isolation.nix ./freya-operators.nix ];
   options.services.freya-node = {
     enable = lib.mkEnableOption "Freya selective acquisition (not an independent validator)";
     configFile = lib.mkOption { type = lib.types.str; };
