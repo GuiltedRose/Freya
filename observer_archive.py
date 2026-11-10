@@ -106,7 +106,8 @@ def export_slot(store, slot, directory, level=3):
         events = [json.loads(item[0]) for item in db.execute(
             'SELECT payload FROM events WHERE slot=? ORDER BY tx_index,outer_index,event_index', (slot,))]
         columns = sorted({key for event in events for key in event})
-        conversions = [list(item) for item in db.execute('SELECT * FROM conversions WHERE time BETWEEN ? AND ? ORDER BY mint,time,source', (row['time']-3600,row['time']))]
+        conversions = ([list(item) for item in db.execute('SELECT * FROM conversions WHERE time BETWEEN ? AND ? ORDER BY mint,time,source', (row['time']-3600,row['time']))]
+                       if row['time'] is not None else [])
         policies = [list(item) for item in db.execute('SELECT id,policy FROM sources ORDER BY id')]
     compact = canonical({'format':'observer-market-columns-v1','columns':columns,
                          'rows':[[event.get(key) for key in columns] for event in events],

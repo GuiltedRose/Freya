@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import closing
 import unittest
 from unittest.mock import MagicMock, patch
-from prepare_native_window import prepare
+from prepare_native_window import prepare, omission_proofs
 
 
 class PlanningTests(unittest.TestCase):
@@ -24,8 +24,9 @@ class PlanningTests(unittest.TestCase):
         def call(method, params):
             if method == 'getFirstAvailableBlock':
                 return next(self.floors)
+            if method=='getBlock':return {'parentSlot': 7 if params[0]==9 else 9, 'blockhash':str(params[0]),'transactions':[]}
             return {'getSlot': 10, 'getSlotLeaders': ['11111111111111111111111111111111']*4,
-                    'getBlocks': [7, 9], 'getClusterNodes': [{'shredVersion': 7}]}[method]
+                    'getBlocks': [7, 9, 10], 'getClusterNodes': [{'shredVersion': 7}]}[method]
         self.rpc.call.side_effect = call
         config = {'endpoints': [{'enabled': True, 'backend': 'rust', 'url': 'https://fixture.invalid'}]}
         for context in (patch('provider_limits.BUDGET.path', self.ledger),
@@ -46,6 +47,37 @@ class PlanningTests(unittest.TestCase):
         self.assertFalse(self.ledger.exists())
         self.assertEqual(json.loads((self.output.parent/'planning-error.json').read_text())['category'],
                          'provider_state_unavailable')
+
+    def test_parent_proofs_separate_skipped_and_unavailable_slots(self):
+        from rpc_contract import RpcHistoryUnavailable
+        def call(stage,method,params):
+            return {'parentSlot':7,'blockhash':'successor'}
+        proof=omission_proofs(call,7,9,[7,9],10,self.output.parent,{},'fixture')
+        self.assertEqual(proof,[{'slot':8,'kind':'finalized_successor_parent','successor_slot':9,'parent_slot':7}])
+        with self.assertRaises(RpcHistoryUnavailable):
+            omission_proofs(lambda *args:{'parentSlot':8,'blockhash':'successor'},
+                            7,9,[7,9],10,self.output.parent,{},'fixture')
+
+    def test_empty_successor_search_restarts_without_advancing_requested_start(self):
+        from rpc_contract import RpcHistoryUnavailable
+        def empty(stage,method,params):return []
+        with self.assertRaises(RpcHistoryUnavailable):
+            omission_proofs(empty,7,10,[],30,self.output.parent,{},'fixture')
+        record=json.loads((self.output.parent/'history-gap.json').read_text())
+        self.assertEqual((record['start'],record['scan_next'],record['state']),(7,15,'unresolved'))
+        calls=[]
+        def recovered(stage,method,params):
+            calls.append((method,params))
+            return [17] if method=='getBlocks' else {'parentSlot':6,'blockhash':'successor'}
+        proofs=omission_proofs(recovered,7,10,[],30,self.output.parent,{},'fixture')
+        self.assertEqual([row['slot'] for row in proofs],[7,8,9,10])
+        self.assertEqual(calls[0][1][:2],[15,18])
+
+    def test_genesis_boundary_is_explicit_without_fabricating_a_block(self):
+        call=MagicMock(side_effect=AssertionError('No RPC needed for boundary'))
+        proofs=omission_proofs(call,0,0,[],0,self.output.parent,{},'fixture')
+        self.assertEqual(proofs,[{'slot':0,'kind':'genesis_boundary'}])
+        call.assert_not_called()
 
     def test_provider_preflight_is_read_only_and_rejects_missing_identity(self):
         from prepare_native_window import require_provider_state, ProviderStateUnavailable
@@ -102,8 +134,8 @@ class PlanningTests(unittest.TestCase):
     def test_nonpruned_manifest_preserves_explicit_skip_provenance(self):
         prepare(Path('unused'), self.output, 7)
         record = json.loads(self.output.read_text())
-        self.assertEqual(record['rpc_reported_skipped_slots'], [8, 10])
-        self.assertEqual([row['slot'] for row in record['slots']], [7, 9])
+        self.assertEqual(record['rpc_reported_skipped_slots'], [8])
+        self.assertEqual([row['slot'] for row in record['slots']], [7, 9, 10])
         self.assertEqual(record['verification'], 'reviewed_rpc_claim')
         self.assertEqual(record['source_identity'], {'provider_id': 'a'*64, 'endpoint_id': 'b'*64})
 
@@ -120,7 +152,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(progress['status'], 'completed')
         self.assertEqual([row['stage'] for row in progress['stages']], [
             'rpc_validation','cluster_nodes','finalized_head','history_floor','leader_schedule',
-            'finalized_manifest','history_recheck','window_publication'])
+            'finalized_manifest','historical_parent_proof','history_recheck','window_publication'])
         self.assertTrue(all(row['elapsed_seconds'] >= 0 for row in progress['stages']))
         self.assertLess(len(json.dumps(progress)), 8192)
         self.assertEqual((self.output.parent/'planning-progress.json').stat().st_mode & 0o777, 0o600)
@@ -214,7 +246,7 @@ class PlanningTests(unittest.TestCase):
         self.rpc.call.reset_mock()
         prepare(Path('unused'), self.output, 7, 'second')
         methods = [c.args[0] for c in self.rpc.call.call_args_list]
-        self.assertEqual(methods, ['getSlot', 'getFirstAvailableBlock', 'getFirstAvailableBlock'])
+        self.assertEqual(methods, ['getSlot', 'getFirstAvailableBlock', 'getBlock', 'getFirstAvailableBlock'])
         self.assertEqual(self.rpc.validate.call_count, 2)
         self.assertEqual(json.loads(self.output.read_text())['planning_run_id'], 'second')
 

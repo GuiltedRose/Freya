@@ -85,7 +85,7 @@ class NativeTransportStress(unittest.IsolatedAsyncioTestCase):
                     for chunked in (False,True):
                         with self.subTest(fixture=fixture['file'],backend=backend,encoding=encoding,chunked=chunked):
                             with LocalRpcServer() as server,tempfile.TemporaryDirectory() as directory:
-                                for result in (MAINNET,slot,[slot],block):
+                                for result in (MAINNET,slot,slot,[slot],slot,block):
                                     body=json.dumps({'jsonrpc':'2.0','id':1,'result':result}).encode()
                                     server.script.append({'body':gzip.compress(body) if encoding=='gzip' else body,
                                                           'encoding':encoding,'chunked':chunked})
@@ -93,7 +93,6 @@ class NativeTransportStress(unittest.IsolatedAsyncioTestCase):
                                 client=(RustIndexRpc if backend=='rust' else IndexRpc)(endpoint,MagicMock())
                                 # Mock deployment probes, not transport or block/transaction decoding.
                                 # This test checks byte preservation, not source/deployment admission.
-                                client.supports_history_probe=False
                                 store=EventStore(Path(directory)/'index.sqlite',retain_blocks=True)
                                 store.register_source('fixture',policy)
                                 decoder=Decoder('compare')
@@ -125,7 +124,7 @@ class NativeTransportStress(unittest.IsolatedAsyncioTestCase):
                                 self.assertFalse(projection['market_eligible'])
                                 self.assertEqual(canonical(original),before)
                                 self.assertEqual(store.next_slot(),slot+1)
-                                self.assertEqual(len(server.requests),4)
+                                self.assertEqual(len(server.requests),6)
 
     @unittest.skipUnless(NativeHttp is not None and hasattr(NativeHttp,'request_encoded_sync'),'Build native gzip transport methods')
     async def test_gzip_wire_transport_and_strict_decompression(self):

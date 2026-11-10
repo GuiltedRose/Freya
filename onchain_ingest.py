@@ -16,6 +16,7 @@ from provider_limits import BUDGET, ProviderBackoff, ProviderBudget
 from pump_narratives import NoRedirect
 from wallet_watch import MAINNET, PublicRpcError
 from onchain_decode import Decoder
+from sync_policy import initial_slot, initialize_store, validate_resume, history_available, GENESIS_SLOT
 
 READ_METHODS = {'getGenesisHash', 'getSlot', 'getBlocks', 'getBlock', 'getSlotLeaders', 'getClusterNodes',
                 'getAccountInfo', 'getBlockTime', 'getSignaturesForAddress', 'getTransaction',
@@ -226,6 +227,7 @@ class Ingester:
         self.oracle = oracle
         self.native_handoff = native_handoff
         self.oracle_last_attempt = 0
+        self.resume_checked = False
         for rpc in endpoints:
             self.store.policy(rpc.source)
 
@@ -250,7 +252,14 @@ class Ingester:
         cursor = self.store.next_slot()
         if cursor is not None and start is not None and cursor != start:
             raise ValueError('Resume saved checkpoint; use another database for another start')
-        initial = cursor if cursor is not None else start
+        if cursor is None:
+            start = initialize_store(self.store, start)
+            cursor = self.store.next_slot()
+        initial = initial_slot(cursor, start)
+        if not self.resume_checked:
+            with self.store.connect() as db:
+                validate_resume(db, initial)
+            self.resume_checked = True
         if type(initial) is not int or initial < 0:
             raise ValueError('Explicit initial finalized start slot required')
         started = time.monotonic()
@@ -263,28 +272,47 @@ class Ingester:
             start = self.store.next_slot()
             start = initial if start is None else start
             finalized=sampled_at=None
+            end=start
+            scan=start
             try:
                 rpc.validate()
                 finalized = rpc.call('getSlot', [{'commitment': 'finalized'}])
                 if type(finalized) is not int or finalized<0:
                     raise RpcEvidenceError('Invalid finalized head')
                 sampled_at = time.time()
-                end = min(start + count - 1, finalized)
-                if end < start:
-                    return self.record_progress(finalized, sampled_at, initial, started, 'caught_up')
-                if getattr(rpc,'supports_history_probe',False) is True:
-                    first=rpc.call('getFirstAvailableBlock',[])
-                    if type(first) is not int or first<0:raise RpcEvidenceError('Invalid history floor')
-                    if start<first:raise RpcHistoryUnavailable(rpc.source)
+                scan = self.store.history_request(rpc.source, start)
+                end = min(scan + count - 1, finalized)
+                if end < scan:
+                    status = 'caught_up' if start>finalized else 'unresolved_history'
+                    return self.record_progress(finalized, sampled_at, initial, started, status)
+                self.store.history_request(rpc.source,start,scan,end)
+
+                options={'commitment':'finalized','encoding':'json','transactionDetails':'full',
+                         'maxSupportedTransactionVersion':1,'rewards':False}
+                first=rpc.call('getFirstAvailableBlock',[])
+                if type(first) is not int or not 0<=first<2**63-1:raise RpcEvidenceError('Invalid history floor')
+                floor_block=None
+                floor_slot=first
+                if not history_available(start,first):
+                    # The earliest available block can follow genuinely skipped
+                    # slots. Its parent must prove that no required block was lost.
+                    if first>finalized:raise RpcHistoryUnavailable(rpc.source)
+                    floor_block=rpc.call('getBlock',[first,options])
+                    if (not isinstance(floor_block,dict) or type(floor_block.get('parentSlot')) is not int
+                            or not GENESIS_SLOT<=floor_block['parentSlot']<max(start,GENESIS_SLOT+1)):
+                        raise RpcHistoryUnavailable(rpc.source)
+                    scan=max(scan,first)
+                    end=min(scan+count-1,finalized)
+                    self.store.history_request(rpc.source,start,scan,end)
                 deployments = self.deployments(rpc)
-                slots = rpc.call('getBlocks', [start, end, {'commitment': 'finalized'}])
+                slots = rpc.call('getBlocks', [max(scan,GENESIS_SLOT+1), end, {'commitment': 'finalized'}]) if end>GENESIS_SLOT else []
                 if not isinstance(slots, list) or slots != sorted(set(slots)) or any(
-                        type(slot) is not int or not start <= slot <= end for slot in slots):
+                        type(slot) is not int or not max(scan,GENESIS_SLOT+1) <= slot <= end for slot in slots):
                     raise ValueError('Invalid finalized slot manifest')
-                if getattr(rpc,'supports_history_probe',False) is True:
-                    first=rpc.call('getFirstAvailableBlock',[])
-                    if type(first) is not int or first<0:raise RpcEvidenceError('Invalid history floor')
-                    if start<first:raise RpcHistoryUnavailable(rpc.source)
+                first=rpc.call('getFirstAvailableBlock',[])
+                if type(first) is not int or not 0<=first<2**63-1:raise RpcEvidenceError('Invalid history floor')
+                if not history_available(start,first) and not (floor_block is not None and first<=floor_slot):
+                    raise RpcHistoryUnavailable(rpc.source)
                 next_slot = start
                 batch_size=getattr(rpc,'block_batch_size',1)
                 options={'commitment':'finalized','encoding':'json','transactionDetails':'full',
@@ -292,7 +320,7 @@ class Ingester:
                 for offset in range(0,len(slots),batch_size):
                     selected=slots[offset:offset+batch_size]
                     blocks=(rpc.call_blocks(selected,options) if len(selected)>1 else
-                            [rpc.call('getBlock',[selected[0],options])])
+                            [floor_block if floor_block is not None and selected[0]==floor_slot else rpc.call('getBlock',[selected[0],options])])
                     if len(blocks)!=len(selected):raise RpcEvidenceError('Incomplete block batch')
                     for slot,block in zip(selected,blocks):
                         if not block or not isinstance(block.get('transactions'), list):
@@ -300,7 +328,9 @@ class Ingester:
                         if self.native_handoff is not None:
                             from native_handoff import reconcile
                             block['_native_reconciliation'] = reconcile(self.native_handoff, slot, block)
-                        events, issues, relevant = [], self.version_issues(slot, deployments), []
+                        events, issues, relevant = [], [], []
+                        if block.get('blockTime') is None:
+                            issues.append('Historical block time unavailable; time-based use quarantined')
                         for tx_index, tx in enumerate(block['transactions']):
                             try:
                                 found, errors = self.decoder.transaction(tx, slot, tx_index, block['blockTime'])
@@ -310,6 +340,10 @@ class Ingester:
                                 relevant.append((tx_index, tx))
                             events.extend(found)
                             issues.extend(errors)
+                        if relevant:
+                            issues.extend(self.version_issues(slot, deployments))
+                        if block.get('blockTime') is None:
+                            events=[]  # No fabricated time-based market/training observations.
                         block['_indexer_deployments'] = deployments
                         decoded = (slot, block, events, sorted(set(issues)), relevant)
                         # Commit each durable prefix independently, retaining at most two
@@ -317,9 +351,18 @@ class Ingester:
                         self.store.commit_range(next_slot, slot, [slot], [decoded], rpc.source)
                         next_slot = slot + 1
                 if next_slot <= end:
-                    self.store.commit_range(next_slot, end, [], [], rpc.source)
-                return self.record_progress(finalized, sampled_at, initial, started, 'indexed')
+                    self.store.history_request(rpc.source,next_slot,end+1,end,'unresolved',
+                                              'Manifest omission awaits successor-parent proof')
+                    status='unresolved_history'
+                else:
+                    self.store.history_request(rpc.source,next_slot,next_slot,end,'committed')
+                    status='indexed'
+                return self.record_progress(finalized, sampled_at, initial, started, status)
             except (ConnectionError,ValueError) as error:
+                retry_cursor=self.store.next_slot()
+                self.store.history_request(rpc.source,retry_cursor,scan if retry_cursor==start else retry_cursor,
+                                          end if finalized is not None else start,'blocked',
+                                          getattr(error,'category',type(error).__name__))
                 # Prefix commits remain useful even if a later request is throttled.
                 # Persist their progress so the dashboard does not report no index.
                 if type(finalized) is int and sampled_at is not None:
@@ -381,7 +424,7 @@ def follow(ingester, start=None, count=8, interval=5, max_failures=6, max_catchu
             lag = result['progress']['lag_slots']
             batch = min(max_catchup_slots, max(count, batch * 2)) if lag else count
             # ProviderBudget still paces every RPC; only redundant idle rest is removed.
-            if not lag:
+            if not lag or result.get('status')=='unresolved_history':
                 time.sleep(max(1, interval))
         except SourceAccessBlocked:
             raise

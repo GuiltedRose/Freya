@@ -51,6 +51,7 @@ class HistoryGuardTests(unittest.TestCase):
             if method=='getSlot':return 10
             if method=='getFirstAvailableBlock':return next(values)
             if method=='getBlocks':return []
+            if method=='getBlock':return None
             raise AssertionError('Unexpected RPC method')
         rpc.call.side_effect=call
         return rpc
@@ -58,24 +59,24 @@ class HistoryGuardTests(unittest.TestCase):
     def test_pruned_provider_never_certifies_missing_history_as_skips(self):
         rpc=self.rpc([5]);engine=Ingester(self.store,[rpc],decoder=self.helper.decoder)
         with self.assertRaises(RpcHistoryUnavailable):engine.step(1,1)
-        self.assertIsNone(self.store.next_slot())
+        self.assertEqual(self.store.next_slot(),1)
         self.assertEqual(self.store.metrics()['blocks'],0)
-        self.assertEqual(rpc.call.call_args_list[-1].args[0],'getFirstAvailableBlock')
+        self.assertEqual(rpc.call.call_args_list[-1].args[0],'getBlock')
 
     def test_retention_advancing_during_request_preserves_checkpoint(self):
         rpc=self.rpc([0,5]);engine=Ingester(self.store,[rpc],decoder=self.helper.decoder)
         engine.deployments=MagicMock(return_value={})
         with self.assertRaises(RpcHistoryUnavailable):engine.step(1,1)
-        self.assertIsNone(self.store.next_slot())
+        self.assertEqual(self.store.next_slot(),1)
 
-    def test_explicit_configured_backup_can_supply_complete_skipped_range(self):
+    def test_backup_omission_also_remains_unresolved_without_parent_proof(self):
         first=self.rpc([5]);second=self.rpc([0,0])
         engine=Ingester(self.store,[first,second],decoder=self.helper.decoder)
         engine.deployments=MagicMock(return_value={})
         engine.step(1,1)
-        self.assertEqual(self.store.next_slot(),2)
+        self.assertEqual(self.store.next_slot(),1)
         with self.store.connect() as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM ranges').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM ranges').fetchone()[0],0)
 
     def test_invalid_floor_never_tries_backup(self):
         first=self.rpc([True]);second=self.rpc([0,0])

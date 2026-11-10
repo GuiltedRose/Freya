@@ -1,0 +1,69 @@
+{
+  "endpoints": [
+    {
+      "enabled": true,
+      "source_id": "builtin-public-mainnet-v1",
+      "url": "https://api.mainnet.solana.com",
+      "backend": "rust",
+      "event_backend": "rust",
+      "interval_seconds": 5,
+      "policy": {
+        "storage_verified": true,
+        "stream_verified": false,
+        "ml_verified": true,
+        "evaluation_verified": true,
+        "execution_verified": true,
+        "execution_evidence": "Built-in public_mainnet operational policy: operator-selected on-chain RPC for local collection, learning and execution; not an independent provider-rights certification. https://solana.com/docs/references/clusters",
+        "usd_conversion_verified": true,
+        "oracle_data_rights_verified": true,
+        "oracle_max_confidence_bps": 100,
+        "evidence": "Built-in public_mainnet operational policy: operator-selected on-chain RPC for local collection, learning and execution; not an independent provider-rights certification. https://solana.com/docs/references/clusters",
+        "remote_provider_verified": true,
+        "allowed_rpc_hosts": [
+          "api.mainnet.solana.com"
+        ],
+        "profile": {
+          "kind": "public_mainnet",
+          "documentation": "https://solana.com/docs/references/clusters",
+          "verification_scope": "Built-in operational policy; external provider rights and IDL compatibility are not independently certified"
+        }
+      },
+      "source_kind": "solana_rpc",
+      "network_mode": "remote_provider"
+    }
+  ],
+  "oracle": {
+    "source_id": "builtin-public-mainnet-v1",
+    "interval_seconds": 20,
+    "feeds": [
+      {
+        "mint": "So11111111111111111111111111111111111111112",
+        "feed_id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+        "shard": 0,
+        "reviewed": true,
+        "evidence": "Pinned SOL/USD feed and receiver layout; finalized account identity, owner, verification, freshness and confidence checked at runtime"
+      }
+    ]
+  },
+  "markets": [],
+  "reviewed_program_versions": {
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": [
+      {
+        "from_slot": 464405009,
+        "through_slot": 9223372036854775807,
+        "deployment_slot": 458921440,
+        "idl_hash": "38b8abcc5b279bda85cf473e7c6f67bd15eb89df658cf93434687a43c88ad937",
+        "evidence": "Runtime-bound current deployment and pinned decoder hash; not an independently certified IDL/program match. Unknown layouts remain quarantined."
+      }
+    ],
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": [
+      {
+        "from_slot": 464405009,
+        "through_slot": 9223372036854775807,
+        "deployment_slot": 458921517,
+        "idl_hash": "b7d8c57a4d9c4dd0109a9ab893052352333252d4eedced10ac091d4d66cab89b",
+        "evidence": "Runtime-bound current deployment and pinned decoder hash; not an independently certified IDL/program match. Unknown layouts remain quarantined."
+      }
+    ]
+  }
+}

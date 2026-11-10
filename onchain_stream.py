@@ -349,7 +349,7 @@ async def run_stream(ingester, endpoint, start, candles, batch=8, interval=5, co
                 print(json.dumps(result),flush=True)
                 cycles+=1
                 if max_cycles is not None and cycles>=max_cycles:return
-                if result['progress']['lag_slots']:
+                if result['progress']['lag_slots'] and result.get('status')!='unresolved_history':
                     continue
                 wake.clear()
                 try:await asyncio.wait_for(wake.wait(),interval)

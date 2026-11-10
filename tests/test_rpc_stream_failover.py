@@ -21,6 +21,7 @@ class StreamFailoverTests(unittest.TestCase):
             self.sources.append({'source_id':name,'policy':policy,'url':'https://'+name+'.invalid','ws_url':'wss://'+name+'.invalid'})
         self.endpoint={**self.sources[0],'stream_sources':self.sources}
         self.ingester=SimpleNamespace(store=self.store,endpoints=[MagicMock(source=name) for name in ('first','second')])
+        for rpc in self.ingester.endpoints:rpc.validate.return_value=None
 
     def test_only_connection_failure_switches_explicit_sources(self):
         reached=threading.Event();calls=[]

@@ -146,23 +146,28 @@ class OwnershipTests(unittest.TestCase):
                     with writer_lock(database,'indexer',config):pass
             self.assertFalse(attached(database,'indexer',config))
 
-    def test_fresh_finalized_cursor_is_saved_once_and_existing_cursor_is_authoritative(self):
+    def test_fresh_genesis_cursor_is_saved_once_and_existing_cursor_is_authoritative(self):
         with tempfile.TemporaryDirectory() as directory:
             store=EventStore(Path(directory)/'index.sqlite')
             rpc=MagicMock();rpc.call.return_value=71
-            self.assertEqual(bootstrap_start(store,[rpc]),71)
-            self.assertEqual(store.next_slot(),71)
+            self.assertEqual(bootstrap_start(store,[rpc]),0)
+            self.assertEqual(store.next_slot(),0)
             self.assertIsNone(bootstrap_start(store,[rpc],999))
-            rpc.call.assert_called_once_with('getSlot',[{'commitment':'finalized'}])
+            rpc.call.assert_not_called()
 
     def test_permission_denial_cannot_fail_over_to_another_source(self):
         with tempfile.TemporaryDirectory() as directory:
             store=EventStore(Path(directory)/'index.sqlite')
-            first=MagicMock();first.validate.side_effect=SourceAccessBlocked('fixture denied')
-            backup=MagicMock()
-            with self.assertRaises(SourceAccessBlocked):bootstrap_start(store,[first,backup])
+            from onchain_ingest import Ingester
+            first=MagicMock(source='first');first.validate.side_effect=SourceAccessBlocked('fixture denied')
+            backup=MagicMock(source='backup')
+            for name in ('first','backup'):
+                store.register_source(name,{'storage_verified':True,'evidence':'offline fixture'})
+            bootstrap_start(store,[first,backup])
+            with self.assertRaises(SourceAccessBlocked):
+                Ingester(store,[first,backup],decoder=SimpleNamespace(specs={})).step()
             backup.validate.assert_not_called()
-            self.assertIsNone(store.next_slot())
+            self.assertEqual(store.next_slot(),0)
 
 
 class LiveManagementTests(unittest.TestCase):

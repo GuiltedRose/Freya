@@ -75,6 +75,8 @@ def pin(store, identifier, first, last, reason):
 
 def blockers(db, row, cutoff, safe_before):
     reasons = []
+    if row['time'] is None:
+        return ['historical time unavailable; retain original evidence']
     if row['time'] >= cutoff: reasons.append('hot history')
     if row['slot'] >= safe_before: reasons.append('recovery boundary')
     if row['issues'] != '[]': reasons.append('decoder quarantine or unresolved evidence')

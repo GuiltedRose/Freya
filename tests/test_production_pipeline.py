@@ -47,6 +47,7 @@ class ProductionPipelineTests(unittest.TestCase):
             def call(method,params):
                 requests.append(method)
                 if method=='getSlot':return max(blocks)
+                if method=='getFirstAvailableBlock':return min(blocks)
                 if method=='getBlocks':return list(range(params[0],params[1]+1))
                 if method=='getBlock':return blocks[params[0]]
                 raise AssertionError('Unexpected RPC method: '+method)

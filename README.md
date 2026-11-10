@@ -413,6 +413,11 @@ For service prerequisites, activation, monitoring, recovery and rollback, follow
 [self-hosted RPC](docs/selfhost_rpc.md). Stop live services before rollback and
 retain all newer orders, outcomes, checkpoints and unresolved signatures.
 
+Fresh historical synchronization starts at slot 0 unless an explicit override is
+supplied; existing valid progress resumes. See the
+[Genesis audit and validation](docs/genesis_sync_audit.md) and
+[explicit recovery after runtime data loss](docs/native_fresh_start.md).
+
 Use focused tests for behavior changes. Review changes to execution limits and
 preserve outcome journals when investigating failures.
 

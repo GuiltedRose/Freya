@@ -1,4 +1,4 @@
-"""Bounded RPC planning only; no receipt requests, wallets, or index writes."""
+"""Bounded RPC planning and parent proofs; no wallets or index writes."""
 import argparse
 from collections import Counter
 import json
@@ -12,6 +12,7 @@ import threading
 import sqlite3
 import stat
 from functools import wraps
+from sync_policy import initial_slot, history_available, GENESIS_SLOT, GENESIS_HASH
 
 
 class PlanningDeferred(RuntimeError):
@@ -20,6 +21,67 @@ class PlanningDeferred(RuntimeError):
 
 class ProviderStateUnavailable(ValueError):
     category = 'provider_state_unavailable'
+
+
+def omission_proofs(call, start, end, slots, head, directory, identity, source, floor_anchor=None):
+    """An omitted manifest entry is unresolved until a successor proves its gap.
+
+    Scan at most four additional slots per invocation. Persist only the discovery
+    cursor across empty windows, never a synchronized cursor or successful skip.
+    """
+    from rpc_contract import RpcHistoryUnavailable, RpcEvidenceError
+    missing=[s for s in range(start,end+1) if s not in slots]
+    proofs=[]
+    anchors={}
+    outside_successor=None
+    gap_path=directory/'history-gap.json'
+    for omitted in missing:
+        if omitted==GENESIS_SLOT:
+            proofs.append({'slot':omitted,'kind':'genesis_boundary'})
+            continue
+        following=next((s for s in slots if s>omitted),None)
+        if following is None and outside_successor is not None:
+            following=outside_successor
+        if following is None and floor_anchor is not None and floor_anchor[0]>omitted:
+            following=floor_anchor[0]
+            anchors[following]=floor_anchor[1]['parentSlot']
+        if following is None:
+            scan=end+1
+            if gap_path.exists():
+                retained=json.loads(gap_path.read_text())
+                if retained.get('source_identity')!=identity:
+                    raise RpcEvidenceError('Historical scan source identity changed')
+                if retained.get('start')==start:
+                    scan=retained['scan_next']
+                    if type(scan) is not int or scan<end+1:
+                        raise RpcEvidenceError('Invalid historical discovery cursor')
+            scan_end=min(head,scan+3)
+            candidates=call('historical_successor_manifest','getBlocks',
+                            [scan,scan_end,{'commitment':'finalized'}]) if scan<=scan_end else []
+            if (not isinstance(candidates,list) or any(type(s) is not int or not scan<=s<=scan_end for s in candidates)
+                    or candidates!=sorted(set(candidates))):
+                raise RpcEvidenceError('Invalid historical successor manifest')
+            if not candidates:
+                atomic_diagnostic(gap_path,{'schema':'freya-history-gap-v1','start':start,
+                    'scan_next':scan_end+1 if scan<=scan_end else scan,
+                    'source_identity':identity,'state':'unresolved'})
+                raise RpcHistoryUnavailable(source)
+            following=candidates[0]
+            outside_successor=following
+        if following not in anchors:
+            block=call('historical_parent_proof','getBlock',[following,{
+                'commitment':'finalized','encoding':'json','transactionDetails':'full',
+                'maxSupportedTransactionVersion':1,'rewards':False}])
+            if (not isinstance(block,dict) or type(block.get('parentSlot')) is not int
+                    or not GENESIS_SLOT<=block['parentSlot']<following or not block.get('blockhash')):
+                raise RpcEvidenceError('Invalid successor parent proof')
+            anchors[following]=block['parentSlot']
+        parent=anchors[following]
+        if parent>=omitted:
+            raise RpcHistoryUnavailable(source)
+        proofs.append({'slot':omitted,'kind':'finalized_successor_parent',
+                       'successor_slot':following,'parent_slot':parent})
+    return proofs
 
 
 def require_provider_state(path):
@@ -46,7 +108,7 @@ def planning_error(error):
             ('ValueError','PermissionError','FileNotFoundError','ConnectionError','SourceAccessBlocked',
              'ProviderBackoff','RpcEvidenceError','TimeoutError','RuntimeError') else 'PlannerError'}
     method=getattr(error,'freya_rpc_method',None)
-    if method in ('getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
+    if method in ('getBlock','getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
         record['rpc_method']=method
     category=getattr(error,'category',None)
     if category in ('connect','connect_timeout','request_timeout','transport','throttled','cancelled',
@@ -293,16 +355,25 @@ def _prepare(config_path, output, start, progress):
         head = call('finalized_head', 'getSlot', [{'commitment': 'finalized'}])
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
-        start = 0 if start is None else start
+        start = initial_slot(requested=start)
         if type(start) is int and start > head:
             raise SystemExit(75)  # Caught up; wait under the same lease, never skip forward.
         if type(start) is not int or not 0 <= start <= head:
             raise ValueError('Window start is beyond finalized head')
         end = min(head, start + 3)
+        floor_anchor=None
         def check_history(stage):
+            nonlocal floor_anchor
             floor = call(stage, 'getFirstAvailableBlock', [])
-            if type(floor) is not int or not 0 <= floor <= start:
-                raise ValueError('Historical window unavailable; preserve unresolved gap')
+            if not history_available(start,floor):
+                block=call('history_floor_parent','getBlock',[floor,{
+                    'commitment':'finalized','encoding':'json','transactionDetails':'full',
+                    'maxSupportedTransactionVersion':1,'rewards':False}]) if floor<=head else None
+                if (not isinstance(block,dict) or type(block.get('parentSlot')) is not int
+                        or not GENESIS_SLOT<=block['parentSlot']<max(start,GENESIS_SLOT+1)
+                        or not block.get('blockhash')):
+                    raise ValueError('Historical window unavailable; preserve unresolved gap')
+                floor_anchor=(floor,block)
         check_history('history_floor')
         cache_key = f'window:{start}:{end}'
         claims = cache.get(cache_key)
@@ -316,18 +387,22 @@ def _prepare(config_path, output, start, progress):
                 or not isinstance(slots, list) or any(type(s) is not int for s in slots)
                 or slots != sorted(set(slots)) or any(not start <= s <= end for s in slots)):
             raise ValueError('Invalid leader schedule or finalized manifest')
+        slots=[s for s in slots if s!=GENESIS_SLOT]
         for leader in leaders:
             Pubkey.from_string(leader)
         if claims is None:
             cache.put(cache_key, {'leaders': leaders, 'slots': slots})
+        proofs=omission_proofs(call,start,end,slots,head,output.parent,identity,rpc.source,floor_anchor)
         check_history('history_recheck')  # Always fresh, including after a cached manifest.
         plan = {'schema': 'freya-native-window-v1', 'planning_run_id': progress.record['run_id'], 'at': time.time(), 'start': start, 'end': end,
-                'observed_finalized_head': head, 'genesis': '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
+                'observed_finalized_head': head, 'genesis': GENESIS_HASH,
                 'source_id': rpc.source, 'source_identity': identity,
                 'verification': 'reviewed_rpc_claim', 'shred_version': version,
                 'shred_version_at': version_at,
                 'bootstrap_nodes': peers, 'bootstrap_provenance': 'reviewed_rpc_claim',
                 'slots': [{'slot': slot, 'leader': leaders[slot-start]} for slot in slots],
+                'skip_proofs': proofs, 'history_availability': 'reviewed_rpc_claim_only',
+                'peer_historical_availability': 'unknown',
                 'rpc_reported_skipped_slots': [slot for slot in range(start, end+1) if slot not in slots]}
         progress.begin('window_publication')
         temporary = output.with_suffix('.pending')

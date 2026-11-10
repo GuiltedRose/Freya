@@ -66,7 +66,7 @@
           else nixpkgs.lib.hasSuffix ".py" rel
             || (nixpkgs.lib.hasPrefix "vendor/" rel && nixpkgs.lib.hasSuffix ".json" rel)
             || (nixpkgs.lib.hasPrefix "tests/fixtures/onchain/" rel && nixpkgs.lib.hasSuffix ".json" rel)
-            || builtins.elem rel [ "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" "selective_node.example.json" ];
+            || builtins.elem rel [ "sync_policy.json" "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" "selective_node.example.json" ];
       };
     in {
       packages = eachSystem (system:
@@ -81,7 +81,7 @@
             dontBuild = true;
             installPhase = ''
               mkdir -p $out/share/freya $out/bin
-              cp *.py meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json onchain_pipeline.example.json learning_pipeline.example.json selective_node.example.json $out/share/freya/
+              cp *.py sync_policy.json meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json onchain_pipeline.example.json learning_pipeline.example.json selective_node.example.json $out/share/freya/
               cp -r vendor $out/share/freya/
               makeWrapper ${python}/bin/python $out/bin/freya-indexer \
                 --add-flags "$out/share/freya/run_onchain_indexer.py"

@@ -8,6 +8,7 @@ let
     cp ${../native/freya_node/src/state_lock.rs} $out/core/src/state_lock.rs
     cp ${../native/freya_node/src/acquisition.rs} $out/core/src/acquisition.rs
     cp ${../native/freya_node/src/follow.rs} $out/core/src/follow.rs
+    cp ${../sync_policy.json} $out/core/src/sync_policy.json
     cat ${../native/freya_node/src/repair_bridge.rs} >> $out/core/src/repair/serve_repair.rs
     cat ${../native/freya_node/src/erasure_bridge.rs} >> $out/ledger/src/shred.rs
     python - "$out" <<'PY'

@@ -40,6 +40,8 @@ def prepare(args):
     if args.output.absolute().exists():
         raise PreparationError('Output already exists; preserve it or select another --output')
     external = args.config.absolute()
+    if not external.exists():
+        raise PreparationError('Missing private RPC configuration; for confirmed runtime data loss see docs/native_fresh_start.md')
     private_file(external)
     from pipeline_runtime import read_json, resolve_indexer
     from runtime_health import validate_config
@@ -52,6 +54,8 @@ def prepare(args):
     from solana_rpc_compat import check_boundary
     check_boundary(endpoints[0])
     ledger = provider_limits_path(args.index_db)
+    if not ledger.exists():
+        raise PreparationError('Missing provider ledger; startup never resets accounting. For explicit fresh bootstrap see docs/native_fresh_start.md')
     private_file(ledger)
     if not os.access(ledger, os.W_OK) or not os.access(ledger.parent, os.W_OK):
         raise PreparationError('Collector must already be able to update the existing shared provider ledger')

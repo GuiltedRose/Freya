@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from onchain_ingest import IndexRpc, Ingester, follow
 from onchain_store import EventStore
 from onchain_candles import CandleEngine
+from sync_policy import initialize_store
 
 
 def local_endpoint(endpoint):
@@ -65,7 +66,7 @@ def main():
     ingester = Ingester(store, [make_rpc(e) for e in endpoints], config.get('reviewed_program_versions'),
                         decoder=decoder,oracle=config.get('oracle'))
     try:
-        start = None if store.next_slot() is not None else args.start_slot
+        start = initialize_store(store, args.start_slot)
         results = follow(ingester, start, args.batch_slots) if args.loop else [ingester.step(start, args.batch_slots)]
         for result in results:
             result.update(mode='local_replay_node_bridge', independent_feed_proven=False,

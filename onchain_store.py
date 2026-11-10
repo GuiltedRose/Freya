@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import zlib
+from sync_policy import initial_slot, slot as historical_slot, GENESIS_SLOT
 
 
 def canonical(value):
@@ -27,7 +28,7 @@ class EventStore:
                     id TEXT PRIMARY KEY, policy TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS blocks(
                     slot INTEGER PRIMARY KEY, hash TEXT NOT NULL, parent INTEGER NOT NULL,
-                    time INTEGER NOT NULL, source TEXT NOT NULL, issues TEXT NOT NULL,
+                    time INTEGER, source TEXT NOT NULL, issues TEXT NOT NULL,
                     raw_hash TEXT NOT NULL, transactions INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS block_times ON blocks(time);
                 CREATE TABLE IF NOT EXISTS raw_blocks(slot INTEGER PRIMARY KEY, raw BLOB NOT NULL, raw_hash TEXT NOT NULL);
@@ -47,11 +48,30 @@ class EventStore:
                     start INTEGER PRIMARY KEY, end INTEGER NOT NULL, source TEXT NOT NULL,
                     slots TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS checkpoints(name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                CREATE INDEX IF NOT EXISTS range_ends ON ranges(end);
                 CREATE TABLE IF NOT EXISTS telemetry(name TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS history_requests(
+                    source TEXT PRIMARY KEY, cursor INTEGER NOT NULL, scan_next INTEGER NOT NULL,
+                    requested_end INTEGER NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS conversions(
                     mint TEXT NOT NULL, time INTEGER NOT NULL, usd TEXT NOT NULL,
                     source TEXT NOT NULL, proof TEXT NOT NULL, PRIMARY KEY(mint,time,source));
             ''')
+            # Historical RPC blockTime may legitimately be null. Preserve every
+            # existing row/index/trigger in one transaction when relaxing this
+            # constraint; unknown times remain NULL, never synthetic timestamps.
+            columns = db.execute('PRAGMA table_info(blocks)').fetchall()
+            if next(row for row in columns if row['name']=='time')['notnull']:
+                if [row['name'] for row in columns]!=['slot','hash','parent','time','source','issues','raw_hash','transactions']:
+                    raise ValueError('Unknown historical block schema; explicit migration required')
+                objects = db.execute("SELECT sql FROM sqlite_master WHERE tbl_name='blocks' AND type IN ('index','trigger') AND sql IS NOT NULL").fetchall()
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('CREATE TABLE blocks_nullable(slot INTEGER PRIMARY KEY, hash TEXT NOT NULL, parent INTEGER NOT NULL, time INTEGER, source TEXT NOT NULL, issues TEXT NOT NULL, raw_hash TEXT NOT NULL, transactions INTEGER NOT NULL)')
+                db.execute('INSERT INTO blocks_nullable SELECT slot,hash,parent,time,source,issues,raw_hash,transactions FROM blocks')
+                db.execute('DROP TABLE blocks')
+                db.execute('ALTER TABLE blocks_nullable RENAME TO blocks')
+                for row in objects:
+                    db.execute(row[0])
 
     @contextmanager
     def connect(self):
@@ -120,7 +140,29 @@ class EventStore:
     def next_slot(self):
         with self.connect() as db:
             row = db.execute("SELECT value FROM checkpoints WHERE name='next_slot'").fetchone()
-        return row[0] if row else None
+        return initial_slot(row[0]) if row else None
+
+    def history_request(self, source, cursor, scan_next=None, end=None, state='requested', reason=''):
+        """Uncommitted discovery state, separate from the durable prefix."""
+        with self.connect() as db:
+            if scan_next is None:
+                row = db.execute('SELECT cursor,scan_next,state FROM history_requests WHERE source=?', (source,)).fetchone()
+                if row and row['cursor']==cursor and row['state'] in ('unresolved','blocked'):
+                    historical_slot(row['scan_next'])
+                    if row['scan_next']<cursor:
+                        raise ValueError('Historical discovery cursor precedes committed progress')
+                    return row['scan_next']
+                return cursor
+            historical_slot(cursor)
+            historical_slot(scan_next)
+            db.execute('INSERT OR REPLACE INTO history_requests VALUES(?,?,?,?,?,?)',
+                       (source,cursor,scan_next,end,state,reason))
+
+    def history_status(self):
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='history_requests'").fetchone():
+                return []  # Read-only status of a pre-migration database.
+            return [dict(row) for row in db.execute('SELECT * FROM history_requests ORDER BY source')]
 
     def commit_range(self, start, end, slots, decoded, source):
         """Persist manifest, all produced blocks and checkpoint in one transaction.
@@ -129,7 +171,9 @@ class EventStore:
         decoded: [(slot, full block, events, issues, relevant raw transactions)].
         """
         self.policy(source)
-        if type(start) is not int or end < start or slots != sorted(set(slots)):
+        historical_slot(start)
+        historical_slot(end)
+        if end < start or slots != sorted(set(slots)) or any(type(s) is not int for s in slots):
             raise ValueError('Invalid finalized slot manifest')
         if any(not start <= slot <= end for slot in slots) or [x[0] for x in decoded] != slots:
             raise ValueError('Incomplete manifest blocks')
@@ -141,16 +185,26 @@ class EventStore:
                 if tuple(existing) != (end, source, canonical(slots)):
                     raise ValueError('Conflicting finalized manifest')
                 # Still verify every supplied block below; never overwrite history.
+            elif not slots or slots[-1]!=end:
+                raise ValueError('Unanchored trailing omissions are unresolved history, not committed skips')
             elif checkpoint and checkpoint[0] != start:
                 raise ValueError('Noncontiguous ingestion; recover checkpoint first')
             previous = db.execute('SELECT slot,time,hash FROM blocks WHERE slot<? ORDER BY slot DESC LIMIT 1', (start,)).fetchone()
+            known_time = db.execute('SELECT max(time) FROM blocks WHERE slot<?', (start,)).fetchone()[0]
             for slot, block, events, issues, transactions in decoded:
                 stamp = block['blockTime']
-                if type(stamp) is not int or not block.get('blockhash'):
+                if (stamp is not None and (type(stamp) is not int or stamp<0)) or not block.get('blockhash'):
                     raise ValueError('Finalized block time/hash unavailable')
-                if previous and (block['parentSlot'] != previous[0] or stamp < previous[1]
+                if stamp is not None and known_time is not None and stamp<known_time:
+                    raise ValueError('Finalized time continuity mismatch across unknown timestamps')
+                parent=block['parentSlot']
+                if type(parent) is not int or parent<GENESIS_SLOT or parent>=slot:
+                    raise ValueError('Invalid finalized parent slot')
+                if previous and (parent != previous[0] or stamp is not None and previous[1] is not None and stamp < previous[1]
                                  or block['previousBlockhash'] != previous[2]):
                     raise ValueError('Finalized parent/time continuity mismatch')
+                if previous is None and parent>=max(start,GENESIS_SLOT+1):
+                    raise ValueError('Unresolved history before first retrieved block')
                 digest = hashlib.sha256(canonical(block).encode()).hexdigest()
                 row = db.execute('SELECT raw_hash FROM blocks WHERE slot=?', (slot,)).fetchone()
                 if row and row[0] != digest:
@@ -188,6 +242,8 @@ class EventStore:
                                (*key, slot, event['tx_index'], stamp, event.get('mint'),
                                 event.get('pool'), event.get('wallet'), event['kind'], payload))
                 previous = (slot, stamp, block['blockhash'])
+                if stamp is not None:
+                    known_time=stamp
             db.execute('INSERT OR IGNORE INTO ranges VALUES(?,?,?,?)',
                        (start, end, source, canonical(slots)))
             if not existing:
@@ -282,5 +338,7 @@ class EventStore:
                       for table in ('blocks', 'events', 'transactions', 'ranges', 'conversions')}
             result['blocks_with_issues'] = db.execute("SELECT count(*) FROM blocks WHERE issues!='[]'").fetchone()[0]
             result['oldest_time'], result['latest_time'] = db.execute('SELECT min(time),max(time) FROM blocks').fetchone()
+            result['committed_next_slot'] = db.execute('SELECT max(r.end)+1 FROM ranges r JOIN blocks b ON b.slot=r.end').fetchone()[0]
         result['next_slot'] = self.next_slot()
+        result['history_requests'] = self.history_status()
         return result

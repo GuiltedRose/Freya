@@ -6,28 +6,12 @@ from pathlib import Path
 from onchain_store import EventStore
 from onchain_ingest import IndexRpc, Ingester, follow
 from onchain_market import OnchainMarket
+from sync_policy import initialize_store
 
 
 def bootstrap_start(store,clients,requested=None):
     """Choose once for an empty index; never skip an existing durable prefix."""
-    if store.next_slot() is not None:return None
-    with store.connect() as db:
-        if db.execute('SELECT 1 FROM blocks LIMIT 1').fetchone() or db.execute('SELECT 1 FROM ranges LIMIT 1').fetchone():
-            raise ValueError('Historical index has no checkpoint; explicit recovery is required')
-    slot=requested
-    if slot is None:
-        for number,rpc in enumerate(clients):
-            try:
-                rpc.validate()
-                slot=rpc.call('getSlot',[{'commitment':'finalized'}])
-            except ConnectionError:
-                if number+1==len(clients):raise
-                continue
-            break
-    if type(slot) is not int or slot<0:raise ValueError('Invalid initial finalized slot')
-    with store.connect() as db:
-        db.execute("INSERT INTO checkpoints(name,value) VALUES('next_slot',?)",(slot,))
-    return slot
+    return initialize_store(store, requested)
 
 
 def main():

@@ -56,7 +56,7 @@ def response_value(method,value,source_id):
 
 
 def remote_error(code,source_id):
-    if code in (-32001,-32004,-32009,-32011,-32014):return RpcHistoryUnavailable(source_id,code)
+    if code in (-32001,-32004,-32007,-32009,-32011,-32014,-32019,-32021,-32022):return RpcHistoryUnavailable(source_id,code)
     if code in (-32600,-32602,-32015):return RpcEvidenceError('Unsupported or invalid RPC request/evidence; operator review required')
     return RpcRemoteError(code,source_id)
 

@@ -337,9 +337,9 @@ class IndexerTests(unittest.TestCase):
     def test_missing_window_unknown_versions_and_real_skipped_slots(self):
         self.assertFalse(self.store.coverage(100, 200)['complete'])
         self.store.commit_range(1, 1, [1], [self.decoded(1, 100)], 'fixture')
-        self.store.commit_range(2, 2, [], [], 'fixture')
+        with self.assertRaises(ValueError):self.store.commit_range(2, 2, [], [], 'fixture')
         third = self.decoded(3, 200); third[1]['parentSlot'] = 1; third[1]['previousBlockhash'] = 'block-1'
-        self.store.commit_range(3, 3, [3], [third], 'fixture')
+        self.store.commit_range(2, 3, [3], [third], 'fixture')
         self.assertTrue(self.store.coverage(100, 200)['complete'])
         self.assertFalse(self.store.coverage(99, 200)['complete'])
 
@@ -391,7 +391,7 @@ class IndexerTests(unittest.TestCase):
         with patch.object(ingester, 'deployments', return_value={p: 0 for p in self.decoder.specs}):
             ingester.step(1, 2)
         self.assertEqual(self.store.next_slot(), 3)
-        self.assertEqual(self.store.metrics()['blocks_with_issues'], 2)
+        self.assertEqual(self.store.metrics()['blocks_with_issues'], 0)
         first.failure = SourceAccessBlocked('denied')
         with self.assertRaises(SourceAccessBlocked): ingester.step(count=1)
         self.assertEqual(self.store.next_slot(), 3)
@@ -535,7 +535,7 @@ class IndexerTests(unittest.TestCase):
         from onchain_ingest import follow
         rpc = FakeRpc()
         ingester = Ingester(self.store, [rpc])
-        rpc.call = lambda method, params: (100 if method == 'getSlot' else
+        rpc.call = lambda method, params: (100 if method == 'getSlot' else 1 if method == 'getFirstAvailableBlock' else
             list(range(params[0], params[1]+1)) if method == 'getBlocks' else
             block(params[0], params[0]*60))
         with patch.object(ingester, 'deployments', return_value={p: 0 for p in self.decoder.specs}), patch('onchain_ingest.time.sleep') as sleep:
@@ -655,6 +655,7 @@ class FakeRpc:
         if self.failure: raise self.failure
     def call(self, method, params):
         if method == 'getSlot': return 2
+        if method == 'getFirstAvailableBlock': return 1
         if method == 'getBlocks': return list(range(params[0], params[1]+1))
         if method == 'getBlock': return block(params[0], params[0]*60)
         raise ValueError(method)

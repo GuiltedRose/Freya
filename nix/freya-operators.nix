@@ -3,6 +3,9 @@
 let
   cfg = config.services.freya-operators;
 in {
+  # Host bootstrap and the immutable selective-node snapshot can both import
+  # this module. One stable module key prevents duplicate option declarations.
+  key = "freya-operators";
   options.services.freya-operators = {
     enable = lib.mkEnableOption "Freya operator root access";
     members = lib.mkOption {

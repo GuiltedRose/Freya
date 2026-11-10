@@ -110,21 +110,22 @@ first enabled endpoint; to use public WSS after a local stream failure, explicit
 select the public-only configuration and resume the same observer DB. No automatic
 WebSocket switching or source-policy approval is implied.
 
-## Automatic initial finalized slot
+## Historical starting boundary
 
-New/empty observer databases now discover `getSlot` with finalized commitment
-through the configured client (including the Rust bridge). Genesis validation,
-source permissions, provider pacing and network budgets remain in force. Invalid
-or unavailable responses stop startup; no guessed slot is used.
+New/empty observer databases use the shared `sync_policy.json` Genesis boundary,
+slot 0. Startup never selects a recent finalized head as its initial cursor.
+Genesis validation, source permissions, provider pacing and network budgets
+remain in force during retrieval.
 
-The initial slot is committed before streaming starts, so a startup interruption
-cannot trigger a jump to a newer tip on retry. Existing validated observer files
+The requested boundary is persisted before streaming starts; this is not evidence
+of retrieved or committed history. Existing validated observer files
 resume their saved checkpoint automatically; `--resume` remains accepted. A saved
 checkpoint takes precedence over `--start-slot`. That option supplies an explicit
 initial boundary only for an empty database, including historical replay. Nonempty
 history without a checkpoint fails for explicit recovery rather than guessing.
-Tip discovery starts a new observation window; it does not certify any earlier
-historical hour as complete.
+Unavailable historical ranges remain unresolved. Manifest omissions require a
+successor-parent proof before checkpoint advancement. See the
+[Genesis audit](genesis_sync_audit.md) for the full flow and availability limits.
 
-Operator regression command (not executed here):
+Operator regression command:
 `python -m unittest discover -s tests -p 'test_observer_start_slot.py'`.

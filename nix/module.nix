@@ -48,7 +48,9 @@ in {
       type = types.str;
       description = "Runtime-only absolute config path; loaded as a systemd credential. Never use a Nix path literal or builtins.readFile for secrets.";
     };
-    startSlot = mkOption { type = types.nullOr types.ints.unsigned; default = null; };
+    startSlot = mkOption { type = types.nullOr types.ints.unsigned; default = null;
+      description = "Explicit fresh historical boundary override; null uses the shared Genesis policy. Existing checkpoints always resume.";
+    };
     batchSlots = mkOption { type = types.ints.between 1 64; default = 8; };
     maxCatchupSlots = mkOption { type = types.ints.between 1 64; default = 64; };
     capitalConfigFile = mkOption { type = types.str; default = "${cfg.package}/share/crypto-bot/capital_policy.example.json";

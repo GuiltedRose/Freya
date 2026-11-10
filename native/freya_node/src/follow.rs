@@ -9,6 +9,33 @@ use solana_pubkey::Pubkey;
 use solana_ledger::shred::Shred;
 use std::{net::UdpSocket, process::{Command, Stdio}, str::FromStr};
 const SCHEMA: &str = "freya-native-follow-v1";
+fn publish(dir: &Path, value: &Value) -> io::Result<()> {
+    let mut record=value.clone();
+    record["progress_scope"]=json!("native_acquisition_only");
+    record["acquisition_next_slot"]=record["next_slot"].clone();
+    record["ledger_committed_next_slot"]=Value::Null;
+    super::publish(dir,&record)
+}
+fn sync_policy() -> &'static Value {
+    static POLICY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    POLICY.get_or_init(||serde_json::from_str(include_str!("sync_policy.json")).expect("embedded sync policy"))
+}
+fn genesis_start() -> u64 {
+    assert_eq!(sync_policy()["schema"],"freya-sync-policy-v1");
+    let start=sync_policy()["fresh_start_slot"].as_u64().expect("genesis boundary");
+    assert_eq!(start,0);
+    start
+}
+fn valid_skip(window: &Value, cursor: u64) -> bool {
+    window["skip_proofs"].as_array().is_some_and(|proofs|proofs.iter().any(|proof| {
+        if proof["slot"].as_u64()!=Some(cursor) {return false;}
+        if cursor==genesis_start() {return proof["kind"]=="genesis_boundary";}
+        proof["kind"]=="finalized_successor_parent"
+            && proof["parent_slot"].as_u64().is_some_and(|parent|parent<cursor)
+            && proof["successor_slot"].as_u64().is_some_and(|successor|successor>cursor
+                && window["observed_finalized_head"].as_u64().is_some_and(|head|successor<=head))
+    }))
+}
 fn response(packet:&[u8],from:SocketAddr,expected:SocketAddr,nonce:u32,slot:u64,
     version:u16,leader:&Pubkey,max:u32,index:Option<u64>) -> Result<(Shred,Vec<u8>), &'static str> {
     if from!=expected {return Err("unexpected_endpoint");}
@@ -184,16 +211,29 @@ fn resume_slot(state: &Value, window: Option<&Value>) -> io::Result<u64> {
         let first=window["start"].as_u64().ok_or_else(invalid)?;
         let end=window["end"].as_u64().ok_or_else(invalid)?;
         if window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
-            || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+            || window["genesis"]!=sync_policy()["genesis_hash"]
             || end<first || end-first>3 {return Err(invalid());}
         return Ok(first); // Resume the retained window; never infer completion from file counts.
     }
-    Ok(0)
+    Ok(genesis_start())
 }
 fn resume_window(dir: &Path, state: &Value) -> io::Result<Option<Value>> {
+    let mut earliest: Option<Value>=None;
+    for entry in fs::read_dir(dir)? {
+        let entry=entry?;
+        let name=entry.file_name();
+        let Some(slot)=name.to_str().and_then(|s|s.strip_suffix(".rpc-skip.json")).and_then(|s|s.parse::<u64>().ok()) else {continue;};
+        let window=read_json(&entry.path())?;
+        let first=resume_slot(&json!({"next_slot":null}),Some(&window))?;
+        if slot<first || window["end"].as_u64().is_none_or(|end|slot>end) || !valid_skip(&window,slot) {
+            return Err(io::Error::other("retained skip lacks historical parent proof; explicit recovery required"));
+        }
+        checked_source(&window,state)?;
+        if earliest.as_ref().is_some_and(|prior|prior["source_identity"]!=window["source_identity"]) {return Err(invalid());}
+        if earliest.as_ref().is_none_or(|prior|first<prior["start"].as_u64().unwrap_or(0)) {earliest=Some(window);}
+    }
     if dir.join("window.json").exists() {return read_json(&dir.join("window.json")).map(Some);}
     if state["next_slot"].is_u64() {return Ok(None);}
-    let mut earliest: Option<Value>=None;
     for entry in fs::read_dir(dir)? {
         let entry=entry?;
         let Some(slot)=entry.file_name().to_str().and_then(|name|name.parse::<u64>().ok()) else {continue;};
@@ -234,7 +274,7 @@ fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
                 record["stage"]=json!(stage);
             }
             if let Some(method)=progress["rpc_method"].as_str().filter(|method|matches!(*method,
-                "getGenesisHash"|"getSlot"|"getFirstAvailableBlock"|"getSlotLeaders"|"getBlocks"|"getClusterNodes")) {
+                "getBlock"|"getGenesisHash"|"getSlot"|"getFirstAvailableBlock"|"getSlotLeaders"|"getBlocks"|"getClusterNodes")) {
                 record["rpc_method"]=json!(method);
             }
             if let Some(start)=progress["stage_started_at"].as_f64().filter(|start|start.is_finite() && *start<=at && *start>=0.0) {
@@ -341,7 +381,7 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
             let window=read_json(&dir.join("window.json"))?;
             if window["planning_run_id"].as_str()!=Some(run_id.as_str())
                 || window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
-                || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+                || window["genesis"]!=sync_policy()["genesis_hash"]
                 || start.is_some_and(|s|window["start"].as_u64()!=Some(s)) {return Err(invalid());}
             Ok(window)
         })();
@@ -431,7 +471,16 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
             Some(window) if state["next_slot"].is_u64()=>window,
             _=>plan(dir,Some(start),&stop)?, // Revalidate orphaned planning metadata before reuse.
         };
-        if window["schema"]!="freya-native-window-v1" || window["genesis"]!="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" { return Err(invalid()); }
+        if window["schema"]!="freya-native-window-v1" || window["genesis"]!=sync_policy()["genesis_hash"] { return Err(invalid()); }
+        if window["rpc_reported_skipped_slots"].as_array().is_some_and(|slots|!slots.is_empty())
+            && !window["skip_proofs"].is_array() {
+            // Legacy omissions have no parent evidence. Revalidate in place;
+            // never discard a saved acquisition cursor or fabricate a skip.
+            window=plan(dir,window["start"].as_u64(),&stop)?;
+        }
+        state["progress_scope"]=json!("native_acquisition_only");
+        state["ledger_committed_next_slot"]=Value::Null;
+        state["peer_historical_availability"]=json!("unknown");
         failure_stage="bootstrap_metadata";
         if bootstraps.is_empty() {
             if window["bootstrap_nodes"].as_array().is_none_or(|rows|rows.is_empty()) {
@@ -501,7 +550,9 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
                 let row=rows.iter().find(|row|row["slot"].as_u64()==Some(cursor));
                 if row.is_none() {
                     if !window["rpc_reported_skipped_slots"].as_array().ok_or_else(invalid)?.contains(&json!(cursor)) { return Err(invalid()); }
-                    // Persist RPC skip provenance, never interpret a repair timeout as a skip.
+                    if !valid_skip(&window,cursor) {return Err(io::Error::other("unresolved historical omission"));}
+                    // Persist reviewed successor-parent evidence. This is native
+                    // acquisition progress, never execution-verified ingestion.
                     save(&dir.join(format!("{cursor}.rpc-skip.json")),&window)?;
                     state["next_slot"]=json!(cursor+1);publish(dir,&state)?;continue;
                 }
@@ -680,6 +731,12 @@ mod tests {
         // ProviderBudget.identity returns two lowercase HMAC-SHA256 hex digests.
         json!({"provider_id":"a".repeat(64),"endpoint_id":"b".repeat(64)})
     }
+    #[test] fn skip_claim_requires_parent_evidence_or_genesis_boundary() {
+        assert!(!valid_skip(&json!({"rpc_reported_skipped_slots":[7]}),7));
+        assert!(!valid_skip(&json!({"observed_finalized_head":10,"skip_proofs":[{"slot":7,"kind":"finalized_successor_parent","parent_slot":7,"successor_slot":8}]}),7));
+        assert!(valid_skip(&json!({"observed_finalized_head":10,"skip_proofs":[{"slot":7,"kind":"finalized_successor_parent","parent_slot":6,"successor_slot":9}]}),7));
+        assert!(valid_skip(&json!({"skip_proofs":[{"slot":0,"kind":"genesis_boundary"}]}),genesis_start()));
+    }
     #[test] fn startup_resumes_checkpoint_then_retained_window_otherwise_zero() {
         let window=json!({"schema":"freya-native-window-v1","verification":"reviewed_rpc_claim",
             "genesis":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d","start":7,"end":10});
@@ -688,6 +745,15 @@ mod tests {
         assert_eq!(resume_slot(&json!({"next_slot":null}),None).unwrap(),0);
         assert!(resume_slot(&json!({"next_slot":"corrupt"}),None).is_err());
         assert!(resume_slot(&json!({"next_slot":null}),Some(&json!({"start":7}))).is_err());
+    }
+    #[test] fn legacy_skip_does_not_silently_certify_retained_progress() {
+        let dir=tempfile::tempdir().unwrap();
+        let window=json!({"schema":"freya-native-window-v1","verification":"reviewed_rpc_claim",
+            "genesis":sync_policy()["genesis_hash"],"start":7,"end":10,"source_identity":source_fixture(),
+            "observed_finalized_head":10,"rpc_reported_skipped_slots":[8]});
+        fs::write(dir.path().join("8.rpc-skip.json"),serde_json::to_vec(&window).unwrap()).unwrap();
+        assert!(resume_window(dir.path(),&json!({"next_slot":9})).is_err());
+        assert!(dir.path().join("8.rpc-skip.json").exists());
     }
     #[test] fn retained_slot_schedules_resume_earliest_window_without_skipping_gaps() {
         let dir=tempfile::tempdir().unwrap();

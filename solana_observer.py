@@ -93,49 +93,8 @@ async def observe(config, database, start_slot=None, resume=False, batch=8, inte
     # Existing files still pass open_isolated's observer-schema validation.
     ingester,endpoint,candles=prepare(config,database,resume or Path(database).is_file())
     try:
-        checkpoint=ingester.store.next_slot()
-        start=None
-        if checkpoint is None:
-            with ingester.store.connect() as db:
-                if db.execute('SELECT 1 FROM blocks LIMIT 1').fetchone() or db.execute('SELECT 1 FROM ranges LIMIT 1').fetchone():
-                    raise ValueError('Historical observer has no checkpoint; explicit recovery required')
-            start=start_slot
-            if start is None:
-                def discover():
-                    # Reuse configured clients, genesis checks, pacing and error policy.
-                    for index,rpc in enumerate(ingester.endpoints):
-                        try:
-                            rpc.validate()
-                            slot=rpc.call('getSlot',[{'commitment':'finalized'}])
-                        except ConnectionError:
-                            if index+1==len(ingester.endpoints): raise
-                            continue
-                        if type(slot) is not int or slot<0:
-                            raise ValueError('Invalid finalized slot response')
-                        return slot
-                    raise ValueError('No configured RPC for finalized discovery')
-                # RustIndexRpc enforces source/session/budget permission per request.
-                # Match the stream's budget check for the selectable Python backend.
-                if endpoint.get('network_budget') and endpoint.get('backend','python')!='rust':
-                    from solana_network_budget import Budget
-                    from data_policy import SourceAccessBlocked
-                    try:
-                        usage=Budget(endpoint['network_budget']['ledger']).report(__import__('time').time())
-                        if usage['optional_collection_suspended']: raise ValueError('Budget exhausted')
-                    except (ValueError,OSError,KeyError):
-                        raise SourceAccessBlocked('Network budget unavailable or exhausted') from None
-                start=await asyncio.to_thread(discover)
-            # Persist the initial boundary BEFORE starting sockets/ingestion. A crash
-            # after discovery must never cause the next process to skip to a newer tip.
-            with ingester.store.connect() as db:
-                db.execute('BEGIN IMMEDIATE')
-                saved=db.execute("SELECT value FROM checkpoints WHERE name='next_slot'").fetchone()
-                if saved is None:
-                    if db.execute('SELECT 1 FROM blocks LIMIT 1').fetchone() or db.execute('SELECT 1 FROM ranges LIMIT 1').fetchone():
-                        raise ValueError('History changed during startup; checkpoint recovery required')
-                    db.execute("INSERT INTO checkpoints VALUES('next_slot',?)",(start,))
-                else:
-                    start=None # A concurrently persisted checkpoint always wins.
+        from sync_policy import initialize_store
+        start=initialize_store(ingester.store, start_slot)
         # Keep the user's async connect/observe integration, with shared validation,
         # acknowledgments and recovery rather than a second competing WS client.
         from solana_rpc_compat import stream_connector
