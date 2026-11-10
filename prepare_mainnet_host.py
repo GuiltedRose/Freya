@@ -32,6 +32,17 @@ def private_file(path):
         raise PreparationError('Runtime file must already be owned privately by the collector: ' + str(path))
 
 
+def validate_native_source(config):
+    """Qualify metadata transport only; decoder/receipt admission stays separate."""
+    endpoints = [e for e in config.get('endpoints', []) if e.get('enabled') is True]
+    if len(endpoints) != 1 or endpoints[0].get('backend') != 'rust':
+        raise PreparationError('One existing reviewed Rust RPC source is required')
+    from solana_rpc_compat import check_boundary, native_module
+    check_boundary(endpoints[0])
+    native_module()
+    return endpoints[0]
+
+
 def prepare(args):
     if os.getuid() == 0:
         raise PreparationError('Run as the existing non-root collector, not sudo')
@@ -44,15 +55,8 @@ def prepare(args):
         raise PreparationError('Missing private RPC configuration; for confirmed runtime data loss see docs/native_fresh_start.md')
     private_file(external)
     from pipeline_runtime import read_json, resolve_indexer
-    from runtime_health import validate_config
     config = resolve_indexer(read_json(external), {'SOLANA_RPC_URL': os.environ.get('SOLANA_RPC_URL', '')})
-    validate_config(config)
-    endpoints = [e for e in config.get('endpoints', []) if e.get('enabled') is True]
-    if len(endpoints) != 1 or endpoints[0].get('backend') != 'rust':
-        raise PreparationError('One existing reviewed Rust RPC source is required')
-    # Static policy/boundary checks only; make no RPC requests and grant no rights.
-    from solana_rpc_compat import check_boundary
-    check_boundary(endpoints[0])
+    endpoint = validate_native_source(config)
     ledger = provider_limits_path(args.index_db)
     if not ledger.exists():
         raise PreparationError('Missing provider ledger; startup never resets accounting. For explicit fresh bootstrap see docs/native_fresh_start.md')
@@ -100,7 +104,7 @@ def prepare(args):
         'max_namespace_bytes':1000000,'max_disk_bytes':67108864,'max_shreds_per_slot':1024,
         'max_attempts_per_window':128,'request_interval_ms':500},indent=2)+'\n')
     write('node.json', json.dumps({'mode':'external','external_config':str(external),
-        'network_mode':endpoints[0].get('network_mode','isolated'),'provider_ledger':str(ledger)},indent=2)+'\n')
+        'network_mode':endpoint.get('network_mode','isolated'),'provider_ledger':str(ledger)},indent=2)+'\n')
     module = '''{ config, lib, pkgs, ... }: {
   imports = [ ({ config, lib, pkgs, ... }: import SOURCE/nix/selective-node.nix {
     inherit config lib pkgs;
@@ -144,12 +148,13 @@ def prepare(args):
             home_access += f'systemd.services.{service}.serviceConfig = {{ ProtectHome = lib.mkForce \"tmpfs\"; BindPaths = [ {nix_string(ledger.parent)} ]; }};\n'
     values = {'HOMEACCESS':home_access,'SOURCE':source,'PACKAGE':package,'USER':nix_string(user),'GROUP':nix_string(group),
               'NODECONFIG':nix_string(output/'node.json'),'EXTERNAL':nix_string(external),
-              'LEDGER':nix_string(ledger),'FOLLOW':nix_string(output/'follow.json'),'UPLINK':nix_string(uplink),'RPCMODE':nix_string(endpoints[0].get('network_mode','isolated'))}
+              'LEDGER':nix_string(ledger),'FOLLOW':nix_string(output/'follow.json'),'UPLINK':nix_string(uplink),'RPCMODE':nix_string(endpoint.get('network_mode','isolated'))}
     module = re.sub(r'\b('+'|'.join(values)+r')\b',lambda match:values[match[0]],module)
     write('freya-mainnet.nix',module)
     write('freya-diagnostic-host.nix','{ ... }: { imports = [ ./configuration.nix ./freya-mainnet.nix ]; }\n')
     print(json.dumps({'prepared':str(output),'uplink':uplink,'collector':user,'group':group,
-                     'provider_ledger':str(ledger),'services_started':False,'network_probes':False},indent=2))
+                     'provider_ledger':str(ledger),'services_started':False,'network_probes':False,
+                     'scope':'native_rpc_planning_only','decoder_qualification_granted':False},indent=2))
 
 
 def main():

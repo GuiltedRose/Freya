@@ -62,11 +62,11 @@
         src = ./.;
         filter = path: type:
           let rel = nixpkgs.lib.removePrefix (toString ./. + "/") (toString path);
-          in if type == "directory" then builtins.elem rel [ "vendor" "tests" "tests/fixtures" "tests/fixtures/onchain" ]
+          in if type == "directory" then builtins.elem rel [ "vendor" "deployment" "tests" "tests/fixtures" "tests/fixtures/onchain" ]
           else nixpkgs.lib.hasSuffix ".py" rel
             || (nixpkgs.lib.hasPrefix "vendor/" rel && nixpkgs.lib.hasSuffix ".json" rel)
             || (nixpkgs.lib.hasPrefix "tests/fixtures/onchain/" rel && nixpkgs.lib.hasSuffix ".json" rel)
-            || builtins.elem rel [ "sync_policy.json" "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" "selective_node.example.json" ];
+            || builtins.elem rel [ "sync_policy.json" "deployment/native-mainnet.reviewed.json" "meme_live_rules.json" "pump_watch_specs.json" "assets.json" "capital_policy.example.json" "challengers.example.json" "onchain_pipeline.example.json" "learning_pipeline.example.json" "selective_node.example.json" ];
       };
     in {
       packages = eachSystem (system:
@@ -83,6 +83,8 @@
               mkdir -p $out/share/freya $out/bin
               cp *.py sync_policy.json meme_live_rules.json pump_watch_specs.json assets.json capital_policy.example.json challengers.example.json onchain_pipeline.example.json learning_pipeline.example.json selective_node.example.json $out/share/freya/
               cp -r vendor $out/share/freya/
+              mkdir -p $out/share/freya/deployment
+              cp deployment/native-mainnet.reviewed.json $out/share/freya/deployment/
               makeWrapper ${python}/bin/python $out/bin/freya-indexer \
                 --add-flags "$out/share/freya/run_onchain_indexer.py"
               makeWrapper ${python}/bin/python $out/bin/freya-paper \

@@ -162,6 +162,16 @@ operator's transfer/commit; Git-backed flakes omit untracked policy/config files
 
 ## Remaining limits and outstanding acceptance
 
+Follow-up on Monolith (`fdbd471`): the native-peer and native-node Nix packages
+built successfully; native Nix tests reported 44 passed. The host's base rebuild
+had removed the Freya units (`LoadState=not-found`), so reinstallation needs fresh
+host preparation rather than `--refresh`. Bootstrap exposed retired decoder
+hashes in the copied source config and correctly published no runtime files.
+The setup correction validates native metadata-source transport separately and
+grants no decoder qualification; full ingestion still rejects those stale pins.
+Fresh provider-ledger creation is explicitly operator-authorized, but had not run
+successfully at this point. This does not establish operational Genesis readiness.
+
 Live Genesis synchronization is **not established** by these tests. The configured
 public source has not been proven archival, nor have discovered peers been proven
 to retain Genesis shreds. Gossip contact information does not provide a historical

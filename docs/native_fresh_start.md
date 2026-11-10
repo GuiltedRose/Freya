@@ -11,6 +11,12 @@ the existing development configuration, including its original policy evidence
 and deployment ranges; it is not newly validated or a live-order authorization.
 Review it before use. Never extend its deployment ranges back to genesis or mark
 additional policies verified to make historical decoding pass.
+Its decoder hashes refer to the prior schemas and therefore do not currently
+qualify full ingestion. Bootstrap and native host preparation validate only the
+reviewed source/transport needed for metadata planning. They copy those review
+records unchanged and explicitly grant no decoder qualification. Full indexer and
+observer startup continue rejecting the stale pins until genuine deployment/schema
+requalification; native acquisition progress is not receipt-verified ingestion.
 
 On Monolith, after transferring this checkout, as `link`:
 
@@ -31,6 +37,11 @@ refresh_dir="state/mainnet-refresh-$(date -u +%Y%m%dT%H%M%SZ)"
 python prepare_mainnet_host.py --refresh --output "$refresh_dir"
 diff -u /etc/nixos/freya-mainnet.nix "$refresh_dir/freya-mainnet.nix"
 ```
+
+Use `--refresh` only when `systemctl show ... -p LoadState` reports all three
+Freya units loaded. If a base-host rebuild removed them (`not-found`), omit
+`--refresh` to prepare a fresh service installation, preserving the retained
+identity and network-budget ledger.
 
 Bootstrap makes no network calls. It creates owner-only files exclusively and
 refuses existing targets, including symlinks. Policy flags are copied unchanged.

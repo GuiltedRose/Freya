@@ -25,11 +25,8 @@ def bootstrap(source, config, ledger, *, acknowledge_loss=False):
             raise ValueError('Existing runtime file must be retained: '+str(target))
     document = read_json(source)
     resolved = resolve_indexer(document, os.environ)
-    from runtime_health import validate_config
-    validate_config(resolved)
-    endpoints = [e for e in resolved.get('endpoints', []) if e.get('enabled') is True]
-    if len(endpoints) != 1 or endpoints[0].get('backend') != 'rust':
-        raise ValueError('One reviewed Rust RPC source is required')
+    from prepare_mainnet_host import validate_native_source
+    endpoint = validate_native_source(resolved)
     for target in (config, ledger):
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Prepare both files privately before exclusive publication. Hard links refuse
@@ -37,14 +34,14 @@ def bootstrap(source, config, ledger, *, acknowledge_loss=False):
     with tempfile.TemporaryDirectory(prefix='.native-bootstrap-', dir=ledger.parent) as scratch:
         staged_ledger = Path(scratch)/'provider.sqlite'
         budget = ProviderBudget(staged_ledger)
-        budget.identity(endpoints[0]['url'])
+        budget.identity(endpoint['url'])
         now = time.time()
         with closing(budget.connect()) as db, db:
             # Missing history is not evidence that a provider cooldown expired.
             # Apply the existing throttle margin to this new accounting epoch;
             # this cannot certify that an unknown older restriction has expired.
             db.execute('INSERT INTO providers VALUES(?,?,?,?,?)',
-                       (budget.key(endpoints[0]['url']), now+THROTTLE_MARGIN_SECONDS,
+                       (budget.key(endpoint['url']), now+THROTTLE_MARGIN_SECONDS,
                         now+THROTTLE_MARGIN_SECONDS, 0, 0))
             db.execute('CREATE TABLE bootstrap_provenance(at REAL NOT NULL,reason TEXT NOT NULL)')
             db.execute('INSERT INTO bootstrap_provenance VALUES(?,?)',
@@ -73,7 +70,8 @@ def bootstrap(source, config, ledger, *, acknowledge_loss=False):
             staged_config.unlink(missing_ok=True)
     return {'config': str(config), 'ledger': str(ledger),
             'provider_not_before': now+THROTTLE_MARGIN_SECONDS, 'services_started': False,
-            'network_probes': False, 'historical_accounting_recovered': False}
+            'network_probes': False, 'historical_accounting_recovered': False,
+            'scope':'native_rpc_planning_only', 'decoder_qualification_granted':False}
 
 
 def main():
