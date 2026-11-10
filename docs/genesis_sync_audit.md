@@ -172,6 +172,25 @@ grants no decoder qualification; full ingestion still rejects those stale pins.
 Fresh provider-ledger creation is explicitly operator-authorized, but had not run
 successfully at this point. This does not establish operational Genesis readiness.
 
+Subsequent Monolith revision `8a6cb73`: explicit fresh bootstrap succeeded. The
+Freya add-on built and passed dry-activation, then was activated with NixOS `test`
+(temporary, not a boot-profile switch). The three units were restored with
+`Restart=no`, and nftables was active. One 55-second/1-MB bounded session ran with
+planner run ID `000000000000000018e699d5f8779e2e`. Genesis validation, cluster
+discovery, finalized-head and history-floor stages passed; `getSlotLeaders`
+failed with `RpcEvidenceError`. No cursor advanced, no repair requests were sent,
+and zero shreds were validated. The controller expired cleanly without retries.
+The budget charged 1,000,000 bytes; observed IP traffic increased by 404,054 bytes
+download and 11,656 bytes upload. The native workload remained failed and all
+Freya networking stopped. Prior network accounting and identity were retained.
+
+Terminal evidence/request exceptions did not retain provider codes, so these
+diagnostics cannot establish whether this was a provider rejection or malformed
+response. A local diagnostic correction preserves bounded `rpc_code`/`source_id`
+without raw provider messages, changing neither exception classes nor retries;
+31 RPC-contract/native-planning regressions passed. That correction needs an
+operator transfer before another separately authorized diagnostic session.
+
 Live Genesis synchronization is **not established** by these tests. The configured
 public source has not been proven archival, nor have discovered peers been proven
 to retain Genesis shreds. Gossip contact information does not provide a historical

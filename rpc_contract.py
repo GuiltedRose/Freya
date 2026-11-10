@@ -56,9 +56,18 @@ def response_value(method,value,source_id):
 
 
 def remote_error(code,source_id):
-    if code in (-32001,-32004,-32007,-32009,-32011,-32014,-32019,-32021,-32022):return RpcHistoryUnavailable(source_id,code)
-    if code in (-32600,-32602,-32015):return RpcEvidenceError('Unsupported or invalid RPC request/evidence; operator review required')
-    return RpcRemoteError(code,source_id)
+    if code in (-32001,-32004,-32007,-32009,-32011,-32014,-32019,-32021,-32022):
+        failure=RpcHistoryUnavailable(source_id,code)
+    elif code in (-32600,-32602,-32015):
+        failure=RpcEvidenceError('Unsupported or invalid RPC request/evidence; operator review required')
+    else:
+        failure=RpcRemoteError(code,source_id)
+    # Retain bounded provider codes even for terminal request/evidence errors.
+    # Diagnostic callers must not need raw messages or endpoint URLs to identify
+    # a rejected historical method. Exception classes and retry policy are unchanged.
+    failure.rpc_code=code
+    failure.source_id=source_id
+    return failure
 
 
 def rpc_batch_result(text,source_id,budget,url,count):

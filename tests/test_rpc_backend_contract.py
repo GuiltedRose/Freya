@@ -1,4 +1,5 @@
-"""UNEXECUTED completeness regressions, isolated SQLite and mocked transport."""
+"""Offline completeness regressions, isolated SQLite and mocked transport."""
+import json
 import unittest
 from unittest.mock import MagicMock
 from rpc_contract import response_value, remote_error, RpcEvidenceError, RpcHistoryUnavailable, http_error
@@ -37,6 +38,22 @@ class ResultContractTests(unittest.TestCase):
             self.assertEqual(error.rpc_code,code)
         self.assertIsInstance(remote_error(-32015,'fixture'),RpcEvidenceError)
         self.assertEqual(remote_error(429,'fixture').category,'throttled')
+
+    def test_rejected_historical_requests_preserve_code_without_private_messages(self):
+        from rpc_contract import rpc_result
+        from prepare_native_window import planning_error
+        for code in (-32600,-32602,-32015,-32601):
+            body=json.dumps({'jsonrpc':'2.0','id':1,'error':{
+                'code':code,'message':'private endpoint https://secret.invalid/key'}})
+            with self.assertRaises(ValueError) as caught:
+                rpc_result(body,'getSlotLeaders','fixture',MagicMock(),'https://fixture.invalid')
+            error=caught.exception
+            self.assertEqual(error.rpc_code,code)
+            self.assertEqual(error.source_id,'fixture')
+            self.assertEqual(error.rpc_method,'getSlotLeaders')
+            diagnostic=planning_error(error)
+            self.assertEqual(diagnostic['rpc_code'],code)
+            self.assertNotIn('secret.invalid',json.dumps(diagnostic))
 
 
 class HistoryGuardTests(unittest.TestCase):
