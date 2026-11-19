@@ -42,7 +42,10 @@ in {
     systemd.services.freya-peer-discovery = lib.mkIf (cfg.peerDiscoveryConfig != null) {
       description = "Bounded Freya native gossip discovery; no trading admission";
       wantedBy = []; restartIfChanged = false; stopIfChanged = true;
-      environment.CRYPTO_BOT_PROVIDER_LIMITS = cfg.providerLedger;
+      environment = {
+        CRYPTO_BOT_PROVIDER_LIMITS = cfg.providerLedger;
+        FREYA_PEER_SYSTEMD_TASK_LIMIT = toString config.systemd.services.freya-peer-discovery.serviceConfig.TasksMax;
+      };
       serviceConfig = {
         User = cfg.user; Group = cfg.group; UMask = "0077";
         LoadCredential = [ "peer.json:${cfg.peerDiscoveryConfig}" "external.json:${cfg.externalConfigFile}" ];

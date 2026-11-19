@@ -51,9 +51,17 @@ in rustPlatform.buildRustPackage {
   cargoTestFlags = [ "--package" "solana-core" "--features" "agave-unstable-api" "--bin" "freya-peer" ];
   postInstall = ''
     mv $out/bin/freya-peer $out/bin/.freya-peer-engine
-    makeWrapper ${pkgs.util-linux}/bin/prlimit $out/bin/freya-peer \
-      --add-flags '--as=2147483648 --nofile=128 --nproc=128 --' \
-      --add-flags "$out/bin/.freya-peer-engine" \
+    cat > $out/bin/freya-peer <<EOF
+    #!${pkgs.runtimeShell}
+    uid_task_limit=(--nproc=128)
+    # systemd applies TasksMax=128 to the service and all its children.
+    if [[ \\''${FREYA_PEER_SYSTEMD_TASK_LIMIT:-} == 128 ]]; then
+      uid_task_limit=()
+    fi
+    exec ${pkgs.util-linux}/bin/prlimit --as=2147483648 --nofile=128 "\''${uid_task_limit[@]}" -- "$out/bin/.freya-peer-engine" "\\$@"
+    EOF
+    chmod +x $out/bin/freya-peer
+    wrapProgram $out/bin/freya-peer \
       --set SOLANA_RAYON_THREADS 2 --set RAYON_NUM_THREADS 2 \
       --unset SOLANA_METRICS_CONFIG
   '';
