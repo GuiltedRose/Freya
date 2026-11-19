@@ -131,6 +131,14 @@ def rpc_result(text,method,source_id,budget,url):
     if code in (429,-32005):budget.failure(url,429 if code==429 else 503)
     failure=remote_error(code,source_id)
     failure.rpc_method=method
+    message = error.get('message')
+    if method == 'getSlotLeaders' and code == -32602 and isinstance(message, str):
+        import re
+        if len(message) <= 96 and re.fullmatch(
+            r'Invalid slot range: leader schedule for epoch [0-9]{1,20} is unavailable',
+            message,
+        ):
+            failure.rpc_reason = 'leader_schedule_unavailable'
     if getattr(type(budget),'cooldown_remaining',None) is not None:
         failure.retry_after_seconds=budget.cooldown_remaining(url)
     raise failure

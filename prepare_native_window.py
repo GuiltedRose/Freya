@@ -110,6 +110,8 @@ def planning_error(error):
     method = getattr(error, 'freya_rpc_method', None) or getattr(error, 'rpc_method', None)
     if method in ('getBlock','getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
         record['rpc_method']=method
+    if method == 'getSlotLeaders' and getattr(error, 'rpc_reason', None) == 'leader_schedule_unavailable':
+        record['rpc_reason'] = 'leader_schedule_unavailable'
     category=getattr(error,'category',None)
     if category in ('connect','connect_timeout','request_timeout','transport','throttled','cancelled',
                     'transport_unavailable','authorization_denied','malformed_evidence','history_unavailable',

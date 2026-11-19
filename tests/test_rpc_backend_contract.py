@@ -54,7 +54,21 @@ class ResultContractTests(unittest.TestCase):
             diagnostic=planning_error(error)
             self.assertEqual(diagnostic['rpc_code'],code)
             self.assertEqual(diagnostic['rpc_method'],'getSlotLeaders')
+            self.assertNotIn('rpc_reason', diagnostic)
             self.assertNotIn('secret.invalid',json.dumps(diagnostic))
+
+    def test_agave_unavailable_leader_schedule_reports_only_fixed_reason(self):
+        from rpc_contract import RpcEvidenceError, rpc_result
+        from prepare_native_window import planning_error
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'error': {
+            'code': -32602,
+            'message': 'Invalid slot range: leader schedule for epoch 0 is unavailable',
+        }})
+        with self.assertRaises(RpcEvidenceError) as caught:
+            rpc_result(body, 'getSlotLeaders', 'fixture', MagicMock(), 'https://fixture.invalid')
+        diagnostic = planning_error(caught.exception)
+        self.assertEqual(diagnostic['rpc_reason'], 'leader_schedule_unavailable')
+        self.assertNotIn('epoch 0', json.dumps(diagnostic))
 
 
 class HistoryGuardTests(unittest.TestCase):

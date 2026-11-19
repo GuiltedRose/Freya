@@ -212,3 +212,22 @@ Primary protocol references: [getFirstAvailableBlock](https://solana.com/docs/rp
 [Agave RPC errors](https://github.com/anza-xyz/agave/blob/master/rpc-client-api/src/custom_error.rs).
 The successor-parent requirement is Freya's conservative continuity policy; an
 omission or RPC error is not independently treated as proof of a skipped slot.
+
+## Monolith follow-up
+
+The run on `378fb35` launched the planner and reached `getSlotLeaders`, which
+returned `-32602` for the fresh Genesis window. It validated zero shreds and
+left the checkpoint unadvanced. The request uses two positional integers,
+`[0, 4]`, within Agave's accepted count. Agave also returns this code when
+the requested epoch's schedule is unavailable, independently of finalized block
+availability. The numeric code alone cannot establish which provider condition
+occurred. [Agave RPC implementation](https://docs.rs/crate/solana-rpc/4.4.1/source/src/rpc.rs#11013)
+
+The planner now records `rpc_reason: leader_schedule_unavailable` for the
+specific Agave response. Check that the error and supervisor records share a
+run ID. If that reason is present, require a reviewed source with the Genesis
+leader schedule before another acquisition attempt. If the reason is absent,
+ask the provider whether its endpoint serves `getSlotLeaders([0, 4])`.
+Before enabling acquisition on any replacement source, verify Genesis leader
+coverage, finalized history continuity, and compatible retained shreds.
+Receipt and decoder qualification still apply before ledger ingestion.
