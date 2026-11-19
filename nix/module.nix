@@ -137,7 +137,7 @@ in {
       description = "Finalized Solana Pump indexer (read-only RPC)";
       serviceConfig.LoadCredential = [ "indexer.json:${cfg.indexerConfigFile}" ];
       script = ''
-        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/indexer.json" --rpc-mode ${escapeShellArg cfg.rpcMode}
+        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/indexer.json" --rpc-mode ${escapeShellArg cfg.rpcMode} || exit $?
         exec ${cfg.package}/bin/crypto-bot-indexer \
           --config "$CREDENTIALS_DIRECTORY/indexer.json" \
           --db ${escapeShellArg index} --loop \

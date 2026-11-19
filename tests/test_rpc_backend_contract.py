@@ -53,6 +53,7 @@ class ResultContractTests(unittest.TestCase):
             self.assertEqual(error.rpc_method,'getSlotLeaders')
             diagnostic=planning_error(error)
             self.assertEqual(diagnostic['rpc_code'],code)
+            self.assertEqual(diagnostic['rpc_method'],'getSlotLeaders')
             self.assertNotIn('secret.invalid',json.dumps(diagnostic))
 
 

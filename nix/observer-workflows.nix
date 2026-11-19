@@ -42,7 +42,7 @@ in {
         MemoryAccounting=true;
       };
       script=''
-        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/observer.json"
+        ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/observer.json" || exit $?
         exec ${cfg.package}/bin/crypto-bot-observer --config "$CREDENTIALS_DIRECTORY/observer.json" \
           --db ${lib.escapeShellArg "${state}/observer.sqlite"} --batch-slots 1 --interval 5 \
           ${lib.optionalString (cfg.maxCycles != null) "--max-cycles ${toString cfg.maxCycles}"}

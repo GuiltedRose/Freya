@@ -80,8 +80,10 @@ Point the monolith's crypto-bot flake input at this reviewed source and import i
   existing incompatible paper inventories and quarantined index history. No reset
   or automatic state migration is needed. Existing compatible state may be resumed
   only with exactly matching initial inventory and rules.
-* `startSlot` to the explicit reviewed finalized start slot for a new index. On a
-  resume the saved checkpoint wins. Collect forward for at least a complete hour.
+* Leave `startSlot` unset for a fresh Genesis sync. Resume from the validated
+  saved checkpoint when one exists. A fresh Genesis run needs a reviewed source
+  serving that historical range. See [Genesis sync audit](genesis_sync_audit.md)
+  for the outstanding source and decoder requirements.
 * `paper.enable = true`, `paper.initialBalanceUsd`, `paper.initialNativeSol`, and
   `paper.initialSolPriceUsd` to your chosen virtual inventory/valuation. These are
   explicit simulation inputs, never real wallet funding. No values are inferred.
@@ -130,6 +132,11 @@ the existing operator-authorized session workflow; automatic renewal is absent.
 
 ```bash
 sudo systemctl start crypto-bot-health.service
+```
+
+After the health command succeeds, start the enabled services:
+
+```bash
 # If learning was enabled, initialize its separate database before paper starts:
 sudo systemctl start crypto-bot-unified-paper-learning.service
 sudo systemctl start crypto-bot-unified-paper-learning.timer
@@ -167,14 +174,17 @@ Repair authorization/config/schema problems, inspect health, and restart at the
 saved checkpoint. Do not delete checkpoints or rewrite old conversions.
 
 ```bash
-sudo systemctl stop crypto-bot-live.service crypto-bot-paper.service crypto-bot-indexer.service
 sudo systemctl stop crypto-bot-health.timer crypto-bot-unified-paper-learning.timer
-sudo systemctl stop crypto-bot-unified-paper-learning.service
-sudo systemctl stop solana-budget-network.service
+sudo systemctl stop crypto-bot-live.service crypto-bot-paper.service
+sudo systemctl stop crypto-bot-unified-paper-learning.service crypto-bot-challengers.service
+sudo systemctl stop crypto-bot-health.service crypto-bot-indexer.service solana-budget-network.service
 sudo nixos-rebuild switch --rollback
 ```
 
-Omit nonexistent optional learner units. Keep the repair directory and all old state;
+Omit optional units absent from the host. Stop any alternate observer and its
+learner before rollback if you started them against this state. If an order is
+pending, retain its journal and reconcile the original signature before resuming
+entries. Keep the repair directory and all old state;
 rollback changes software/configuration, not databases. Review the restored units
 before restarting the old workflow. No automatic restore overwrites later trades,
 training evidence, models, or checkpoints.

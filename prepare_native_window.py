@@ -107,7 +107,7 @@ def planning_error(error):
             'error_type':type(error).__name__ if type(error).__name__ in
             ('ValueError','PermissionError','FileNotFoundError','ConnectionError','SourceAccessBlocked',
              'ProviderBackoff','RpcEvidenceError','TimeoutError','RuntimeError') else 'PlannerError'}
-    method=getattr(error,'freya_rpc_method',None)
+    method = getattr(error, 'freya_rpc_method', None) or getattr(error, 'rpc_method', None)
     if method in ('getBlock','getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
         record['rpc_method']=method
     category=getattr(error,'category',None)
@@ -256,8 +256,9 @@ def prepare(config_path, output, start=None, run_id=None):
         raise
     except Exception as error:
         record = planning_error(error)
-        record.update(run_id=run_id, stage=progress.record.get('stage'),
-                      rpc_method=progress.record.get('rpc_method'))
+        record.update(run_id=run_id, stage=progress.record.get('stage'))
+        if 'rpc_method' not in record and progress.record.get('rpc_method') is not None:
+            record['rpc_method'] = progress.record['rpc_method']
         atomic_diagnostic(output.parent / 'planning-error.json', record)
         progress.write('failed', record['category'])
         raise
