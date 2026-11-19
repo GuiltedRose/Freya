@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from onchain_store import EventStore
-from onchain_ingest import IndexRpc, Ingester, follow
+from onchain_ingest import IndexRpc, Ingester, archive_backfill_config, follow
 from onchain_market import OnchainMarket
 from sync_policy import initialize_store
 
@@ -66,6 +66,7 @@ def run(args,config,decoder,parser):
                 result['market_unavailable'] = str(error)
         print(json.dumps(result, allow_nan=False))
         return
+    archive_backfill = archive_backfill_config(config)
     endpoints = []
     for endpoint in config['endpoints']:
         if endpoint.get('enabled') is not True:
@@ -80,15 +81,18 @@ def run(args,config,decoder,parser):
             print(json.dumps({'status':'rpc_effective_settings','at':__import__('time').time(),
                               'settings':effective_settings(rpc,rpc.budget.identity(rpc.url))}),flush=True)
     try:
+        live_source_id = archive_backfill['live_source_id'] if archive_backfill else (
+            endpoints[0].source if endpoints else None)
         if args.capture_sol_usd:
             if not endpoints:
                 parser.error('A reviewed enabled RPC endpoint is required')
             from onchain_oracle import capture_sol, import_sol
-            print(json.dumps(import_sol(store, capture_sol(endpoints[0]))))
+            live_rpc = next(rpc for rpc in endpoints if rpc.source == live_source_id)
+            print(json.dumps(import_sol(store, capture_sol(live_rpc))))
             return
         ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'),
                             decoder=decoder, oracle=config.get('oracle'),
-                            native_handoff=config.get('native_handoff'))
+                            native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill)
         start = bootstrap_start(store,endpoints,args.start_slot)
         candles=None
         markets=config.get('markets',[])
@@ -101,7 +105,8 @@ def run(args,config,decoder,parser):
             if not args.loop or not candles:parser.error('--stream requires --loop and configured markets')
             import asyncio
             from onchain_stream import run_stream
-            endpoint=next(e for e in config['endpoints'] if e.get('enabled') is True)
+            endpoint=next(e for e in config['endpoints']
+                          if e.get('enabled') is True and e['source_id'] == live_source_id)
             if store.policy(endpoint['source_id']).get('stream_verified') is not True:
                 parser.error('Explicit reviewed stream policy required; no stream started')
             asyncio.run(run_stream(ingester,endpoint,start,candles,args.batch_slots,args.interval))

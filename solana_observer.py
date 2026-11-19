@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from websockets.asyncio.client import connect
 from onchain_candles import CandleEngine
-from onchain_ingest import IndexRpc, Ingester
+from onchain_ingest import IndexRpc, Ingester, archive_backfill_config
 from onchain_store import EventStore
 from onchain_stream import run_stream
 from run_local_observer import open_isolated
@@ -25,6 +25,7 @@ def prepare(config, database, resume=False):
     """Validate configuration before opening sockets or changing a database."""
     from runtime_health import validate_config
     decoder=validate_config(config)
+    archive_backfill = archive_backfill_config(config)
     endpoints=[row for row in config.get('endpoints',[]) if row.get('enabled') is True]
     if not endpoints:
         raise ValueError('Explicit reviewed endpoint required; no default network connection')
@@ -43,7 +44,9 @@ def prepare(config, database, resume=False):
                 local_ws=False
             if not local_ws or row.get('source_kind') != 'local_rpc':
                 raise ValueError('Local replay mode forbids external endpoints and fallbacks')
-    endpoint=endpoints[0]
+    stream_endpoints = ([row for row in endpoints if row['source_id'] == archive_backfill['live_source_id']]
+                        if archive_backfill else endpoints)
+    endpoint=stream_endpoints[0]
     for key,default,maximum in [('pending_capacity',4096,100000),('observation_limit',100000,1000000)]:
         value=endpoint.get(key,default)
         if type(value) is not int or not 1<=value<=maximum:
@@ -73,16 +76,16 @@ def prepare(config, database, resume=False):
     for market in markets:candles.watch(market['mint'],market['pool'])
     if config.get('stream_failover',False):
         from data_policy import SourceAccessBlocked
-        if config['stream_failover'] is not True or len(endpoints)>4 or len({row['source_id'] for row in endpoints})!=len(endpoints):
+        if config['stream_failover'] is not True or len(stream_endpoints)>4 or len({row['source_id'] for row in stream_endpoints})!=len(stream_endpoints):
             raise ValueError('Explicit unique bounded stream sources required')
-        for row in endpoints:
+        for row in stream_endpoints:
             validate_ws_endpoint(row)
             if row['policy'].get('stream_verified') is not True or row.get('network_budget')!=endpoint.get('network_budget'):
                 raise SourceAccessBlocked('Stream backups require reviewed rights and the same network budget')
-        endpoint={**endpoint,'stream_sources':[dict(row) for row in endpoints]}
+        endpoint={**endpoint,'stream_sources':[dict(row) for row in stream_endpoints]}
     return Ingester(store,clients,config.get('reviewed_program_versions'),
                     decoder=decoder,oracle=config.get('oracle'),
-                    native_handoff=config.get('native_handoff')),endpoint,candles
+                    native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill),endpoint,candles
 
 
 async def observe(config, database, start_slot=None, resume=False, batch=8, interval=5, max_cycles=None):

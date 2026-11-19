@@ -469,6 +469,36 @@ class IndexerTests(unittest.TestCase):
             self.assertEqual(opener.return_value.open.call_count,2)
         error.close()
 
+    def test_archive_backfill_uses_live_loader_and_checks_handoff_continuity(self):
+        archive, live = FakeRpc(), FakeRpc()
+        live.source = 'live-fixture'
+        self.store.register_source(live.source, POLICY)
+        route = {'archive_source_id': archive.source, 'live_source_id': live.source, 'through_slot': 1}
+        ingester = Ingester(self.store, [live, archive], archive_backfill=route)
+        with patch.object(ingester, 'deployments', return_value={}) as deployments:
+            ingester.step(0, 2)
+            self.assertEqual(self.store.next_slot(), 2)
+            deployments.assert_called_once_with(live)
+            original = live.call
+
+            def conflicting_block(method, params):
+                result = original(method, params)
+                if method == 'getBlock':
+                    result['previousBlockhash'] = 'wrong parent hash'
+                return result
+
+            live.call = conflicting_block
+            with self.assertRaisesRegex(ValueError, 'continuity mismatch'):
+                ingester.step(count=2)
+            self.assertEqual(self.store.next_slot(), 2)
+            live.call = original
+            ingester.step(count=2)
+
+        self.assertEqual(self.store.next_slot(), 3)
+        with self.store.connect() as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT slot,source FROM blocks ORDER BY slot')],
+                             [(1, archive.source), (2, live.source)])
+
     def test_partial_network_batch_preserves_durable_prefix(self):
         rpc = FakeRpc()
         original = rpc.call

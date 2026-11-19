@@ -231,3 +231,86 @@ ask the provider whether its endpoint serves `getSlotLeaders([0, 4])`.
 Before enabling acquisition on any replacement source, verify Genesis leader
 coverage, finalized history continuity, and compatible retained shreds.
 Receipt and decoder qualification still apply before ledger ingestion.
+
+Monolith reproduced the failure on `978ce43` with matching supervisor and
+planner run IDs and the explicit `leader_schedule_unavailable` reason.
+
+Yellowstone Old Faithful is a candidate for independently checking finalized
+block history. Its published epoch-zero recap covers slots 0 through 431999 and
+identifies the CAR by CID and SHA-256. Its documented RPC interface supports
+historical blocks and slot lists. Native acquisition also requires a source of
+Genesis leader identities and original signed shreds. Those are outside the
+documented Old Faithful RPC interface. Keep the current diagnostic disabled
+until the needed evidence is available.
+[Epoch-zero recap](https://files.old-faithful.net/0/0.recap.yaml)
+[Old Faithful RPC methods](https://github.com/rpcpool/yellowstone-faithful#usage)
+
+### Finalized RPC backfill source review
+
+The published epoch-zero CID matches the recap. The publisher's validation
+report records a successful PoH check and a terminal block at slot 431999.
+The published slot list begins with consecutive slots 0 through 11, including
+the entire first Freya window. This review retrieved only archive metadata, a
+bounded prefix of the slot list and the validation log.
+[Published PoH report](https://files.old-faithful.net/0/poh-check-0.log)
+[Published slot list](https://files.old-faithful.net/0/0.slots.txt)
+
+Freya's finalized indexer can backfill without historical leader schedules.
+It still requires finalized loader accounts to verify active decoder ranges.
+The standalone Old Faithful RPC does not advertise `getAccountInfo`, and its
+archive lags the live chain. A production configuration needs an explicitly
+reviewed source for loader accounts and a fresh finalized feed, with provider
+accounting and provenance preserved across the archive-to-live transition.
+Validate the boundary's parent slot and blockhash using the existing continuity
+checks before the live feed takes over. An archive manifest or PoH report does
+not qualify missing execution receipts; Old Faithful documents missing
+transaction metadata in some early epochs.
+[Old Faithful archive](https://docs.old-faithful.net/)
+[Early-epoch metadata limits](https://docs.old-faithful.net/usage/validation/sharp-edges)
+
+### Running the finalized backfill
+
+Use a separate index and a private runtime configuration with exactly two
+enabled, individually reviewed RPC endpoints. Add the following to the indexer
+configuration, using the actual configured source IDs. The example boundary is
+the last produced slot in the published epoch-zero archive. Use it only if the
+live endpoint can serve the successor and the remaining finalized history.
+
+```json
+{
+  "archive_backfill": {
+    "archive_source_id": "old-faithful-reviewed",
+    "live_source_id": "mainnet-reviewed",
+    "through_slot": 431999
+  }
+}
+```
+
+The archive serves the finalized manifest and blocks through the configured
+boundary. The live endpoint supplies the finalized head and loader accounts
+throughout, and the configured oracle must also use it. Once the archive
+boundary is committed, the indexer reads subsequent blocks from the live
+endpoint. The first produced live block must pass the existing parent-slot and
+blockhash checks against the archived prefix. Choose a produced block for the
+boundary so the archive can anchor it. Missing history blocks progress rather
+than falling back across the boundary. Retained full blocks record which
+source supplied the loader-account evidence.
+
+Before activation, check both endpoints' source rights, approved network
+budgets, deployment pins and actual archive-to-live coverage. Use a new
+private state directory for this index. The NixOS indexer service reads the
+configuration via its existing systemd credential path.
+
+```bash
+nix develop --offline --no-write-lock-file .#native-rpc --command \
+  python -m unittest discover -s tests -p test_onchain_indexer.py
+nix build .#native-rpc-app --no-write-lock-file
+./result/bin/freya-health --config /etc/crypto-bot/pipeline.json
+```
+
+Use the [pipeline recovery runbook](pipeline_recovery.md) for activation and
+rollback. Watch the indexer journal for `block_source_id`, `state_source_id`,
+`archive_through_slot`, the saved cursor and coverage. Paper startup still
+requires fresh complete market data. To roll back, stop the new indexer and
+restore the previous service configuration while retaining both index
+directories and the provider ledger.

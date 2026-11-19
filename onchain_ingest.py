@@ -217,8 +217,28 @@ def read_program_deployments(rpc,programs):
     return result
 
 
+def archive_backfill_config(config):
+    if 'archive_backfill' not in config:
+        return None
+    route = config['archive_backfill']
+    if not isinstance(route, dict) or set(route) != {'archive_source_id', 'live_source_id', 'through_slot'}:
+        raise ValueError('Archive backfill requires archive and live source IDs and a final archive slot')
+    archive, live, through = (route[key] for key in ('archive_source_id', 'live_source_id', 'through_slot'))
+    enabled = [row.get('source_id') for row in config.get('endpoints', []) if row.get('enabled') is True]
+    if (not isinstance(archive, str) or not isinstance(live, str) or archive == live
+            or len(enabled) != 2 or archive not in enabled or live not in enabled
+            or type(through) is not int or not GENESIS_SLOT < through < 2**63 - 1):
+        raise ValueError('Archive backfill requires two distinct reviewed enabled sources and a valid through_slot')
+    if config.get('native_handoff') is not None:
+        raise ValueError('Archive backfill requires a separate index from native shred reconciliation')
+    if config.get('oracle') and config['oracle'].get('source_id') != live:
+        raise ValueError('Archive backfill requires the live source for oracle account reads')
+    return route
+
+
 class Ingester:
-    def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None, native_handoff=None):
+    def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None, native_handoff=None,
+                 archive_backfill=None):
         if not endpoints:
             raise ValueError('At least one explicitly authorized RPC required')
         self.store, self.endpoints = store, endpoints
@@ -226,6 +246,12 @@ class Ingester:
         self.versions = versions or {}
         self.oracle = oracle
         self.native_handoff = native_handoff
+        self.archive_backfill = archive_backfill
+        self.archive_rpc = self.live_rpc = None
+        if archive_backfill is not None:
+            clients = {rpc.source: rpc for rpc in endpoints}
+            self.archive_rpc = clients[archive_backfill['archive_source_id']]
+            self.live_rpc = clients[archive_backfill['live_source_id']]
         self.oracle_last_attempt = 0
         self.resume_checked = False
         for rpc in endpoints:
@@ -263,12 +289,22 @@ class Ingester:
         if type(initial) is not int or initial < 0:
             raise ValueError('Explicit initial finalized start slot required')
         started = time.monotonic()
+        endpoints = self.endpoints
+        state_endpoints = self.endpoints
+        archive_through = None
+        if self.archive_backfill is not None:
+            state_endpoints = [self.live_rpc]
+            if initial <= self.archive_backfill['through_slot']:
+                endpoints = [self.archive_rpc]
+                archive_through = self.archive_backfill['through_slot']
+            else:
+                endpoints = state_endpoints
         if self.oracle and started-self.oracle_last_attempt >= self.oracle['interval_seconds']:
             from onchain_oracle import refresh
             self.oracle_last_attempt = started
-            refresh(self.store, self.endpoints, self.oracle)
+            refresh(self.store, state_endpoints, self.oracle)
         # Failover resumes the durable prefix, never restarts it or evades throttles.
-        for index, rpc in enumerate(self.endpoints):
+        for index, rpc in enumerate(endpoints):
             start = self.store.next_slot()
             start = initial if start is None else start
             finalized=sampled_at=None
@@ -276,12 +312,16 @@ class Ingester:
             scan=start
             try:
                 rpc.validate()
-                finalized = rpc.call('getSlot', [{'commitment': 'finalized'}])
+                state_rpc = self.live_rpc if archive_through is not None else rpc
+                if state_rpc is not rpc:
+                    state_rpc.validate()
+                finalized = state_rpc.call('getSlot', [{'commitment': 'finalized'}])
                 if type(finalized) is not int or finalized<0:
                     raise RpcEvidenceError('Invalid finalized head')
                 sampled_at = time.time()
                 scan = self.store.history_request(rpc.source, start)
-                end = min(scan + count - 1, finalized)
+                limit = min(finalized, archive_through) if archive_through is not None else finalized
+                end = min(scan + count - 1, limit)
                 if end < scan:
                     status = 'caught_up' if start>finalized else 'unresolved_history'
                     return self.record_progress(finalized, sampled_at, initial, started, status)
@@ -296,15 +336,15 @@ class Ingester:
                 if not history_available(start,first):
                     # The earliest available block can follow genuinely skipped
                     # slots. Its parent must prove that no required block was lost.
-                    if first>finalized:raise RpcHistoryUnavailable(rpc.source)
+                    if first>limit:raise RpcHistoryUnavailable(rpc.source)
                     floor_block=rpc.call('getBlock',[first,options])
                     if (not isinstance(floor_block,dict) or type(floor_block.get('parentSlot')) is not int
                             or not GENESIS_SLOT<=floor_block['parentSlot']<max(start,GENESIS_SLOT+1)):
                         raise RpcHistoryUnavailable(rpc.source)
                     scan=max(scan,first)
-                    end=min(scan+count-1,finalized)
+                    end=min(scan+count-1,limit)
                     self.store.history_request(rpc.source,start,scan,end)
-                deployments = self.deployments(rpc)
+                deployments = self.deployments(state_rpc)
                 slots = rpc.call('getBlocks', [max(scan,GENESIS_SLOT+1), end, {'commitment': 'finalized'}]) if end>GENESIS_SLOT else []
                 if not isinstance(slots, list) or slots != sorted(set(slots)) or any(
                         type(slot) is not int or not max(scan,GENESIS_SLOT+1) <= slot <= end for slot in slots):
@@ -345,6 +385,8 @@ class Ingester:
                         if block.get('blockTime') is None:
                             events=[]  # No fabricated time-based market/training observations.
                         block['_indexer_deployments'] = deployments
+                        if state_rpc is not rpc:
+                            block['_indexer_deployment_source'] = state_rpc.source
                         decoded = (slot, block, events, sorted(set(issues)), relevant)
                         # Commit each durable prefix independently, retaining at most two
                         # blocks from one bounded HTTP response. No checkpoint jumps.
@@ -372,9 +414,9 @@ class Ingester:
                 if not isinstance(error,ConnectionError):raise
                 print(json.dumps({'status':'rpc_source_unavailable','source_id':rpc.source,
                                   'category':getattr(error,'category','transport_unavailable'),
-                                  'next_source_id':self.endpoints[index+1].source if index+1<len(self.endpoints) else None,
+                                  'next_source_id':endpoints[index+1].source if index+1<len(endpoints) else None,
                                   'checkpoint':self.store.next_slot()}),flush=True)
-                if index + 1 == len(self.endpoints):
+                if index + 1 == len(endpoints):
                     raise
         raise ValueError('No authorized endpoint available')
 
@@ -405,6 +447,13 @@ class Ingester:
                         rpc_wire_bytes=sum(getattr(r,'wire_bytes',0) for r in self.endpoints),
                         rpc_decoded_bytes=sum(getattr(r,'decoded_bytes',0) for r in self.endpoints),
                         rpc_counter_scope='current process')
+        if self.archive_backfill is not None:
+            backfilling = initial <= self.archive_backfill['through_slot']
+            progress.update(
+                block_source_id=self.archive_rpc.source if backfilling else self.live_rpc.source,
+                state_source_id=self.live_rpc.source,
+                archive_through_slot=self.archive_backfill['through_slot'],
+            )
         self.store.save_progress(progress)
         return {'at':time.time(),'status': status, 'progress': progress, **self.store.metrics()}
 

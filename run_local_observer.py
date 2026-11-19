@@ -8,7 +8,7 @@ import ipaddress
 import json
 from pathlib import Path
 from urllib.parse import urlparse
-from onchain_ingest import IndexRpc, Ingester, follow
+from onchain_ingest import IndexRpc, Ingester, archive_backfill_config, follow
 from onchain_store import EventStore
 from onchain_candles import CandleEngine
 from sync_policy import initialize_store
@@ -64,7 +64,7 @@ def main():
     for market in markets:
         engine.watch(market['mint'], market['pool'])
     ingester = Ingester(store, [make_rpc(e) for e in endpoints], config.get('reviewed_program_versions'),
-                        decoder=decoder,oracle=config.get('oracle'))
+                        decoder=decoder,oracle=config.get('oracle'),archive_backfill=archive_backfill_config(config))
     try:
         start = initialize_store(store, args.start_slot)
         results = follow(ingester, start, args.batch_slots) if args.loop else [ingester.step(start, args.batch_slots)]

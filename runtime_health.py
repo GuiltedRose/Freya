@@ -25,6 +25,8 @@ def validate_rpc_mode(config,mode):
 def validate_config(config):
     from onchain_decode import Decoder
     from onchain_oracle import feed_account
+    from onchain_ingest import archive_backfill_config
+    archive_backfill_config(config)
     endpoints = [e for e in config.get('endpoints',[]) if e.get('enabled') is True]
     if not endpoints:
         raise ValueError('Enable an explicitly reviewed RPC source')
@@ -134,6 +136,12 @@ def health(database, mints=(), now=None):
             markets[mint] = {'error':safe_reason(error)}
             blockers.append('Market unavailable: '+mint)
     progress=dict(store.progress() or {})
+    if 'archive_through_slot' in progress:
+        with store.connect() as db:
+            block = db.execute('SELECT slot,source FROM blocks ORDER BY slot DESC LIMIT 1').fetchone()
+        if (block is None or block['slot'] <= progress['archive_through_slot']
+                or block['source'] != progress['state_source_id']):
+            blockers.append('Finalized archive-to-live handoff has not committed a live block')
     sampled=progress.get('head_sampled_at')
     age=now-sampled if type(sampled) in (int,float) else None
     progress.update(head_sample_age_seconds=age,lag_is_current=age is not None and 0<=age<=30,
