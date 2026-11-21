@@ -314,3 +314,34 @@ rollback. Watch the indexer journal for `block_source_id`, `state_source_id`,
 requires fresh complete market data. To roll back, stop the new indexer and
 restore the previous service configuration while retaining both index
 directories and the provider ledger.
+
+### Local Genesis smoke test
+
+On `zelda`, the loopback Old Faithful service returned the mainnet Genesis
+hash and finalized slots 1–3. Both adjacent parent hashes matched and slot 1
+reported parent slot 0. All three blocks omitted `blockTime`. The archive
+indexer treats an omitted timestamp as unknown and keeps the block in the
+quarantine path for time-based use.
+
+The reviewed live RPC reported finalized ProgramData deployment slots
+469811025 for Pump and 469811067 for PumpSwap. Neither matches the saved
+configuration. Both bundled schema hashes also differ from the saved pins.
+No pins or production checkpoints were changed.
+
+A separate laptop smoke test used the real archive and live loader-account
+reads with no approved deployment ranges in the disposable index. It committed
+slot 1 from Genesis, reopened at checkpoint 2, then committed slot 2 and
+advanced to checkpoint 3. Both blocks retained their parent links and
+quarantine issues for missing timestamps, transaction metadata and unreviewed
+versions. The test wrote zero market events. This verifies archival persistence
+and resume on the laptop. Production decoder qualification and the live handoff
+remain separate acceptance gates.
+
+The laptop's reviewed live RPC reported a history floor of 0. Its finalized
+block 432000 referenced the parent slot and blockhash of Old Faithful's block
+431999. This verifies the boundary pair without replaying the intervening epoch.
+
+On November 21, Rust/Python comparison accepted one finalized swap per venue
+with no decoder issues, at slots 472040458 (Pump) and 472040504 (PumpSwap).
+These samples establish compatibility for those receipts. Deployment-wide
+schema ranges and sustained paper readiness remain unqualified.

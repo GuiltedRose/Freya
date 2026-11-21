@@ -365,6 +365,9 @@ class Ingester:
                     for slot,block in zip(selected,blocks):
                         if not block or not isinstance(block.get('transactions'), list):
                             raise ValueError('Missing finalized block; durable prefix preserved')
+                        if archive_through is not None and 'blockTime' not in block:
+                            # Old Faithful omits the field when its archive has no timestamp.
+                            block = {**block, 'blockTime': None}
                         if self.native_handoff is not None:
                             from native_handoff import reconcile
                             block['_native_reconciliation'] = reconcile(self.native_handoff, slot, block)

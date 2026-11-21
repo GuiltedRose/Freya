@@ -473,6 +473,15 @@ class IndexerTests(unittest.TestCase):
         archive, live = FakeRpc(), FakeRpc()
         live.source = 'live-fixture'
         self.store.register_source(live.source, POLICY)
+        archive_call = archive.call
+
+        def block_without_timestamp(method, params):
+            result = archive_call(method, params)
+            if method == 'getBlock':
+                del result['blockTime']
+            return result
+
+        archive.call = block_without_timestamp
         route = {'archive_source_id': archive.source, 'live_source_id': live.source, 'through_slot': 1}
         ingester = Ingester(self.store, [live, archive], archive_backfill=route)
         with patch.object(ingester, 'deployments', return_value={}) as deployments:
@@ -496,8 +505,10 @@ class IndexerTests(unittest.TestCase):
 
         self.assertEqual(self.store.next_slot(), 3)
         with self.store.connect() as db:
-            self.assertEqual([tuple(row) for row in db.execute('SELECT slot,source FROM blocks ORDER BY slot')],
-                             [(1, archive.source), (2, live.source)])
+            self.assertEqual([tuple(row) for row in db.execute('SELECT slot,source,time FROM blocks ORDER BY slot')],
+                             [(1, archive.source, None), (2, live.source, 120)])
+            self.assertIn('Historical block time unavailable', db.execute(
+                'SELECT issues FROM blocks WHERE slot=1').fetchone()[0])
 
     def test_partial_network_batch_preserves_durable_prefix(self):
         rpc = FakeRpc()
