@@ -2,7 +2,26 @@
 let
   cfg = config.services.crypto-bot-paper;
   inherit (lib) mkOption mkEnableOption types mkIf escapeShellArg;
+  archive = cfg.archive;
+  archiveUnit = "crypto-bot-old-faithful.service";
+  oldFaithful = pkgs.stdenvNoCC.mkDerivation {
+    pname = "faithful-cli";
+    version = "0.7.31";
+    src = pkgs.fetchurl {
+      url = "https://github.com/rpcpool/yellowstone-faithful/releases/download/v0.7.31/faithful-cli_linux_amd64";
+      hash = "sha256-PH8N2+6/tKHtxebLwAlEtFdYOWHeARS1CRr6M+iAizM=";
+    };
+    dontUnpack = true;
+    dontStrip = true;
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    installPhase = ''
+      install -Dm755 "$src" "$out/libexec/faithful-cli"
+      makeWrapper ${pkgs.glibc}/lib/ld-linux-x86-64.so.2 "$out/bin/faithful-cli" \
+        --add-flags "--library-path ${pkgs.glibc}/lib $out/libexec/faithful-cli"
+    '';
+  };
   state = cfg.stateDirectory;
+  providerLedger = if cfg.providerLedger == null then "${state}/provider_limits.sqlite" else cfg.providerLedger;
   index = "${state}/index/index.sqlite";
   common = {
     wantedBy = [];
@@ -11,7 +30,7 @@ let
     environment = {
       PYTHONUNBUFFERED = "1";
       PYTHONDONTWRITEBYTECODE = "1";
-      CRYPTO_BOT_PROVIDER_LIMITS = "${state}/provider_limits.sqlite";
+      CRYPTO_BOT_PROVIDER_LIMITS = providerLedger;
     };
     serviceConfig = {
       User = "crypto-bot-paper";
@@ -26,7 +45,7 @@ let
       PrivateTmp = true;
       RestrictSUIDSGID = true;
       CapabilityBoundingSet = "";
-      ReadWritePaths = [ state ];
+      ReadWritePaths = [ state ] ++ lib.optional (cfg.providerLedger != null) (builtins.dirOf providerLedger);
       TimeoutStopSec = 45;
     };
     # Bound systemd restart loops as well as the application's reconnect attempts.
@@ -40,10 +59,20 @@ in {
     package = mkOption { type = types.package; default = package; };
     rpcMode = mkOption { type = types.enum [ "remote" "selfhosted" "hybrid" ]; default = "remote";
       description = "Requires matching reviewed endpoint configuration; never grants source permissions."; };
+    archive = {
+      enable = mkEnableOption "Old Faithful RPC inside the bounded indexer network namespace";
+      package = mkOption { type = types.nullOr types.package;
+        default = if pkgs.stdenv.hostPlatform.system == "x86_64-linux" then oldFaithful else null;
+        description = "Reviewed package providing bin/faithful-cli."; };
+      configFile = mkOption { type = types.nullOr types.str; default = null;
+        description = "Absolute runtime Old Faithful epoch configuration path."; };
+    };
     stateDirectory = mkOption {
       type = types.str; default = "/var/lib/crypto-bot-paper";
       description = "External persistent state; never put this under /nix/store.";
     };
+    providerLedger = mkOption { type = types.nullOr types.str; default = null;
+      description = "Existing shared provider ledger path for this deployment."; };
     indexerConfigFile = mkOption {
       type = types.str;
       description = "Runtime-only absolute config path; loaded as a systemd credential. Never use a Nix path literal or builtins.readFile for secrets.";
@@ -94,8 +123,9 @@ in {
     assertions = [
       { assertion = !(cfg.paper.enable || cfg.live.enable && !cfg.live.manageOnly) || cfg.learning.enable;
         message = "Paper/live consumers require the reviewed shared learning configuration; indexer-only operation can leave learning disabled."; }
-      { assertion = cfg.rpcMode == "remote" || lib.attrByPath [ "services" "crypto-bot-node" "enable" ] false config;
-        message = "Selfhosted/hybrid modes require importing and enabling the reviewed selfhost-rpc module."; }
+      { assertion = cfg.rpcMode == "remote" || (cfg.rpcMode == "hybrid" && archive.enable)
+          || lib.attrByPath [ "services" "crypto-bot-node" "enable" ] false config;
+        message = "Selfhosted/hybrid modes require the reviewed selfhost RPC or the hybrid archive service."; }
       { assertion = !cfg.challengers.enable || (cfg.challengers.configFile != null && lib.hasPrefix "/" cfg.challengers.configFile);
         message = "Challengers require explicit absolute runtime configuration."; }
       { assertion = cfg.paper.championFamilies == [] || (cfg.challengers.enable && cfg.paper.managementConfigFile == null);
@@ -106,6 +136,12 @@ in {
         message = "Indexer credentials/config must be a runtime path outside the Nix store."; }
       { assertion = cfg.maxCatchupSlots >= cfg.batchSlots;
         message = "maxCatchupSlots must be at least batchSlots."; }
+      { assertion = !archive.enable || (cfg.rpcMode == "hybrid" && archive.package != null
+          && archive.configFile != null && lib.hasPrefix "/" archive.configFile && cfg.providerLedger != null);
+        message = "Old Faithful requires hybrid RPC mode, a reviewed package, an absolute epoch configuration path and the existing provider ledger."; }
+      { assertion = cfg.providerLedger == null || (lib.hasPrefix "/" providerLedger
+          && !(lib.hasPrefix "/nix/store/" providerLedger) && builtins.dirOf providerLedger != "/");
+        message = "The shared provider ledger must use an external absolute directory."; }
       { assertion = !cfg.paper.enable || (cfg.paper.initialNativeSol != null && cfg.paper.initialNativeSol >= 0
           && cfg.paper.initialSolPriceUsd != null && cfg.paper.initialSolPriceUsd > 0);
         message = "Paper requires explicit virtual SOL inventory and initial SOL/USD valuation; existing balances are never changed."; }
@@ -117,7 +153,8 @@ in {
     ];
     services.solana-budget-isolation = mkIf (cfg.rpcMode != "remote") {
       enable = true;
-      services = [ "crypto-bot-indexer" ] ++ lib.optional cfg.paper.enable "crypto-bot-paper" ++ lib.optional cfg.live.enable "crypto-bot-live";
+      services = [ "crypto-bot-indexer" ] ++ lib.optional archive.enable "crypto-bot-old-faithful"
+        ++ lib.optional cfg.paper.enable "crypto-bot-paper" ++ lib.optional cfg.live.enable "crypto-bot-live";
     };
     users.groups.crypto-bot-paper = {};
     users.users.crypto-bot-paper = {
@@ -133,11 +170,40 @@ in {
       "d ${state}/live 0700 crypto-bot-paper crypto-bot-paper -"
       "d ${state}/state 0700 crypto-bot-paper crypto-bot-paper -"
     ];
+    systemd.services.crypto-bot-old-faithful = mkIf (archive.enable && archive.package != null && archive.configFile != null) {
+      description = "Read-only Old Faithful archive RPC";
+      serviceConfig = {
+        Type = "exec";
+        User = "crypto-bot-paper";
+        Group = "crypto-bot-paper";
+        WorkingDirectory = state;
+        LoadCredential = [ "epoch.json:${archive.configFile}" ];
+        UMask = "0077";
+        Restart = "no";
+        PrivateTmp = true;
+        MemoryMax = "1G";
+        TasksMax = 64;
+        TimeoutStartSec = 25;
+        ExecStartPost = "${pkgs.curl}/bin/curl --fail --silent --show-error --retry 8 --retry-connrefused --retry-delay 1 --max-time 2 --output /dev/null http://127.0.0.1:18889/metrics";
+      };
+      script = ''
+        exec ${archive.package}/bin/faithful-cli rpc --listen 127.0.0.1:18889 \
+          --epoch-load-concurrency 1 --max-cache 64 "$CREDENTIALS_DIRECTORY/epoch.json"
+      '';
+    };
     systemd.services.crypto-bot-indexer = lib.recursiveUpdate common {
       description = "Finalized Solana Pump indexer (read-only RPC)";
+      after = common.after ++ lib.optional archive.enable archiveUnit;
+      requires = lib.optional archive.enable archiveUnit;
       serviceConfig.LoadCredential = [ "indexer.json:${cfg.indexerConfigFile}" ];
       script = ''
         ${cfg.package}/bin/crypto-bot-health --config "$CREDENTIALS_DIRECTORY/indexer.json" --rpc-mode ${escapeShellArg cfg.rpcMode} || exit $?
+        ${lib.optionalString (cfg.providerLedger != null) ''
+          if ! test -f ${escapeShellArg providerLedger} || ! test -w ${escapeShellArg providerLedger}; then
+            echo "Existing shared provider ledger is unavailable" >&2
+            exit 1
+          fi
+        ''}
         exec ${cfg.package}/bin/crypto-bot-indexer \
           --config "$CREDENTIALS_DIRECTORY/indexer.json" \
           --db ${escapeShellArg index} --loop \

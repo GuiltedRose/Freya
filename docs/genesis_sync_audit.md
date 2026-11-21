@@ -345,3 +345,53 @@ On November 21, Rust/Python comparison accepted one finalized swap per venue
 with no decoder issues, at slots 472040458 (Pump) and 472040504 (PumpSwap).
 These samples establish compatibility for those receipts. Deployment-wide
 schema ranges and sustained paper readiness remain unqualified.
+
+### NixOS archive service
+
+Import Freya's default NixOS module and add these settings alongside the
+reviewed indexer runtime configuration:
+
+```nix
+services.crypto-bot-paper = {
+  enable = true;
+  rpcMode = "hybrid";
+  stateDirectory = "/var/lib/freya-archive-backfill";
+  providerLedger = "/var/lib/freya-provider/provider_limits.sqlite";
+  indexerConfigFile = "/etc/crypto-bot/pipeline.json";
+  archive = {
+    enable = true;
+    configFile = "/etc/crypto-bot/old-faithful-epoch.json";
+  };
+};
+```
+
+Set the archive RPC endpoint to `http://127.0.0.1:18889`, with
+`network_mode: isolated` and `allow_loopback_http: true`. Keep the reviewed
+live endpoint and its provider accounting. Stage the archive data and indexes
+in a service-readable location outside home directories. The published epoch-zero
+CAR alone is 4,286,945,461 bytes. The existing 1 MB session cannot stage it,
+and fetching the epoch-zero slot list on every start would also exceed that
+allowance. Use staged local files in the Old Faithful epoch configuration.
+Set `providerLedger` to the retained shared database. If the original ledger
+is under a home directory, stop its writers before relocating it and any
+SQLite sidecars to a private service-readable directory. Update every
+consumer to the same location before restarting. The indexer requires an
+existing writable ledger at the configured path.
+[Archive configuration format](https://docs.old-faithful.net/running-old-faithful/installation-and-setup/configuration-files/local-file-system)
+
+The archive and indexer share the existing network namespace and lease. The
+archive is bound to namespace loopback. Start the indexer only after checking
+the committed state and reviewed source policies. It starts the archive and
+waits for its listener before ingestion.
+
+```bash
+sudo systemctl start crypto-bot-indexer.service
+sudo journalctl -u crypto-bot-old-faithful -u crypto-bot-indexer -n 60 --no-pager
+sudo systemctl start crypto-bot-health.service
+```
+
+Enable and start paper after the health command succeeds and the operator's
+reviewed learning configuration and virtual inventory are in place. Stop
+`crypto-bot-indexer.service` and `crypto-bot-old-faithful.service` before
+rolling back the host configuration. Preserve the archive files, provider
+ledger and all index state. See [pipeline recovery](pipeline_recovery.md).
