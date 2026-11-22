@@ -107,6 +107,8 @@
                 --add-flags "$out/share/freya/rpc_run_evidence.py"
               makeWrapper ${python}/bin/python $out/bin/freya-health \
                 --add-flags "$out/share/freya/runtime_health.py"
+              makeWrapper ${python}/bin/python $out/bin/freya-qualify-pipeline \
+                --add-flags "$out/share/freya/qualify_pipeline.py"
               makeWrapper ${python}/bin/python $out/bin/freya-challengers \
                 --add-flags "$out/share/freya/run_challengers.py"
 

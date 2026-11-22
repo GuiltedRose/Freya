@@ -175,6 +175,48 @@ training/qualification status. No test result demonstrates profitability.
 
 ## Recovery and rollback
 
+### Decoder upgrade and feed checks
+
+Run qualification from the deployed checkout against the retained provider
+ledger. The command reads finalized loader accounts and verifies an accepted
+swap per venue using both decoders. It rereads the deployments before issuing
+a candidate. A supplied public transaction signature can be used when the
+bounded recent sample has no accepted swap.
+
+```bash
+export CRYPTO_BOT_PROVIDER_LIMITS=/path/to/existing/provider_limits.sqlite
+umask 077
+freya-qualify-pipeline deployments --config "$INDEXER_CONFIG" > deployment-candidate.json
+freya-qualify-pipeline feed --config "$INDEXER_CONFIG" --rounds 12 --batch-slots 32 --interval 5
+```
+
+For a specific receipt add `--receipt pump=SIGNATURE` or
+`--receipt pump_amm=SIGNATURE`. Review the resulting receipts, schema
+digests, finalized deployment slots and proposed forward-only boundary.
+Create a separate staged config after approval:
+
+```bash
+freya-qualify-pipeline stage --config "$INDEXER_CONFIG" \
+  --candidate deployment-candidate.json --review "$REVIEW_REFERENCE" \
+  --output-config /etc/crypto-bot/pipeline.reviewed.json
+```
+
+The command refuses to replace an existing file or stage a candidate generated
+from a different config. Preserve the old configuration and point the
+indexer credential at the staged config after validation. Use a new recent
+index if the saved cursor precedes the newly reviewed range and the prior
+range has no compatible schema evidence. Existing indexes and provider
+accounting are retained. A later loader deployment mismatch keeps affected
+events quarantined. For an already authorized live instance that needs exit
+or pending-order management during recovery, use the existing manage-only
+workflow.
+
+The feed command uses a disposable index and the same paced transport.
+It requires the cursor to keep pace with the finalized head over the sample.
+Run the ordinary index health check against the deployed index before enabling
+paper. Feed sampling alone cannot establish a complete fresh hour, valid
+oracle data or paper readiness.
+
 Oracle outage, old prices, incomplete coverage and unknown layouts fail closed.
 Held positions remain recorded; do not manufacture exits at stale prices.
 Repair authorization/config/schema problems, inspect health, and restart at the
