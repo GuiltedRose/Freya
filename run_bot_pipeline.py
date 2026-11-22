@@ -78,6 +78,8 @@ def main():
     parser.add_argument('--indexer-config','--config',type=Path)
     parser.add_argument('--learning-config',type=Path)
     parser.add_argument('--onchain-db',type=Path)
+    parser.add_argument('--sync-from', choices=('recent', 'genesis'),
+                        help='Fresh bot index boundary; defaults to recent unless historical backfill is configured')
     parser.add_argument('--unified-db',type=Path)
     parser.add_argument('--state-dir',type=Path)
     parser.add_argument('--paper-state-dir',type=Path)
@@ -249,7 +251,10 @@ def supervise(args,extra,indexer,learning):
         if indexer_attached and not args.external_indexer:
             raise ValueError('Indexer already owned by another runner; use --external-workers with an independently running data service')
         if not args.external_indexer:
-            spawn('indexer','run_onchain_indexer.py',['--config',index_config,'--db',args.onchain_db,'--loop'])
+            historical = 'archive_backfill' in indexer or indexer.get('native_handoff') is not None
+            sync_from = getattr(args, 'sync_from', None) or ('genesis' if historical else 'recent')
+            spawn('indexer','run_onchain_indexer.py',
+                  ['--config',index_config,'--db',args.onchain_db,'--loop','--sync-from',sync_from])
         else:status({'status':'existing_indexer_selected','ownership':'external_not_stopped_by_this_runner'})
         if args.mode=='indexer':
             monitor(args,children,None,status,lambda:stopping)

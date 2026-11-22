@@ -78,7 +78,11 @@ in {
       description = "Runtime-only absolute config path; loaded as a systemd credential. Never use a Nix path literal or builtins.readFile for secrets.";
     };
     startSlot = mkOption { type = types.nullOr types.ints.unsigned; default = null;
-      description = "Explicit fresh historical boundary override; null uses the shared Genesis policy. Existing checkpoints always resume.";
+      description = "Explicit fresh boundary override. Existing checkpoints always resume.";
+    };
+    syncFrom = mkOption { type = types.enum [ "recent" "genesis" ];
+      default = if archive.enable then "genesis" else "recent";
+      description = "Automatic fresh index boundary when startSlot is unset.";
     };
     batchSlots = mkOption { type = types.ints.between 1 64; default = 8; };
     maxCatchupSlots = mkOption { type = types.ints.between 1 64; default = 64; };
@@ -137,8 +141,9 @@ in {
       { assertion = cfg.maxCatchupSlots >= cfg.batchSlots;
         message = "maxCatchupSlots must be at least batchSlots."; }
       { assertion = !archive.enable || (cfg.rpcMode == "hybrid" && archive.package != null
-          && archive.configFile != null && lib.hasPrefix "/" archive.configFile && cfg.providerLedger != null);
-        message = "Old Faithful requires hybrid RPC mode, a reviewed package, an absolute epoch configuration path and the existing provider ledger."; }
+          && archive.configFile != null && lib.hasPrefix "/" archive.configFile && cfg.providerLedger != null
+          && (cfg.startSlot != null || cfg.syncFrom == "genesis"));
+        message = "Old Faithful requires a historical boundary, hybrid RPC mode, a reviewed package, an absolute epoch configuration path and the existing provider ledger."; }
       { assertion = cfg.providerLedger == null || (lib.hasPrefix "/" providerLedger
           && !(lib.hasPrefix "/nix/store/" providerLedger) && builtins.dirOf providerLedger != "/");
         message = "The shared provider ledger must use an external absolute directory."; }
@@ -208,7 +213,7 @@ in {
           --config "$CREDENTIALS_DIRECTORY/indexer.json" \
           --db ${escapeShellArg index} --loop \
           --batch-slots ${toString cfg.batchSlots} --max-catchup-slots ${toString cfg.maxCatchupSlots} \
-          ${lib.optionalString (cfg.startSlot != null) "--start-slot ${toString cfg.startSlot}"}
+          ${if cfg.startSlot != null then "--start-slot ${toString cfg.startSlot}" else "--sync-from ${cfg.syncFrom}"}
       '';
     };
     systemd.services.crypto-bot-paper = mkIf cfg.paper.enable (lib.recursiveUpdate common {

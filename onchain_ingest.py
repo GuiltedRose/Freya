@@ -344,7 +344,8 @@ class Ingester:
                     scan=max(scan,first)
                     end=min(scan+count-1,limit)
                     self.store.history_request(rpc.source,start,scan,end)
-                deployments = self.deployments(state_rpc)
+                # Archive blocks without usable events do not need live loader reads.
+                deployments = self.deployments(state_rpc) if archive_through is None else None
                 slots = rpc.call('getBlocks', [max(scan,GENESIS_SLOT+1), end, {'commitment': 'finalized'}]) if end>GENESIS_SLOT else []
                 if not isinstance(slots, list) or slots != sorted(set(slots)) or any(
                         type(slot) is not int or not max(scan,GENESIS_SLOT+1) <= slot <= end for slot in slots):
@@ -383,13 +384,17 @@ class Ingester:
                                 relevant.append((tx_index, tx))
                             events.extend(found)
                             issues.extend(errors)
-                        if relevant:
-                            issues.extend(self.version_issues(slot, deployments))
                         if block.get('blockTime') is None:
                             events=[]  # No fabricated time-based market/training observations.
-                        block['_indexer_deployments'] = deployments
-                        if state_rpc is not rpc:
-                            block['_indexer_deployment_source'] = state_rpc.source
+                        needs_deployment_check = relevant if archive_through is None else events
+                        if needs_deployment_check:
+                            if deployments is None:
+                                deployments = self.deployments(state_rpc)
+                            issues.extend(self.version_issues(slot, deployments))
+                        if deployments is not None:
+                            block['_indexer_deployments'] = deployments
+                            if state_rpc is not rpc:
+                                block['_indexer_deployment_source'] = state_rpc.source
                         decoded = (slot, block, events, sorted(set(issues)), relevant)
                         # Commit each durable prefix independently, retaining at most two
                         # blocks from one bounded HTTP response. No checkpoint jumps.

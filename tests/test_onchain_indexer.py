@@ -487,7 +487,7 @@ class IndexerTests(unittest.TestCase):
         with patch.object(ingester, 'deployments', return_value={}) as deployments:
             ingester.step(0, 2)
             self.assertEqual(self.store.next_slot(), 2)
-            deployments.assert_called_once_with(live)
+            deployments.assert_not_called()
             original = live.call
 
             def conflicting_block(method, params):
@@ -502,6 +502,7 @@ class IndexerTests(unittest.TestCase):
             self.assertEqual(self.store.next_slot(), 2)
             live.call = original
             ingester.step(count=2)
+            self.assertEqual(deployments.call_args_list, [unittest.mock.call(live)] * 2)
 
         self.assertEqual(self.store.next_slot(), 3)
         with self.store.connect() as db:
@@ -526,6 +527,22 @@ class IndexerTests(unittest.TestCase):
             rpc.call = original
             ingester.step(count=2)
         self.assertEqual(self.store.next_slot(), 3)
+
+    def test_archive_events_still_require_live_deployment_evidence(self):
+        archive, live = FakeRpc(), FakeRpc()
+        live.source = 'live-fixture'
+        self.store.register_source(live.source, POLICY)
+        archive_call = archive.call
+        archive.call = lambda method, params: (
+            block(1, 60, [transaction()]) if method == 'getBlock' else archive_call(method, params)
+        )
+        route = {'archive_source_id': archive.source, 'live_source_id': live.source, 'through_slot': 1}
+        ingester = Ingester(self.store, [archive, live], archive_backfill=route)
+        with patch.object(ingester, 'deployments', return_value={}) as deployments:
+            result = ingester.step(0, 2)
+        deployments.assert_called_once_with(live)
+        self.assertEqual(result['blocks_with_issues'], 1)
+        self.assertEqual(self.store.events(verified_only=True), [])
 
     def test_post_completion_volume_is_counted_separately_without_duplication(self):
         tx = transaction(name='PostCompleteBuyEvent')

@@ -169,6 +169,23 @@ class OwnershipTests(unittest.TestCase):
             backup.validate.assert_not_called()
             self.assertEqual(store.next_slot(),0)
 
+    def test_recent_boundary_samples_finalized_once_and_preserves_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory) / 'index.sqlite')
+            rpc = MagicMock()
+            rpc.call.return_value = True
+            with self.assertRaises(ValueError):
+                bootstrap_start(store, [rpc], recent=True)
+            self.assertIsNone(store.next_slot())
+            rpc.reset_mock()
+            rpc.call.return_value = 71
+            self.assertEqual(bootstrap_start(store, [rpc], recent=True), 71)
+            rpc.validate.assert_called_once_with()
+            rpc.call.assert_called_once_with('getSlot', [{'commitment': 'finalized'}])
+            self.assertIsNone(store.metrics()['committed_next_slot'])
+            self.assertIsNone(bootstrap_start(store, [rpc], recent=True))
+            self.assertEqual(rpc.call.call_count, 1)
+
 
 class LiveManagementTests(unittest.TestCase):
     def test_live_needs_no_paper_history_but_preserves_drawdown_and_source_vetoes(self):

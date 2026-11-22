@@ -80,10 +80,17 @@ Point the monolith's crypto-bot flake input at this reviewed source and import i
   existing incompatible paper inventories and quarantined index history. No reset
   or automatic state migration is needed. Existing compatible state may be resumed
   only with exactly matching initial inventory and rules.
-* Leave `startSlot` unset for a fresh Genesis sync. Resume from the validated
-  saved checkpoint when one exists. A fresh Genesis run needs a reviewed source
-  serving that historical range. See [Genesis sync audit](genesis_sync_audit.md)
-  for the outstanding source and decoder requirements.
+* For the bot, leave `startSlot` unset and use `syncFrom = "recent"` to start a
+  new index at the reviewed RPC's finalized head. Use a separate index directory
+  if a historical checkpoint already exists. The headless runner exposes the
+  same choice as `--sync-from recent`. When changing index directories, point
+  `providerLedger` or `CRYPTO_BOT_PROVIDER_LIMITS` at the existing shared
+  provider ledger. Paper and live still require fresh,
+  complete coverage and their existing admission checks.
+* Set `syncFrom = "genesis"` or pass `--sync-from genesis` for historical
+  backfill. Existing indexes resume their saved checkpoints in either mode.
+  Native node and archive startup retain their historical defaults.
+  See [Genesis sync audit](genesis_sync_audit.md) for source requirements.
 * `paper.enable = true`, `paper.initialBalanceUsd`, `paper.initialNativeSol`, and
   `paper.initialSolPriceUsd` to your chosen virtual inventory/valuation. These are
   explicit simulation inputs, never real wallet funding. No values are inferred.

@@ -6,11 +6,17 @@ from pathlib import Path
 from onchain_store import EventStore
 from onchain_ingest import IndexRpc, Ingester, archive_backfill_config, follow
 from onchain_market import OnchainMarket
-from sync_policy import initialize_store
+from sync_policy import initialize_store, slot
 
 
-def bootstrap_start(store,clients,requested=None):
+def bootstrap_start(store, clients, requested=None, *, recent=False):
     """Choose once for an empty index; never skip an existing durable prefix."""
+    if recent and store.next_slot() is None:
+        if not clients:
+            raise ValueError('Recent sync requires a reviewed finalized RPC source')
+        primary = clients[0]
+        primary.validate()
+        requested = slot(primary.call('getSlot', [{'commitment': 'finalized'}]))
     return initialize_store(store, requested)
 
 
@@ -19,7 +25,10 @@ def main():
     parser.add_argument('--config', type=Path, default=Path('onchain_pipeline.json'),help='Reviewed runtime config; examples are never activated implicitly')
     parser.add_argument('--env-file',type=Path,default=Path('.env'),help='Only public collection settings are read; signing fields are ignored')
     parser.add_argument('--db', type=Path, default=Path('state/onchain/index.sqlite'))
-    parser.add_argument('--start-slot', type=int)
+    boundary = parser.add_mutually_exclusive_group()
+    boundary.add_argument('--start-slot', type=int)
+    boundary.add_argument('--sync-from', choices=('recent', 'genesis'), default='genesis',
+                          help='Fresh index boundary; existing indexes always resume')
     parser.add_argument('--batch-slots', type=int, default=8)
     parser.add_argument('--max-catchup-slots', type=int, default=64)
     parser.add_argument('--stream', action='store_true', help='Authorized WSS hints plus existing finalized recovery and local candles')
@@ -67,6 +76,8 @@ def run(args,config,decoder,parser):
         print(json.dumps(result, allow_nan=False))
         return
     archive_backfill = archive_backfill_config(config)
+    if args.sync_from == 'recent' and (archive_backfill or config.get('native_handoff') is not None):
+        parser.error('Recent sync requires a separate index configuration without historical archive or native handoff')
     endpoints = []
     for endpoint in config['endpoints']:
         if endpoint.get('enabled') is not True:
@@ -93,7 +104,11 @@ def run(args,config,decoder,parser):
         ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'),
                             decoder=decoder, oracle=config.get('oracle'),
                             native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill)
-        start = bootstrap_start(store,endpoints,args.start_slot)
+        start = bootstrap_start(store, endpoints, args.start_slot, recent=args.sync_from == 'recent')
+        if start is not None:
+            print(json.dumps({'status': 'index_boundary_selected', 'start_slot': start,
+                              'sync_from': 'explicit' if args.start_slot is not None else args.sync_from}),
+                  flush=True)
         candles=None
         markets=config.get('markets',[])
         if len(markets)>32:parser.error('At most 32 explicitly configured candle markets')

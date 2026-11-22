@@ -395,3 +395,34 @@ reviewed learning configuration and virtual inventory are in place. Stop
 `crypto-bot-indexer.service` and `crypto-bot-old-faithful.service` before
 rolling back the host configuration. Preserve the archive files, provider
 ledger and all index state. See [pipeline recovery](pipeline_recovery.md).
+
+For local staging, verify the CAR against the SHA-256 in the publisher's
+epoch recap before generating indexes. With the pinned CLI and a private
+directory on a disk with room for index scratch files:
+
+```bash
+faithful-cli index all --car "$ARCHIVE_DIR/epoch-0.car" --epoch 0 \
+  --network mainnet --workers 4 --tmp-dir "$ARCHIVE_DIR/work" \
+  --verify "$ARCHIVE_DIR/indexes"
+```
+
+Use the resulting local index paths and the epoch's slot list in the epoch
+configuration. A staged epoch completes only slots 0–431999. Before a
+continuous run, measure ingestion against chain growth and select a durable
+archive coverage and live handoff boundary. Preserve the first verified
+checkpoint if that trial stops early.
+
+On `zelda`, the epoch-zero CAR matched the publisher's SHA-256 and all
+five generated indexes passed Old Faithful verification. The laptop
+`freya-old-faithful.service` now uses
+`state/old-faithful/epoch-0-local.json`. Its previous remote-backed unit
+is saved as `state/old-faithful/freya-old-faithful.service.remote-backup`.
+
+Without external networking, the staged archive returned the expected
+Genesis identity, first slot window and terminal blockhash. A disposable
+Freya run committed 31 blocks and resumed to checkpoint 32 in 57.25 seconds.
+A separate boundary test committed archive slot 431999 and live RPC slot
+432000 on the same index and advanced to 432001. Neither test admitted
+market events. This setup covers epoch zero only. A continuous production
+backfill still needs a path through the later epochs with measured throughput
+above chain growth and verified deployment ranges.
