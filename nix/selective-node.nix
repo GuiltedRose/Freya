@@ -84,8 +84,14 @@ in {
       };
       script = ''
         export FREYA_NODE_EXTERNAL_CONFIG="$CREDENTIALS_DIRECTORY/external.json"
+        state_directory=${lib.escapeShellArg cfg.stateDirectory}
+        # Keep existing selective state at its original path; new workers use
+        # a separate directory from the native follower.
+        if [ ! -e "$state_directory/owner.json" ] && [ ! -L "$state_directory/owner.json" ]; then
+          state_directory="$state_directory/selective"
+        fi
         exec ${package}/bin/freya-node --config "$CREDENTIALS_DIRECTORY/node.json" \
-          --state-dir ${lib.escapeShellArg cfg.stateDirectory}
+          --state-dir "$state_directory"
       '';
     };
   };
