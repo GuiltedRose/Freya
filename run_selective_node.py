@@ -102,7 +102,8 @@ async def run(config,directory,mode,max_cycles=None):
         publish(status_path,record)
         if disk>=disk_limit:raise RuntimeError('Disk budget exhausted; preserve data and recover explicitly')
     with writer_lock(database,'indexer',source):
-        task=asyncio.create_task(observe(source,database,batch=8,interval=5,resume=True,max_cycles=max_cycles))
+        task=asyncio.create_task(observe(source,database,batch=8,interval=5,resume=True,max_cycles=max_cycles,
+                                         recent=config.get('sync_from','recent')=='recent'))
         try:
             while not task.done():
                 await asyncio.sleep(1)
@@ -131,6 +132,7 @@ def main():
     if not args.config:parser.error('--config required; no default connections')
     config=json.loads(args.config.read_text());mode=args.mode or config.get('mode','external')
     if mode not in ('native','external','automatic'):parser.error('Invalid source mode')
+    if config.get('sync_from','recent') not in ('recent','genesis'):parser.error('Invalid synchronization boundary')
     if mode=='native':parser.error('Native producer is unqualified; no external fallback in native-only mode')
     memory=config.get('memory_bytes',4*1024**3)
     if type(memory) is not int or not 512*1024**2<=memory<=32*1024**3:parser.error('Invalid memory budget')

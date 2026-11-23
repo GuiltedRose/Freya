@@ -88,6 +88,7 @@ Example follow config outside the Nix store, owned privately by the collector:
 ```json
 {
   "bootstrap_peers": [],
+  "sync_from": "recent",
   "duration_seconds": 40,
   "continuous": false,
   "max_namespace_bytes": 1000000,
@@ -112,7 +113,12 @@ Discovery-only mode still requires explicit sockets. Follow plans four finalized
 slots automatically; its optional
 `initial_slot` is a starting anchor, not a manually enumerated schedule. Plans
 retain RPC provenance and skipped-slot claims; they are distinct from native
-reconstruction evidence. Version changes, lost identity, corrupt checkpoint fields,
+reconstruction evidence. Fresh followers default to a window ending at the
+reviewed finalized head. Set `sync_from` to `genesis` for slot zero, or supply
+`initial_slot` instead of `sync_from` for a specific slot. Retained windows and
+checkpoints take precedence. This setting does not supply finalized data or
+execution receipts independently of the reviewed source.
+Version changes, lost identity, corrupt checkpoint fields,
 missing durable plans and exhausted retries block instead of resetting progress.
 
 ```nix

@@ -348,7 +348,11 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
                 .arg("--output").arg(dir.join("window.json"))
                 .arg("--run-id").arg(&run_id)
                 .env("FREYA_PLANNING_LEASE_EXPIRES",expires.to_string());
-            if let Some(start)=start {command.arg("--start").arg(start.to_string());}
+            if let Some(start)=start {
+                command.arg("--start").arg(start.to_string());
+            } else {
+                command.arg("--recent");
+            }
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
         })();
         let mut child=match launched {
@@ -379,10 +383,14 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
         }
         let validated=(|| {
             let window=read_json(&dir.join("window.json"))?;
+            let selected_start = match start {
+                Some(slot) => slot,
+                None => window["observed_finalized_head"].as_u64().ok_or_else(invalid)?.saturating_sub(3),
+            };
             if window["planning_run_id"].as_str()!=Some(run_id.as_str())
                 || window["schema"]!="freya-native-window-v1" || window["verification"]!="reviewed_rpc_claim"
                 || window["genesis"]!=sync_policy()["genesis_hash"]
-                || start.is_some_and(|s|window["start"].as_u64()!=Some(s)) {return Err(invalid());}
+                || window["start"].as_u64()!=Some(selected_start) {return Err(invalid());}
             Ok(window)
         })();
         planning_result(dir,&run_id,begun,if validated.is_ok(){"planner_success"}else{"invalid_rpc_metadata"},Some(status))?;
@@ -392,6 +400,18 @@ fn plan(dir: &Path, start: Option<u64>, stop: &AtomicBool) -> io::Result<Value> 
 
 pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let config = read_json(config_path)?;
+    let recent = match config.get("sync_from").and_then(Value::as_str) {
+        Some("recent") => true,
+        Some("genesis") => false,
+        None if config.get("sync_from").is_none() => true,
+        _ => return Err(invalid()),
+    };
+    let requested = config.get("initial_slot").map(|slot|
+        slot.as_u64().filter(|slot| *slot < i64::MAX as u64).ok_or_else(invalid)
+    ).transpose()?;
+    if requested.is_some() && config.get("sync_from").is_some() {
+        return Err(invalid());
+    }
     let continuous = config["continuous"].as_bool().unwrap_or(false);
     let seconds = if continuous {86400} else {bounded(&config,"duration_seconds",1,50)?};
     let traffic_cap = bounded(&config,"max_namespace_bytes",1,if continuous {10_000_000}else{1_000_000})?;
@@ -462,21 +482,25 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
     let mut failure_stage="rpc_planning";
     let outcome = (|| -> io::Result<()> {
         let retained=resume_window(dir,&state)?;
-        let start=resume_slot(&state,retained.as_ref())?;
+        let start=if !state["next_slot"].is_null() || retained.is_some() {
+            Some(resume_slot(&state,retained.as_ref())?)
+        } else {
+            requested.or_else(|| (!recent).then(genesis_start))
+        };
         if let Some(window)=retained.as_ref() {
             // Keep the original source pin even when only slot schedules survived.
             state["rpc_source_identity"]=checked_source(window,&state)?.clone();
         }
         let mut window = match retained {
             Some(window) if state["next_slot"].is_u64()=>window,
-            _=>plan(dir,Some(start),&stop)?, // Revalidate orphaned planning metadata before reuse.
+            _=>plan(dir,start,&stop)?, // Revalidate orphaned planning metadata before reuse.
         };
         if window["schema"]!="freya-native-window-v1" || window["genesis"]!=sync_policy()["genesis_hash"] { return Err(invalid()); }
         if window["rpc_reported_skipped_slots"].as_array().is_some_and(|slots|!slots.is_empty())
             && !window["skip_proofs"].is_array() {
             // Legacy omissions have no parent evidence. Revalidate in place;
             // never discard a saved acquisition cursor or fabricate a skip.
-            window=plan(dir,window["start"].as_u64(),&stop)?;
+            window=plan(dir,Some(window["start"].as_u64().ok_or_else(invalid)?),&stop)?;
         }
         state["progress_scope"]=json!("native_acquisition_only");
         state["ledger_committed_next_slot"]=Value::Null;
@@ -484,7 +508,7 @@ pub fn run(config_path: &Path, dir: &Path) -> io::Result<()> {
         failure_stage="bootstrap_metadata";
         if bootstraps.is_empty() {
             if window["bootstrap_nodes"].as_array().is_none_or(|rows|rows.is_empty()) {
-                window=plan(dir,window["start"].as_u64(),&stop)?;
+                window=plan(dir,Some(window["start"].as_u64().ok_or_else(invalid)?),&stop)?;
             }
             if window["bootstrap_provenance"]!="reviewed_rpc_claim" {return Err(invalid());}
             let peers=window["bootstrap_nodes"].as_array().ok_or_else(invalid)?;

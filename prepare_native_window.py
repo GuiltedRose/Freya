@@ -244,7 +244,7 @@ class PlanningCache:
                           'source_identity': self.identity, 'entries': self.entries})
 
 
-def prepare(config_path, output, start=None, run_id=None):
+def prepare(config_path, output, start=None, run_id=None, *, recent=False):
     run_id = run_id or uuid.uuid4().hex
     progress = PlanningProgress(output, run_id)
     # Replace stale failure classification before configuration, imports or RPC.
@@ -252,7 +252,7 @@ def prepare(config_path, output, start=None, run_id=None):
         'schema': 'freya-native-planning-error-v1', 'at': time.time(),
         'run_id': run_id, 'category': 'in_progress'})
     try:
-        _prepare(config_path, output, start, progress)
+        _prepare(config_path, output, start, progress, recent=recent)
     except SystemExit as error:
         progress.write('caught_up' if error.code == 75 else 'failed', 'caught_up' if error.code == 75 else 'planner_process_failure')
         raise
@@ -297,7 +297,7 @@ def bootstrap_nodes(cluster, version):
     return selected
 
 
-def _prepare(config_path, output, start, progress):
+def _prepare(config_path, output, start, progress, *, recent=False):
     from pipeline_runtime import read_json, resolve_indexer
     from solana_rpc_compat import make_rpc, close_rpc_clients
     from solders.pubkey import Pubkey
@@ -358,6 +358,8 @@ def _prepare(config_path, output, start, progress):
         head = call('finalized_head', 'getSlot', [{'commitment': 'finalized'}])
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
+        if recent and start is None:
+            start = max(GENESIS_SLOT, head - 3)
         start = initial_slot(requested=start)
         if type(start) is int and start > head:
             raise SystemExit(75)  # Caught up; wait under the same lease, never skip forward.
@@ -426,11 +428,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--start', type=int)
+    boundary = parser.add_mutually_exclusive_group()
+    boundary.add_argument('--start', type=int)
+    boundary.add_argument('--recent', action='store_true')
     parser.add_argument('--run-id', type=lambda value: str(uuid.UUID(value)).replace('-', ''))
     args = parser.parse_args()
     try:
-        prepare(args.config, args.output, args.start, args.run_id)
+        prepare(args.config, args.output, args.start, args.run_id, recent=args.recent)
     except PlanningDeferred:
         raise SystemExit(76) from None
     except Exception:

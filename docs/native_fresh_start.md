@@ -1,6 +1,6 @@
 # Fresh native runtime after confirmed data loss
 
-Normal startup always starts at slot 0 when no retained checkpoint/window/slot
+Genesis mode starts at slot 0 when no retained checkpoint/window/slot
 schedule exists. Valid retained progress resumes automatically; corrupt progress
 blocks. Identity files alone do not select a resume slot. Bootstrap below does
 not reset follower progress, identity, network accounting, wallets or training.
@@ -34,7 +34,7 @@ python prepare_native_runtime.py --source deployment/native-mainnet.reviewed.jso
 python -m unittest discover -s tests -p test_native_runtime_bootstrap.py
 python -m unittest discover -s tests -p test_native_window_planning.py
 refresh_dir="state/mainnet-refresh-$(date -u +%Y%m%dT%H%M%SZ)"
-python prepare_mainnet_host.py --refresh --output "$refresh_dir"
+python prepare_mainnet_host.py --refresh --sync-from genesis --output "$refresh_dir"
 diff -u /etc/nixos/freya-mainnet.nix "$refresh_dir/freya-mainnet.nix"
 ```
 

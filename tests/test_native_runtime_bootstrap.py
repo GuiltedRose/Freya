@@ -110,7 +110,8 @@ class NativeSourceTests(unittest.TestCase):
             source=root/'source.json';source.write_text('{}');source.chmod(0o600)
             ledger=root/'provider.sqlite';ledger.write_bytes(b'fixture');ledger.chmod(0o600)
             endpoint={'enabled':True,'backend':'rust','network_mode':'remote_provider'}
-            args=SimpleNamespace(output=root/'prepared',config=source,index_db=root/'index.sqlite',refresh=False)
+            args=SimpleNamespace(output=root/'prepared',config=source,index_db=root/'index.sqlite',refresh=False,
+                                 sync_from='recent')
             original_is_file=Path.is_file
             def is_file(path):
                 return True if str(path)=='/etc/nixos/configuration.nix' else original_is_file(path)
@@ -124,6 +125,7 @@ class NativeSourceTests(unittest.TestCase):
                  patch('prepare_mainnet_host.capture',side_effect=capture),patch('sys.stdout',new_callable=io.StringIO):
                 prepare(args)
             self.assertEqual(json.loads((args.output/'node.json').read_text())['network_mode'],'remote_provider')
+            self.assertEqual(json.loads((args.output/'follow.json').read_text())['sync_from'],'recent')
             module=(args.output/'freya-mainnet.nix').read_text()
             self.assertIn('sessionBytes = 1000000;',module)
             self.assertIn('sessionSeconds = 55;',module)

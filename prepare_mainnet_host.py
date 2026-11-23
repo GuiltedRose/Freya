@@ -101,9 +101,10 @@ def prepare(args):
         with os.fdopen(os.open(path, os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
             stream.write(value)
     write('follow.json', json.dumps({'bootstrap_peers':[], 'continuous':False,'duration_seconds':40,
+        'sync_from': args.sync_from,
         'max_namespace_bytes':1000000,'max_disk_bytes':67108864,'max_shreds_per_slot':1024,
         'max_attempts_per_window':128,'request_interval_ms':500},indent=2)+'\n')
-    write('node.json', json.dumps({'mode':'external','external_config':str(external),
+    write('node.json', json.dumps({'mode':'external','external_config':str(external),'sync_from':args.sync_from,
         'network_mode':endpoint.get('network_mode','isolated'),'provider_ledger':str(ledger)},indent=2)+'\n')
     module = '''{ config, lib, pkgs, ... }: {
   imports = [ ({ config, lib, pkgs, ... }: import SOURCE/nix/selective-node.nix {
@@ -163,6 +164,7 @@ def main():
     parser.add_argument('--index-db',type=Path,default=ROOT/'state/onchain/index.sqlite')
     parser.add_argument('--output',type=Path,default=ROOT/'state/mainnet-host-setup')
     parser.add_argument('--refresh',action='store_true',help='Prepare an update for matching, inactive installed Freya services')
+    parser.add_argument('--sync-from', choices=('recent', 'genesis'), default='recent')
     try:
         prepare(parser.parse_args())
     except PreparationError as error:

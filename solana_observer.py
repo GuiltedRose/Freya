@@ -88,16 +88,18 @@ def prepare(config, database, resume=False):
                     native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill),endpoint,candles
 
 
-async def observe(config, database, start_slot=None, resume=False, batch=8, interval=5, max_cycles=None):
+async def observe(config, database, start_slot=None, resume=False, batch=8, interval=5, max_cycles=None, *, recent=False):
     if not 1<=batch<=64 or not 1<=interval<=3600 or max_cycles is not None and not 1<=max_cycles<=10000:
         raise ValueError('Invalid bounded observer settings')
     if start_slot is not None and (type(start_slot) is not int or start_slot<0):
         raise ValueError('Start slot must be a nonnegative integer')
+    if recent and (start_slot is not None or config.get('archive_backfill') or config.get('native_handoff')):
+        raise ValueError('Recent sync requires a separate live observer configuration')
     # Existing files still pass open_isolated's observer-schema validation.
     ingester,endpoint,candles=prepare(config,database,resume or Path(database).is_file())
     try:
-        from sync_policy import initialize_store
-        start=initialize_store(ingester.store, start_slot)
+        from run_onchain_indexer import bootstrap_start
+        start = bootstrap_start(ingester.store, ingester.endpoints if recent else [], start_slot, recent=recent)
         # Keep the user's async connect/observe integration, with shared validation,
         # acknowledgments and recovery rather than a second competing WS client.
         from solana_rpc_compat import stream_connector

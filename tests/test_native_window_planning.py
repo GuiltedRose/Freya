@@ -111,6 +111,12 @@ class PlanningTests(unittest.TestCase):
         prepare(Path('unused'), self.output)
         self.assertEqual(json.loads(self.output.read_text())['start'], 0)
 
+    def test_recent_start_selects_a_small_finalized_window(self):
+        prepare(Path('unused'), self.output, recent=True)
+        window = json.loads(self.output.read_text())
+        self.assertEqual((window['start'], window['end']), (7, 10))
+        self.rpc.call.assert_any_call('getSlotLeaders', [7, 4])
+
     def test_pruned_genesis_is_blocked_not_replaced_by_current_head(self):
         self.floors = iter([5])
         with self.assertRaises(ValueError): prepare(Path('unused'), self.output)
