@@ -122,7 +122,21 @@ def main():
     parser.add_argument('--mode',choices=('native','external','automatic'))
     parser.add_argument('--status',action='store_true')
     parser.add_argument('--max-cycles',type=int)
+    parser.add_argument('--serve-retained', type=Path, metavar='INDEX_DB',
+                        help='Serve retained finalized blocks without an upstream connection')
+    parser.add_argument('--rpc-port', type=int, default=8899)
     args=parser.parse_args()
+    if args.serve_retained is not None:
+        if args.mode or args.config or args.status or args.max_cycles is not None:
+            parser.error('--serve-retained is a separate read-only mode')
+        if not 1024 <= args.rpc_port <= 65535:
+            parser.error('RPC port must be 1024..65535')
+        from retained_rpc import serve
+        try:
+            serve(args.serve_retained, args.rpc_port)
+        except KeyboardInterrupt:
+            pass
+        return
     if args.status:
         path=args.state_dir/'status.json'
         if path.is_symlink():parser.error('Symlink status refused')

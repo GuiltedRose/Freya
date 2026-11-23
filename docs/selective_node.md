@@ -121,6 +121,19 @@ execution receipts independently of the reviewed source.
 Version changes, lost identity, corrupt checkpoint fields,
 missing durable plans and exhausted retries block instead of resetting progress.
 
+The custom node can also serve retained finalized block evidence locally:
+
+```bash
+freya-node --serve-retained /absolute/path/to/index.sqlite --rpc-port 8899
+```
+
+The listener binds to loopback and makes no upstream calls. `getBlock` reads
+full blocks captured with `freya-indexer --retain-blocks`, checks the retained
+hash and refuses unavailable or quarantined evidence. `freya_getStatus` reports
+local coverage and explicitly reports that live RPC is unavailable. This mode
+does not acquire new slots, answer account-state queries, or qualify the local
+node as an independent source of finalized receipts.
+
 ```nix
 services.freya-node = {
   enable = true;
