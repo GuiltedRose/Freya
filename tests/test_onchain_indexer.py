@@ -544,6 +544,90 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(result['blocks_with_issues'], 1)
         self.assertEqual(self.store.events(verified_only=True), [])
 
+    def test_rejected_block_recovers_from_backup_without_rewriting_prefix(self):
+        primary, backup = FakeRpc(), FakeRpc()
+        backup.source = 'backup-fixture'
+        self.store.register_source(backup.source, POLICY)
+        call = primary.call
+
+        def rejected(method, params):
+            result = call(method, params)
+            if method == 'getBlock' and params[0] == 2:
+                result['previousBlockhash'] = 'wrong'
+            return result
+
+        primary.call = rejected
+        ingester = Ingester(self.store, [primary, backup])
+        with patch.object(ingester, 'deployments', return_value={}):
+            ingester.step(1, 2)
+        self.assertEqual(self.store.next_slot(), 3)
+        self.assertEqual(self.store.required_finalized_blocks(1, 2), set())
+        with self.store.connect() as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT slot,source FROM blocks ORDER BY slot')],
+                             [(1, primary.source), (2, backup.source)])
+
+    def test_selective_recent_fetches_only_candidate_receipt_and_keeps_original_position(self):
+        from solders.signature import Signature
+        receipt, _ = self.recorded('curve')
+        number = receipt['slot']
+        stamp = receipt['blockTime']
+        full = receipt['transaction']
+        loaded = receipt['meta']['loadedAddresses']
+        keys = full['message']['accountKeys'] + loaded['writable'] + loaded['readonly']
+        def account_row(signatures, addresses, version):
+            return {'transaction': {'signatures': signatures, 'accountKeys': [{'pubkey': key} for key in addresses]},
+                    'meta': {'err': None, 'preBalances': [0] * len(addresses), 'postBalances': [0] * len(addresses)},
+                    'version': version}
+        manifest = block(number, stamp, [
+            account_row([str(Signature.default())], [str(Pubkey.default())], 'legacy'),
+            account_row(full['signatures'], keys, receipt['version']),
+        ])
+        rpc = FakeRpc()
+        calls = []
+        returned_receipt = {**receipt, 'slot': number + 1}
+        def call(method, params):
+            calls.append((method, params))
+            return {'getSlot': number, 'getFirstAvailableBlock': 0, 'getBlocks': [number],
+                    'getBlock': manifest, 'getTransaction': returned_receipt}[method]
+        rpc.call = call
+        versions = {program: [{'from_slot': number, 'through_slot': number,
+                               'deployment_slot': 0, 'idl_hash': spec['hash']}]
+                    for program, spec in self.decoder.specs.items()}
+        ingester = Ingester(self.store, [rpc], versions, decoder=self.decoder, selective_recent=True)
+        with patch.object(ingester, 'deployments', return_value=dict.fromkeys(versions, 0)):
+            with self.assertRaisesRegex(ValueError, 'selective finalized receipt'):
+                ingester.step(number, 1)
+            self.assertEqual(self.store.next_slot(), number)
+            self.assertEqual(self.store.metrics()['committed_next_slot'], None)
+            returned_receipt = receipt
+            calls.clear()
+            ingester.step(number, 1)
+        self.assertEqual([params[0] for method, params in calls if method == 'getTransaction'], full['signatures'][:1])
+        self.assertEqual(next(params[1]['transactionDetails'] for method, params in calls if method == 'getBlock'), 'accounts')
+        self.assertEqual(self.store.next_slot(), number + 1)
+        events = self.store.events(verified_only=True)
+        self.assertTrue(events)
+        self.assertTrue(all(event['tx_index'] == 1 for event in events))
+
+    def test_backup_omission_stays_blocked_across_reopen(self):
+        primary, backup = FakeRpc(), FakeRpc()
+        backup.source = 'backup-fixture'
+        self.store.register_source(backup.source, POLICY)
+        call = primary.call
+        primary.call = lambda method, params: (
+            None if method == 'getBlock' and params[0] == 2 else call(method, params)
+        )
+        backup_call = backup.call
+        backup.call = lambda method, params: [] if method == 'getBlocks' else backup_call(method, params)
+        for store, sources, start in ((self.store, [primary, backup], 1),
+                                      (EventStore(self.path), [backup], None)):
+            ingester = Ingester(store, sources)
+            with patch.object(ingester, 'deployments', return_value={}), self.assertRaisesRegex(
+                    ValueError, 'Backup manifest does not cover'):
+                ingester.step(start, 2)
+            self.assertEqual(store.next_slot(), 2)
+            self.assertEqual(store.required_finalized_blocks(1, 2), {2})
+
     def test_post_completion_volume_is_counted_separately_without_duplication(self):
         tx = transaction(name='PostCompleteBuyEvent')
         primary = transaction()['meta']['innerInstructions'][0]['instructions'][0]

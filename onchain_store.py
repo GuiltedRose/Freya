@@ -8,6 +8,10 @@ import zlib
 from sync_policy import initial_slot, slot as historical_slot, GENESIS_SLOT
 
 
+class FinalizedBlockRejected(ValueError):
+    category = 'finalized_block_rejected'
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
@@ -48,6 +52,7 @@ class EventStore:
                     start INTEGER PRIMARY KEY, end INTEGER NOT NULL, source TEXT NOT NULL,
                     slots TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS checkpoints(name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS required_finalized_blocks(slot INTEGER PRIMARY KEY);
                 CREATE INDEX IF NOT EXISTS range_ends ON ranges(end);
                 CREATE TABLE IF NOT EXISTS telemetry(name TEXT PRIMARY KEY, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS history_requests(
@@ -142,6 +147,16 @@ class EventStore:
             row = db.execute("SELECT value FROM checkpoints WHERE name='next_slot'").fetchone()
         return initial_slot(row[0]) if row else None
 
+    def require_finalized_blocks(self, slots):
+        with self.connect() as db:
+            db.executemany('INSERT OR IGNORE INTO required_finalized_blocks VALUES(?)',
+                           ((historical_slot(number),) for number in slots))
+
+    def required_finalized_blocks(self, start, end):
+        with self.connect() as db:
+            return {row[0] for row in db.execute(
+                'SELECT slot FROM required_finalized_blocks WHERE slot BETWEEN ? AND ?', (start, end))}
+
     def history_request(self, source, cursor, scan_next=None, end=None, state='requested', reason=''):
         """Uncommitted discovery state, separate from the durable prefix."""
         with self.connect() as db:
@@ -179,6 +194,10 @@ class EventStore:
             raise ValueError('Incomplete manifest blocks')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            required = {row[0] for row in db.execute(
+                'SELECT slot FROM required_finalized_blocks WHERE slot BETWEEN ? AND ?', (start, end))}
+            if required - set(slots):
+                raise FinalizedBlockRejected('Cannot omit a previously reported produced block')
             checkpoint = db.execute("SELECT value FROM checkpoints WHERE name='next_slot'").fetchone()
             existing = db.execute('SELECT end,source,slots FROM ranges WHERE start=?', (start,)).fetchone()
             if existing:
@@ -194,17 +213,17 @@ class EventStore:
             for slot, block, events, issues, transactions in decoded:
                 stamp = block['blockTime']
                 if (stamp is not None and (type(stamp) is not int or stamp<0)) or not block.get('blockhash'):
-                    raise ValueError('Finalized block time/hash unavailable')
+                    raise FinalizedBlockRejected('Finalized block time/hash unavailable')
                 if stamp is not None and known_time is not None and stamp<known_time:
-                    raise ValueError('Finalized time continuity mismatch across unknown timestamps')
+                    raise FinalizedBlockRejected('Finalized time continuity mismatch across unknown timestamps')
                 parent=block['parentSlot']
                 if type(parent) is not int or parent<GENESIS_SLOT or parent>=slot:
-                    raise ValueError('Invalid finalized parent slot')
+                    raise FinalizedBlockRejected('Invalid finalized parent slot')
                 if previous and (parent != previous[0] or stamp is not None and previous[1] is not None and stamp < previous[1]
                                  or block['previousBlockhash'] != previous[2]):
-                    raise ValueError('Finalized parent/time continuity mismatch')
+                    raise FinalizedBlockRejected('Finalized parent/time continuity mismatch')
                 if previous is None and parent>=max(start,GENESIS_SLOT+1):
-                    raise ValueError('Unresolved history before first retrieved block')
+                    raise FinalizedBlockRejected('Unresolved history before first retrieved block')
                 digest = hashlib.sha256(canonical(block).encode()).hexdigest()
                 row = db.execute('SELECT raw_hash FROM blocks WHERE slot=?', (slot,)).fetchone()
                 if row and row[0] != digest:
@@ -248,6 +267,7 @@ class EventStore:
                        (start, end, source, canonical(slots)))
             if not existing:
                 db.execute("INSERT OR REPLACE INTO checkpoints VALUES('next_slot',?)", (end + 1,))
+                db.execute('DELETE FROM required_finalized_blocks WHERE slot BETWEEN ? AND ?', (start, end))
 
     def coverage(self, start, end):
         if end <= start:

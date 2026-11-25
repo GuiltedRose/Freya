@@ -274,7 +274,7 @@ fn planning_result(dir: &Path, run_id: &str, begun: Instant, category: &str,
                 record["stage"]=json!(stage);
             }
             if let Some(method)=progress["rpc_method"].as_str().filter(|method|matches!(*method,
-                "getBlock"|"getGenesisHash"|"getSlot"|"getFirstAvailableBlock"|"getSlotLeaders"|"getBlocks"|"getClusterNodes")) {
+                "getBlock"|"getBlockTime"|"getGenesisHash"|"getSlot"|"getFirstAvailableBlock"|"getSlotLeaders"|"getBlocks"|"getClusterNodes")) {
                 record["rpc_method"]=json!(method);
             }
             if let Some(start)=progress["stage_started_at"].as_f64().filter(|start|start.is_finite() && *start<=at && *start>=0.0) {

@@ -2,11 +2,12 @@
 from solana_rpc_compat import make_rpc, close_rpc_clients
 import argparse
 import json
+import time
 from pathlib import Path
 from onchain_store import EventStore
 from onchain_ingest import IndexRpc, Ingester, archive_backfill_config, follow
 from onchain_market import OnchainMarket
-from sync_policy import initialize_store, slot
+from sync_policy import initialize_store, slot, validate_recent_block_time
 
 
 def bootstrap_start(store, clients, requested=None, *, recent=False):
@@ -17,6 +18,7 @@ def bootstrap_start(store, clients, requested=None, *, recent=False):
         primary = clients[0]
         primary.validate()
         requested = slot(primary.call('getSlot', [{'commitment': 'finalized'}]))
+        validate_recent_block_time(primary.call('getBlockTime', [requested]), time.time())
     return initialize_store(store, requested)
 
 
@@ -76,6 +78,9 @@ def run(args,config,decoder,parser):
         print(json.dumps(result, allow_nan=False))
         return
     archive_backfill = archive_backfill_config(config)
+    selective = config.get('selective_recent', False)
+    if selective and (args.sync_from != 'recent' or args.retain_blocks):
+        parser.error('selective_recent requires --sync-from recent without full-block retention')
     if args.sync_from == 'recent' and (archive_backfill or config.get('native_handoff') is not None):
         parser.error('Recent sync requires a separate index configuration without historical archive or native handoff')
     endpoints = []
@@ -103,7 +108,8 @@ def run(args,config,decoder,parser):
             return
         ingester = Ingester(store, endpoints, config.get('reviewed_program_versions'),
                             decoder=decoder, oracle=config.get('oracle'),
-                            native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill)
+                            native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill,
+                            selective_recent=selective)
         start = bootstrap_start(store, endpoints, args.start_slot, recent=args.sync_from == 'recent')
         if start is not None:
             print(json.dumps({'status': 'index_boundary_selected', 'start_slot': start,

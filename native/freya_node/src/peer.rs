@@ -6,7 +6,7 @@ use solana_net_utils::SocketAddrSpace;
 use solana_signer::Signer;
 use serde_json::{json, Value};
 use std::{env, fs::{self, File, OpenOptions}, io::{self, Read, Write}, net::SocketAddr,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf},
     sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 const FORMAT: &str = "freya-peer-v1";
 static NATIVE_DISK_LIMIT: std::sync::OnceLock<(PathBuf, u64)> = std::sync::OnceLock::new();
@@ -72,10 +72,14 @@ fn counters() -> io::Result<(u64,u64)> {
 }
 fn run() -> io::Result<()> {
     let args: Vec<_> = env::args_os().skip(1).collect();
-    if args.len() != 3 { return Err(io::Error::other("usage: freya-peer (discover|status) CONFIG STATE_DIRECTORY")); }
+    if args.len() == 4 && args[0] == "export-replay" {
+        return acquisition::export_replay_ledger(Path::new(&args[1]), Path::new(&args[2]), Path::new(&args[3]));
+    }
+    if args.len() != 3 { return Err(io::Error::other("usage: freya-peer (discover|acquire|follow|status|verify-poh) CONFIG STATE_DIRECTORY")); }
     let dir = PathBuf::from(&args[2]);
     if args[0] == "follow" { return follow::run(Path::new(&args[1]), &dir); }
     if args[0] == "acquire" { return acquisition::acquire(Path::new(&args[1]), &dir); }
+    if args[0] == "verify-poh" { return acquisition::verify_poh(Path::new(&args[1]), &dir); }
     if args[0] == "status" {
         let value = read_json(&dir.join("checkpoint.json"))?;
         if value["format"] != FORMAT && value["format"] != "freya-native-acquisition-v1"

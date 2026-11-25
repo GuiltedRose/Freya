@@ -28,6 +28,16 @@ def validate_config(config):
     from onchain_ingest import archive_backfill_config
     archive_backfill_config(config)
     endpoints = [e for e in config.get('endpoints',[]) if e.get('enabled') is True]
+    selective = config.get('selective_recent', False)
+    if type(selective) is not bool:
+        raise ValueError('selective_recent must be a boolean')
+    if selective:
+        from urllib.parse import urlsplit
+        if (config.get('archive_backfill') or config.get('native_handoff')
+                or any(e.get('network_mode') != 'isolated' or e.get('source_kind') != 'local_rpc'
+                       or e.get('backend') != 'rust'
+                       or urlsplit(e['url']).hostname != '127.0.0.1' for e in endpoints)):
+            raise ValueError('Selective recent sync requires isolated Rust loopback RPC sources')
     if not endpoints:
         raise ValueError('Enable an explicitly reviewed RPC source')
     if len({e['source_id'] for e in endpoints}) != len(endpoints):

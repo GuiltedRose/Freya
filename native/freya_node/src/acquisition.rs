@@ -1,9 +1,125 @@
 //! Bounded UDP shred acquisition. Native records are quarantined, not execution receipts.
 use super::*;
 use solana_entry::block_component::BlockComponent;
+use solana_entry::entry::Entry;
+use solana_hash::Hash;
 use solana_ledger::shred::{Shred, Shredder};
 use solana_pubkey::Pubkey;
 use std::{collections::BTreeMap, net::UdpSocket, str::FromStr};
+
+fn verify_entry_chain(record: &Value, anchor: &Value) -> io::Result<Value> {
+    let slot = record["slot"].as_u64().ok_or_else(invalid)?;
+    let parent_slot = record["parent_slot"].as_u64().ok_or_else(invalid)?;
+    if record["schema"] != "freya-native-slot-v1" || record["reconstructed"] != true
+        || record["conflict"] != false || anchor["schema"] != "freya-trusted-poh-anchor-v1"
+        || anchor["slot"].as_u64() != Some(slot) || anchor["parent_slot"].as_u64() != Some(parent_slot)
+        || parent_slot >= slot {
+        return Err(invalid());
+    }
+    let parse_hash = |value: &Value| {
+        Hash::from_str(value.as_str().ok_or_else(invalid)?).map_err(|_| invalid())
+    };
+    let mut previous = parse_hash(&anchor["parent_entry_hash"])?;
+    let terminal = parse_hash(&anchor["terminal_entry_hash"])?;
+    let transactions = record["ordered_transactions"].as_array().ok_or_else(invalid)?;
+    let components = record["replay_components"].as_array().ok_or_else(invalid)?;
+    let mut cursor = 0usize;
+    let mut hashes = 0u64;
+    let mut entries = 0usize;
+    for component in components {
+        match component["kind"].as_str() {
+            Some("block_marker") => continue,
+            Some("entry_batch") => {}
+            _ => return Err(invalid()),
+        }
+        for row in component["entries"].as_array().ok_or_else(invalid)? {
+            let first = row["first_transaction"].as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(invalid)?;
+            let count = row["transaction_count"].as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(invalid)?;
+            if first != cursor { return Err(invalid()); }
+            let end = first.checked_add(count).ok_or_else(invalid)?;
+            let num_hashes = row["num_hashes"].as_u64().ok_or_else(invalid)?;
+            hashes = hashes.checked_add(num_hashes).filter(|n| *n <= 16_000_000)
+                .ok_or_else(|| io::Error::other("native PoH verification work limit exceeded"))?;
+            let entry = Entry {
+                num_hashes,
+                hash: parse_hash(&row["hash"])?,
+                transactions: transactions.get(first..end).ok_or_else(invalid)?.iter()
+                    .map(|tx| serde_json::from_value(tx.clone()).map_err(|_| invalid()))
+                    .collect::<io::Result<Vec<_>>>()?,
+            };
+            if !entry.verify(&previous) {
+                return Err(io::Error::other("native PoH entry hash mismatch"));
+            }
+            previous = entry.hash;
+            cursor = end;
+            entries += 1;
+        }
+    }
+    if entries == 0 || cursor != transactions.len() || previous != terminal {
+        return Err(io::Error::other("native PoH terminal anchor mismatch"));
+    }
+    Ok(json!({"slot": slot, "parent_slot": parent_slot, "entries": entries,
+        "hashes": hashes, "terminal_entry_hash": terminal.to_string(),
+        "verification": "poh_against_supplied_anchor", "finality": "unverified",
+        "execution_metadata": null, "market_data_ready": false}))
+}
+
+pub(super) fn verify_poh(anchor: &Path, dir: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(dir)?.is_dir() || dir.join("conflict.json").exists() {
+        return Err(invalid());
+    }
+    let mut file = OpenOptions::new().read(true).custom_flags(0x20800).open(dir.join("handoff.json"))?;
+    if !file.metadata()?.is_file() { return Err(invalid()); }
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file).take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT { return Err(invalid()); }
+    let record = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let result = verify_entry_chain(&record, &read_json(anchor)?)?;
+    if dir.join("conflict.json").exists() { return Err(invalid()); }
+    println!("{result}");
+    Ok(())
+}
+
+pub(super) fn export_replay_ledger(config: &Path, dir: &Path, ledger: &Path) -> io::Result<()> {
+    let config = read_json(config)?;
+    let slot = bounded(&config, "slot", 1, i64::MAX as u64 - 1)?;
+    let parent = bounded(&config, "parent_slot", 0, slot - 1)?;
+    let version = bounded(&config, "shred_version", 1, 65535)? as u16;
+    let leader = Pubkey::from_str(config["leader"].as_str().ok_or_else(invalid)?).map_err(|_| invalid())?;
+    if !fs::symlink_metadata(dir)?.is_dir() || dir.join("conflict.json").exists() {
+        return Err(invalid());
+    }
+    let mut shreds = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("shred") {
+            continue;
+        }
+        if shreds.len() >= 4096 { return Err(invalid()); }
+        let shred = checked(raw(&path)?, slot, version, &leader, 4096)?;
+        if shred.parent().map_err(|_| invalid())? != parent { return Err(invalid()); }
+        shreds.push(shred);
+    }
+    shreds.sort_by_key(Shred::index);
+    if shreds.is_empty() || dir.join("conflict.json").exists()
+        || shreds.iter().enumerate().any(|(index, shred)| {
+            shred.index() as usize != index || shred.last_in_slot() != (index + 1 == shreds.len())
+        }) {
+        return Err(io::Error::other("complete conflict-free slot shreds required"));
+    }
+    std::fs::DirBuilder::new().mode(0o700).create(ledger)?;
+    let blockstore = solana_ledger::blockstore::Blockstore::open(ledger)
+        .map_err(|_| io::Error::other("unable to open new replay blockstore"))?;
+    blockstore.insert_shreds(shreds, false)
+        .map_err(|_| io::Error::other("replay blockstore rejected shreds"))?;
+    if !blockstore.is_full(slot) {
+        return Err(io::Error::other("replay blockstore has an incomplete slot"));
+    }
+    println!("{}", json!({"slot": slot, "parent_slot": parent, "replay_input": "complete",
+        "finality": "unverified", "execution_metadata": null}));
+    Ok(())
+}
 
 pub(super) fn atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some((root,limit)) = NATIVE_DISK_LIMIT.get() {
@@ -20,9 +136,14 @@ pub(super) fn atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     File::open(path.parent().ok_or_else(invalid)?)?.sync_all()
 }
 pub(super) fn raw(path: &Path) -> io::Result<Vec<u8>> {
-    let mut file = OpenOptions::new().read(true).custom_flags(0x20000).open(path)?;
-    if file.metadata()?.len() > 2048 { return Err(invalid()); }
-    let mut bytes = Vec::new(); file.read_to_end(&mut bytes)?; Ok(bytes)
+    let file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > 2048 { return Err(invalid()); }
+    let mut bytes = Vec::new();
+    file.take(2049).read_to_end(&mut bytes)?;
+    if bytes.len() > 2048 { return Err(invalid()); }
+    Ok(bytes)
 }
 pub(super) fn checked(bytes: Vec<u8>, slot: u64, version: u16, leader: &Pubkey, max: u32) -> io::Result<Shred> {
     let shred = checked_any(bytes,slot,version,leader,max)?;
@@ -84,6 +205,7 @@ pub(super) fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, 
     let mut group = Vec::new();
     let mut transactions = Vec::new();
     let mut signatures = Vec::new();
+    let mut components = Vec::new();
     let mut parent = None;
     for shred in shreds.values() {
         let shred_parent = shred.parent().map_err(|_|invalid())?;
@@ -93,13 +215,27 @@ pub(super) fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, 
         if shred.data_complete() {
             let payload = Shredder::deshred(group.drain(..)).map_err(|_|invalid())?;
             let component: BlockComponent = wincode::deserialize(&payload).map_err(|_|invalid())?;
-            if let BlockComponent::EntryBatch(entries) = component {
-                for entry in entries {
-                    for tx in entry.transactions {
-                        signatures.push(tx.signatures.first().ok_or_else(invalid)?.to_string());
-                        transactions.push(serde_json::to_value(&tx).map_err(|_|invalid())?);
+            match component {
+                BlockComponent::EntryBatch(entries) => {
+                    let mut batch = Vec::with_capacity(entries.len());
+                    for entry in entries {
+                        let first = transactions.len();
+                        for tx in entry.transactions {
+                            signatures.push(tx.signatures.first().ok_or_else(invalid)?.to_string());
+                            transactions.push(serde_json::to_value(&tx).map_err(|_|invalid())?);
+                        }
+                        batch.push(json!({
+                            "num_hashes": entry.num_hashes, "hash": entry.hash.to_string(),
+                            "first_transaction": first, "transaction_count": transactions.len() - first,
+                        }));
                     }
+                    components.push(json!({"kind": "entry_batch", "entries": batch}));
                 }
+                // Preserve the exact wire marker, including any candidate
+                // certificate, for a verifier with trusted epoch stake state.
+                BlockComponent::BlockMarker(_) => components.push(json!({
+                    "kind": "block_marker", "wire_bytes": payload,
+                })),
             }
         }
     }
@@ -107,6 +243,7 @@ pub(super) fn reconstruct(dir: &Path, slot: u64, version: u16, leader: &Pubkey, 
     result["parent_slot"] = json!(parent);
     result["transaction_signatures"] = json!(signatures);
     result["ordered_transactions"] = json!(transactions);
+    result["replay_components"] = json!(components);
     result["reconstructed"] = json!(true);
     // Immutable evidence first; checkpoint advancement happens only after this fsync.
     atomic_file(&dir.join("handoff.json"),serde_json::to_vec(&result).map_err(|_|invalid())?.as_slice())?;
@@ -167,6 +304,7 @@ pub fn acquire(config_path: &Path, dir: &Path) -> io::Result<()> {
             let mut report = reconstruct(&dir.join(slot.to_string()),*slot,version,leader,max)?;
             if let Some(object) = report.as_object_mut() {
                 object.remove("ordered_transactions"); object.remove("transaction_signatures");
+                object.remove("replay_components");
             }
             reports.push(report);
         }
@@ -238,6 +376,25 @@ pub(super) mod reconstruction_tests {
     use super::*;
     use solana_entry::entry::Entry;
     use solana_ledger::shred::{ProcessShredsStats, ReedSolomonCache};
+
+    #[test]
+    fn verifies_poh_against_parent_and_terminal_hashes_without_granting_finality() {
+        let parent = Hash::default();
+        let entry = Entry::new(&parent, 1, vec![]);
+        let anchor = json!({"schema":"freya-trusted-poh-anchor-v1","slot":42,"parent_slot":41,
+            "parent_entry_hash":parent.to_string(),"terminal_entry_hash":entry.hash.to_string()});
+        let mut record = json!({"schema":"freya-native-slot-v1","slot":42,"parent_slot":41,
+            "reconstructed":true,"conflict":false,"ordered_transactions":[],
+            "replay_components":[{"kind":"entry_batch","entries":[{
+                "num_hashes":entry.num_hashes,"hash":entry.hash.to_string(),
+                "first_transaction":0,"transaction_count":0}]}]});
+        let report = verify_entry_chain(&record, &anchor).unwrap();
+        assert_eq!(report["finality"], "unverified");
+        record["replay_components"][0]["entries"][0]["hash"] = json!(parent.to_string());
+        assert!(verify_entry_chain(&record, &anchor).is_err());
+        record["replay_components"][0]["entries"][0]["num_hashes"] = json!(16_000_001);
+        assert!(verify_entry_chain(&record, &anchor).is_err());
+    }
     pub(crate) fn fixture() -> (Keypair,Vec<Shred>) {
         let key=Keypair::new();
         let component=BlockComponent::EntryBatch(vec![Entry{num_hashes:1,hash:Default::default(),transactions:vec![]}]);
@@ -251,12 +408,38 @@ pub(super) mod reconstruction_tests {
         let suffix=if shred.is_data(){"shred"}else{"coding"};
         atomic_file(&dir.join(format!("{}.{suffix}",shred.index())),shred.payload().as_ref()).unwrap();
     }
+    #[test]
+    fn exports_complete_signed_slot_to_new_replay_blockstore() {
+        let (leader, shreds) = fixture();
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("shreds");
+        fs::create_dir(&input).unwrap();
+        let config = root.path().join("anchor.json");
+        fs::write(&config, json!({"slot":42,"parent_slot":41,"shred_version":7,
+            "leader":leader.pubkey().to_string()}).to_string()).unwrap();
+        let ledger = root.path().join("ledger");
+        assert!(export_replay_ledger(&config, &input, &ledger).is_err());
+        assert!(!ledger.exists());
+        for shred in shreds.iter().filter(|shred| shred.is_data()) {
+            put(&input, shred);
+        }
+        export_replay_ledger(&config, &input, &ledger).unwrap();
+        assert!(export_replay_ledger(&config, &input, &ledger).is_err());
+        let blockstore = solana_ledger::blockstore::Blockstore::open(&ledger).unwrap();
+        assert!(blockstore.is_full(42));
+    }
     #[test] fn complete_data_reconstructs_without_receipts() {
         let (key,shreds)=fixture();let dir=tempfile::tempdir().unwrap();
         for shred in shreds.iter().filter(|s|s.is_data()){put(dir.path(),shred);}
         let report=reconstruct(dir.path(),42,7,&key.pubkey(),4096).unwrap();
         assert_eq!(report["reconstructed"],true);assert_eq!(report["execution_metadata"],Value::Null);
         assert_eq!(report["parent_slot"],41);
+        assert_eq!(report["replay_components"], json!([{
+            "kind":"entry_batch","entries":[{
+                "num_hashes":1,"hash":Entry::default().hash.to_string(),
+                "first_transaction":0,"transaction_count":0
+            }]
+        }]));
     }
     #[test] fn missing_data_stays_quarantined_then_recovers_from_parity() {
         let (key,shreds)=fixture();let dir=tempfile::tempdir().unwrap();

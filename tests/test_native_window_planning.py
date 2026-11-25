@@ -112,7 +112,15 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(json.loads(self.output.read_text())['start'], 0)
 
     def test_recent_start_selects_a_small_finalized_window(self):
-        prepare(Path('unused'), self.output, recent=True)
+        call = self.rpc.call.side_effect
+        self.rpc.call.side_effect = lambda method, params: (
+            100 if method == 'getBlockTime' else call(method, params)
+        )
+        with patch('prepare_native_window.time.time', return_value=131), self.assertRaisesRegex(ValueError, 'timestamp'):
+            prepare(Path('unused'), self.output, recent=True)
+        self.assertFalse(self.output.exists())
+        with patch('prepare_native_window.time.time', return_value=110):
+            prepare(Path('unused'), self.output, recent=True)
         window = json.loads(self.output.read_text())
         self.assertEqual((window['start'], window['end']), (7, 10))
         self.rpc.call.assert_any_call('getSlotLeaders', [7, 4])

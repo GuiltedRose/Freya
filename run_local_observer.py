@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from onchain_ingest import IndexRpc, Ingester, archive_backfill_config, follow
 from onchain_store import EventStore
 from onchain_candles import CandleEngine
-from sync_policy import initialize_store
+from run_onchain_indexer import bootstrap_start
 
 
 def local_endpoint(endpoint):
@@ -64,9 +64,13 @@ def main():
     for market in markets:
         engine.watch(market['mint'], market['pool'])
     ingester = Ingester(store, [make_rpc(e) for e in endpoints], config.get('reviewed_program_versions'),
-                        decoder=decoder,oracle=config.get('oracle'),archive_backfill=archive_backfill_config(config))
+                        decoder=decoder,oracle=config.get('oracle'),archive_backfill=archive_backfill_config(config),
+                        selective_recent=config.get('selective_recent', False))
     try:
-        start = initialize_store(store, args.start_slot)
+        recent = config.get('selective_recent', False)
+        if recent and args.start_slot is not None:
+            parser.error('Selective recent sync chooses its own finalized start')
+        start = bootstrap_start(store, ingester.endpoints, args.start_slot, recent=recent)
         results = follow(ingester, start, args.batch_slots) if args.loop else [ingester.step(start, args.batch_slots)]
         for result in results:
             result.update(mode='local_replay_node_bridge', independent_feed_proven=False,

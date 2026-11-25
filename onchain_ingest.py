@@ -16,6 +16,7 @@ from provider_limits import BUDGET, ProviderBackoff, ProviderBudget
 from pump_narratives import NoRedirect
 from wallet_watch import MAINNET, PublicRpcError
 from onchain_decode import Decoder
+from onchain_store import FinalizedBlockRejected
 from sync_policy import initial_slot, initialize_store, validate_resume, history_available, GENESIS_SLOT
 
 READ_METHODS = {'getGenesisHash', 'getSlot', 'getBlocks', 'getBlock', 'getSlotLeaders', 'getClusterNodes',
@@ -238,7 +239,7 @@ def archive_backfill_config(config):
 
 class Ingester:
     def __init__(self, store, endpoints, versions=None, decoder=None, oracle=None, native_handoff=None,
-                 archive_backfill=None):
+                 archive_backfill=None, selective_recent=False):
         if not endpoints:
             raise ValueError('At least one explicitly authorized RPC required')
         self.store, self.endpoints = store, endpoints
@@ -246,6 +247,9 @@ class Ingester:
         self.versions = versions or {}
         self.oracle = oracle
         self.native_handoff = native_handoff
+        self.selective_recent = selective_recent
+        if selective_recent and (archive_backfill or native_handoff or store.retain_blocks):
+            raise ValueError('Selective recent ingestion requires a separate index without full-block retention')
         self.archive_backfill = archive_backfill
         self.archive_rpc = self.live_rpc = None
         if archive_backfill is not None:
@@ -260,6 +264,46 @@ class Ingester:
     def deployments(self, rpc):
         """Read upgradeable-loader ProgramData, without assuming today's IDL is historical."""
         return read_program_deployments(rpc,self.decoder.specs)
+
+    def selective_receipts(self, rpc, block, slot):
+        """Resolve only candidate receipts, retaining their original positions."""
+        from solders.pubkey import Pubkey
+        from solders.signature import Signature
+        receipts = [None] * len(block['transactions'])
+        seen = set()
+        try:
+            for index, row in enumerate(block['transactions']):
+                transaction = row['transaction']
+                signatures = transaction['signatures']
+                signature = str(Signature.from_string(signatures[0]))
+                keys = [str(Pubkey.from_string(key['pubkey'])) for key in transaction['accountKeys']]
+                account_meta = row['meta']
+                if (not keys or signature in seen or not isinstance(account_meta, dict)
+                        or 'err' not in account_meta
+                        or any(not isinstance(account_meta.get(field), list) or len(account_meta[field]) != len(keys)
+                               for field in ('preBalances', 'postBalances'))):
+                    raise ValueError('Incomplete accounts manifest')
+                seen.add(signature)
+                if not self.decoder.specs.keys() & set(keys):
+                    continue
+                receipt = rpc.call('getTransaction', [signature, {
+                    'commitment': 'finalized', 'encoding': 'json', 'maxSupportedTransactionVersion': 1,
+                }])
+                if not receipt or type(receipt.get('slot')) is not int or receipt['slot'] != slot:
+                    raise ValueError('Receipt slot mismatch')
+                meta = receipt['meta']
+                full = receipt['transaction']
+                loaded = meta.get('loadedAddresses', {})
+                full_keys = full['message']['accountKeys'] + loaded.get('writable', []) + loaded.get('readonly', [])
+                if (full['signatures'] != signatures or full_keys != keys
+                        or meta['err'] != account_meta['err'] or receipt.get('version') != row.get('version')):
+                    raise ValueError('Receipt disagrees with finalized accounts manifest')
+                receipts[index] = {key: value for key, value in receipt.items() if key not in ('slot', 'blockTime')}
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
+            if isinstance(error, SourceAccessBlocked) or getattr(error, 'rpc_code', None) is not None or getattr(error, 'http_status', None) is not None:
+                raise
+            raise FinalizedBlockRejected('Incomplete or inconsistent selective finalized receipt') from error
+        return {**block, 'transactions': receipts, '_indexer_receipt_scope': 'program_accounts_only'}
 
     def version_issues(self, slot, deployments):
         issues = []
@@ -323,12 +367,16 @@ class Ingester:
                 limit = min(finalized, archive_through) if archive_through is not None else finalized
                 end = min(scan + count - 1, limit)
                 if end < scan:
+                    if self.store.required_finalized_blocks(start, start + count - 1):
+                        raise FinalizedBlockRejected('Backup head has not reached rejected blocks')
                     status = 'caught_up' if start>finalized else 'unresolved_history'
                     return self.record_progress(finalized, sampled_at, initial, started, status)
                 self.store.history_request(rpc.source,start,scan,end)
 
                 options={'commitment':'finalized','encoding':'json','transactionDetails':'full',
                          'maxSupportedTransactionVersion':1,'rewards':False}
+                if self.selective_recent:
+                    options['transactionDetails'] = 'accounts'
                 first=rpc.call('getFirstAvailableBlock',[])
                 if type(first) is not int or not 0<=first<2**63-1:raise RpcEvidenceError('Invalid history floor')
                 floor_block=None
@@ -347,28 +395,41 @@ class Ingester:
                 # Archive blocks without usable events do not need live loader reads.
                 deployments = self.deployments(state_rpc) if archive_through is None else None
                 slots = rpc.call('getBlocks', [max(scan,GENESIS_SLOT+1), end, {'commitment': 'finalized'}]) if end>GENESIS_SLOT else []
-                if not isinstance(slots, list) or slots != sorted(set(slots)) or any(
-                        type(slot) is not int or not max(scan,GENESIS_SLOT+1) <= slot <= end for slot in slots):
+                if not isinstance(slots, list) or any(
+                        type(slot) is not int or not max(scan,GENESIS_SLOT+1) <= slot <= end for slot in slots
+                        ) or slots != sorted(set(slots)):
                     raise ValueError('Invalid finalized slot manifest')
+                if self.store.required_finalized_blocks(start, end) - set(slots):
+                    raise FinalizedBlockRejected('Backup manifest does not cover rejected produced blocks')
                 first=rpc.call('getFirstAvailableBlock',[])
                 if type(first) is not int or not 0<=first<2**63-1:raise RpcEvidenceError('Invalid history floor')
                 if not history_available(start,first) and not (floor_block is not None and first<=floor_slot):
                     raise RpcHistoryUnavailable(rpc.source)
+                self.store.require_finalized_blocks(slots)
                 next_slot = start
                 batch_size=getattr(rpc,'block_batch_size',1)
-                options={'commitment':'finalized','encoding':'json','transactionDetails':'full',
-                         'maxSupportedTransactionVersion':1,'rewards':False}
                 for offset in range(0,len(slots),batch_size):
                     selected=slots[offset:offset+batch_size]
-                    blocks=(rpc.call_blocks(selected,options) if len(selected)>1 else
-                            [floor_block if floor_block is not None and selected[0]==floor_slot else rpc.call('getBlock',[selected[0],options])])
-                    if len(blocks)!=len(selected):raise RpcEvidenceError('Incomplete block batch')
+                    try:
+                        blocks=(rpc.call_blocks(selected,options) if len(selected)>1 else
+                                [floor_block if floor_block is not None and selected[0]==floor_slot else rpc.call('getBlock',[selected[0],options])])
+                    except RpcEvidenceError as error:
+                        if getattr(error, 'rpc_code', None) is not None:
+                            raise
+                        raise FinalizedBlockRejected('Invalid finalized block response') from error
+                    if len(blocks)!=len(selected):
+                        raise FinalizedBlockRejected('Incomplete finalized block batch')
                     for slot,block in zip(selected,blocks):
-                        if not block or not isinstance(block.get('transactions'), list):
-                            raise ValueError('Missing finalized block; durable prefix preserved')
+                        if not isinstance(block, dict) or not isinstance(block.get('transactions'), list):
+                            raise FinalizedBlockRejected('Missing finalized block; durable prefix preserved')
                         if archive_through is not None and 'blockTime' not in block:
                             # Old Faithful omits the field when its archive has no timestamp.
                             block = {**block, 'blockTime': None}
+                        if ('blockTime' not in block or not isinstance(block.get('blockhash'), str)
+                                or not isinstance(block.get('previousBlockhash'), str)):
+                            raise FinalizedBlockRejected('Incomplete finalized block header')
+                        if self.selective_recent:
+                            block = self.selective_receipts(rpc, block, slot)
                         if self.native_handoff is not None:
                             from native_handoff import reconcile
                             block['_native_reconciliation'] = reconcile(self.native_handoff, slot, block)
@@ -376,6 +437,8 @@ class Ingester:
                         if block.get('blockTime') is None:
                             issues.append('Historical block time unavailable; time-based use quarantined')
                         for tx_index, tx in enumerate(block['transactions']):
+                            if self.selective_recent and tx is None:
+                                continue
                             try:
                                 found, errors = self.decoder.transaction(tx, slot, tx_index, block['blockTime'])
                             except (ValueError, KeyError, TypeError, IndexError) as error:
@@ -419,7 +482,8 @@ class Ingester:
                     # A real head observation is useful even when throttling
                     # prevented the first block commit. Never invent a new head.
                     self.record_progress(finalized,sampled_at,initial,started,'partial')
-                if not isinstance(error,ConnectionError):raise
+                if not isinstance(error, (FinalizedBlockRejected, ConnectionError)):
+                    raise
                 print(json.dumps({'status':'rpc_source_unavailable','source_id':rpc.source,
                                   'category':getattr(error,'category','transport_unavailable'),
                                   'next_source_id':endpoints[index+1].source if index+1<len(endpoints) else None,

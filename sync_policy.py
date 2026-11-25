@@ -30,6 +30,11 @@ def history_available(start, floor):
     return floor <= max(start, GENESIS_SLOT+1)
 
 
+def validate_recent_block_time(stamp, now):
+    if type(stamp) is not int or not 0 <= now - stamp <= 30:
+        raise ValueError('Recent sync requires a finalized head timestamp within the last 30 seconds')
+
+
 def initialize_store(store, requested=None):
     """Persist a requested boundary, without representing it as committed data."""
     with store.connect() as db:

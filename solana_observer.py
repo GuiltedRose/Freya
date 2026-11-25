@@ -85,10 +85,12 @@ def prepare(config, database, resume=False):
         endpoint={**endpoint,'stream_sources':[dict(row) for row in stream_endpoints]}
     return Ingester(store,clients,config.get('reviewed_program_versions'),
                     decoder=decoder,oracle=config.get('oracle'),
-                    native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill),endpoint,candles
+                    native_handoff=config.get('native_handoff'), archive_backfill=archive_backfill,
+                    selective_recent=config.get('selective_recent', False)),endpoint,candles
 
 
 async def observe(config, database, start_slot=None, resume=False, batch=8, interval=5, max_cycles=None, *, recent=False):
+    recent = recent or config.get('selective_recent', False)
     if not 1<=batch<=64 or not 1<=interval<=3600 or max_cycles is not None and not 1<=max_cycles<=10000:
         raise ValueError('Invalid bounded observer settings')
     if start_slot is not None and (type(start_slot) is not int or start_slot<0):

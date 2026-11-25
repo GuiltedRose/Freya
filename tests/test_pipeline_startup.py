@@ -178,13 +178,22 @@ class OwnershipTests(unittest.TestCase):
                 bootstrap_start(store, [rpc], recent=True)
             self.assertIsNone(store.next_slot())
             rpc.reset_mock()
-            rpc.call.return_value = 71
-            self.assertEqual(bootstrap_start(store, [rpc], recent=True), 71)
+            rpc.call.side_effect = [71, 100]
+            with patch('run_onchain_indexer.time.time', return_value=131), self.assertRaisesRegex(ValueError, 'timestamp'):
+                bootstrap_start(store, [rpc], recent=True)
+            self.assertIsNone(store.next_slot())
+            rpc.reset_mock()
+            rpc.call.side_effect = [71, 100]
+            with patch('run_onchain_indexer.time.time', return_value=110):
+                self.assertEqual(bootstrap_start(store, [rpc], recent=True), 71)
             rpc.validate.assert_called_once_with()
-            rpc.call.assert_called_once_with('getSlot', [{'commitment': 'finalized'}])
+            self.assertEqual(rpc.call.call_args_list, [
+                unittest.mock.call('getSlot', [{'commitment': 'finalized'}]),
+                unittest.mock.call('getBlockTime', [71]),
+            ])
             self.assertIsNone(store.metrics()['committed_next_slot'])
             self.assertIsNone(bootstrap_start(store, [rpc], recent=True))
-            self.assertEqual(rpc.call.call_count, 1)
+            self.assertEqual(rpc.call.call_count, 2)
 
 
 class LiveManagementTests(unittest.TestCase):

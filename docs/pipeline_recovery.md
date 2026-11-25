@@ -81,7 +81,8 @@ Point the monolith's crypto-bot flake input at this reviewed source and import i
   or automatic state migration is needed. Existing compatible state may be resumed
   only with exactly matching initial inventory and rules.
 * For the bot, leave `startSlot` unset and use `syncFrom = "recent"` to start a
-  new index at the reviewed RPC's finalized head. Use a separate index directory
+  new index at the reviewed RPC's finalized head. The head must have a timestamp
+  within the last 30 seconds. Use a separate index directory
   if a historical checkpoint already exists. The headless runner exposes the
   same choice as `--sync-from recent`. When changing index directories, point
   `providerLedger` or `CRYPTO_BOT_PROVIDER_LIMITS` at the existing shared
@@ -174,6 +175,32 @@ visible source outages with retained positions, restart continuity, and honest
 training/qualification status. No test result demonstrates profitability.
 
 ## Recovery and rollback
+
+For a lightweight recent index, set `"selective_recent": true` in a separate
+indexer configuration and start with `--sync-from recent`. Configure the
+reviewed private RPC as an isolated Rust loopback source. The RPC must serve
+current finalized slots, accounts-only blocks, full transaction receipts, and
+loader and oracle accounts. Freya matches each selected receipt to its block
+slot, signature, version, status and ordered account list. An incomplete or
+conflicting receipt leaves the cursor available for retry. The mode indexes
+only the configured decoder programs and cannot be used with full-block
+retention or historical archive replay. Qualify the source and measure the
+request rate before enabling paper.
+
+For recent sync with redundancy, list the reviewed private RPC endpoints in
+primary-to-backup order in the indexer configuration. Each must have a distinct
+source ID, serve finalized block receipts and loader accounts, and pass its
+existing network boundary checks. Add no public endpoint to a private-only
+configuration. All endpoints use the retained provider ledger.
+
+When a finalized block is missing, malformed, or conflicts with the committed
+parent, the indexer can try the next reviewed endpoint from the saved cursor.
+Previously reported produced slots remain required across restarts. A backup
+that omits one cannot turn it into a skip. Check the journal for
+`finalized_block_rejected`, `next_source_id`, and the checkpoint. Permission
+denials, rate limits and decoder quarantine continue to use their existing
+handling. Archived and native-reconciliation evidence requirements still
+apply when those modes are configured.
 
 ### Decoder upgrade and feed checks
 

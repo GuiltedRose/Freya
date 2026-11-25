@@ -12,7 +12,7 @@ import threading
 import sqlite3
 import stat
 from functools import wraps
-from sync_policy import initial_slot, history_available, GENESIS_SLOT, GENESIS_HASH
+from sync_policy import initial_slot, history_available, validate_recent_block_time, GENESIS_SLOT, GENESIS_HASH
 
 
 class PlanningDeferred(RuntimeError):
@@ -108,7 +108,7 @@ def planning_error(error):
             ('ValueError','PermissionError','FileNotFoundError','ConnectionError','SourceAccessBlocked',
              'ProviderBackoff','RpcEvidenceError','TimeoutError','RuntimeError') else 'PlannerError'}
     method = getattr(error, 'freya_rpc_method', None) or getattr(error, 'rpc_method', None)
-    if method in ('getBlock','getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
+    if method in ('getBlock','getBlockTime','getGenesisHash','getSlot','getSlotLeaders','getBlocks','getFirstAvailableBlock','getClusterNodes'):
         record['rpc_method']=method
     if method == 'getSlotLeaders' and getattr(error, 'rpc_reason', None) == 'leader_schedule_unavailable':
         record['rpc_reason'] = 'leader_schedule_unavailable'
@@ -359,6 +359,7 @@ def _prepare(config_path, output, start, progress, *, recent=False):
         if type(head) is not int or not 0 <= head < 2**63:
             raise ValueError('Invalid finalized head')
         if recent and start is None:
+            validate_recent_block_time(call('finalized_head', 'getBlockTime', [head]), time.time())
             start = max(GENESIS_SLOT, head - 3)
         start = initial_slot(requested=start)
         if type(start) is int and start > head:

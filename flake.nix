@@ -130,6 +130,16 @@
             version = "4.3.0";
             rustPlatform = nodePkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
           };
+          agave-replay = let
+            nodePkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
+            toolchain = nodePkgs.rust-bin.stable."1.97.1".minimal;
+          in import ./nix/agave-package.nix {
+            pkgs = nodePkgs;
+            src = agave-source;
+            version = "4.3.0";
+            replayOnly = true;
+            rustPlatform = nodePkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
+          };
           native-peer = let
             nodePkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
             toolchain = nodePkgs.rust-bin.stable."1.97.1".minimal;

@@ -6,6 +6,68 @@ Agave repair protocols. A reviewed RPC provider supplies mainnet identity, final
 slot manifests, leader schedules, shred-version claims and execution receipts.
 Reconstruction does not establish transaction success, independent replay or
 consensus finality. Native observations remain quarantined until reconciliation.
+Reconstructed slots retain the ordered entry batches, their hashes and
+transaction offsets, and the original wire bytes of block markers in
+`handoff.json`. Replay can use those entries without reconstructing their
+boundaries from a flat transaction list. A retained marker may contain a
+candidate finalization certificate. Verifying it requires trusted epoch
+stake state, and producing execution receipts requires replay from a trusted
+account-state checkpoint.
+
+To check a retained slot's PoH against independently trusted entry hashes,
+run `freya-node --peer verify-poh ANCHOR.json SLOT_DIRECTORY`. The anchor
+uses schema `freya-trusted-poh-anchor-v1` with integer `slot` and
+`parent_slot`, and base58 `parent_entry_hash` and `terminal_entry_hash`
+fields. The command reads the handoff without opening sockets or changing
+state. It checks every entry in order under a work cap and reports
+`finality: unverified`. Values copied from the handoff itself are not an
+independent anchor.
+
+For the offline recent replay test, stage a trusted full snapshot of the
+target slot's parent, its genesis binary, and the complete target-slot
+shreds. Prepare an owner-only `freya-recent-replay-v1` anchor with
+`slot`, `parent_slot`, `shred_version`, `leader`, `genesis_sha256`,
+`snapshot_sha256`, and `expected_bank_hash` from reviewed evidence.
+
+On Monolith, set the input variables to absolute paths. Choose a new absolute
+path for `NEW_REPLAY_DIRECTORY` on a private scratch filesystem with room
+for the compressed copy, unpacked accounts, and replay ledger. Bubblewrap
+must be on PATH with user namespaces enabled.
+
+```bash
+set -e
+command -v bwrap
+df -h -- "$(dirname -- "$NEW_REPLAY_DIRECTORY")"
+nix develop .#native-rpc --command python -m unittest discover -s tests -p test_replay_recent_slot.py
+node=$(nix build --no-link --print-out-paths .#native-node)
+replay=$(nix build --no-link --print-out-paths .#agave-replay)
+systemd-run --user --unit=freya-recent-replay --wait --collect \
+  --setenv="PATH=$PATH" \
+  --working-directory="$PWD" "$(command -v nix)" develop .#native-rpc \
+  --command python replay_recent_slot.py \
+  --anchor "$ANCHOR" --snapshot "$SNAPSHOT" --genesis "$GENESIS_BIN" \
+  --shreds "$SLOT_DIRECTORY" --work-dir "$NEW_REPLAY_DIRECTORY" \
+  --node "$node/bin/freya-node" --ledger-tool "$replay/bin/agave-ledger-tool"
+```
+
+The runner uses an offline namespace,
+limits memory and duration, and refuses an existing work directory. It
+checks staged inputs against the reviewed SHA-256 digests, imports one
+complete leader-signed slot, and asks Agave to verify replay and store
+extended receipt metadata in the new blockstore. It accepts only the exact
+target slot and reviewed bank hash, then checks the exported transactions
+for complete execution metadata before publishing `receipts.json`.
+The work directory holds the scratch
+ledger and logs for diagnosis. A matching bank hash is a replay result.
+Paper admission still requires independently verified finality and current
+receipts and account state from a live producer.
+
+Monitor the job with `journalctl --user -u freya-recent-replay -f`. A successful
+run exits zero and publishes `receipts.json` in the specified work directory.
+For recovery or rollback, stop the isolated job with
+`systemctl --user stop freya-recent-replay`. Keep the scratch logs and use a
+fresh work directory for a retry. This job requires no pipeline configuration
+change or deployment rollback.
 
 ## Implemented path
 
